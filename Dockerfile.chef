@@ -1,5 +1,5 @@
 # Multi-stage Dockerfile using cargo-chef for optimal caching
-# This is the FASTEST build option - recommended for Render
+# This is the FASTEST build option - use this if you want maximum speed
 
 FROM rust:1.76-slim as chef
 WORKDIR /app

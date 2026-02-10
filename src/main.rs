@@ -16,8 +16,14 @@ async fn main() {
     let app = Router::new()
         .nest("/api", routes::api_routes());
 
-    let addr: SocketAddr = std::env::var("BIND_ADDRESS")
-        .unwrap_or_else(|_| "127.0.0.1:3000".to_string())
+    // Render uses PORT env var, fallback to BIND_ADDRESS or default
+    let port = std::env::var("PORT")
+        .ok()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(3000);
+    let host = std::env::var("HOST")
+        .unwrap_or_else(|_| "0.0.0.0".to_string());
+    let addr: SocketAddr = format!("{}:{}", host, port)
         .parse()
         .expect("Invalid address");
     println!("Listening on {}", addr);

@@ -1,0 +1,19 @@
+# Render Blueprint Configuration
+# This enables native Rust builds (no Docker) - often faster and simpler
+
+services:
+  - type: web
+    name: senseifi-backend
+    env: rust
+    buildCommand: cargo build --release
+    startCommand: ./target/release/backend
+    envVars:
+      - key: PORT
+        sync: false  # Render automatically sets this
+      - key: HOST
+        value: 0.0.0.0
+      - key: RUST_LOG
+        value: info
+    healthCheckPath: /api/hello
+    # Uncomment and set if you need a database or other services
+    # plan: starter  # or free, standard, pro, etc.
