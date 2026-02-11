@@ -1,0 +1,75 @@
+use crate::db::DbPool;
+use crate::models::wallet::Wallet;
+use sqlx::Error;
+
+pub struct WalletRepository;
+
+impl WalletRepository {
+    pub async fn create_wallet(
+        pool: &DbPool,
+        address: &str,
+        chain_id: i64,
+        wallet_type: &str,
+    ) -> Result<Wallet, Error> {
+        let wallet = sqlx::query_as::<_, Wallet>(
+            r#"
+            INSERT INTO wallets (address, chain_id, wallet_type, connected_at, is_active)
+            VALUES ($1, $2, $3, NOW(), true)
+            ON CONFLICT (address) 
+            DO UPDATE SET 
+                chain_id = EXCLUDED.chain_id,
+                wallet_type = EXCLUDED.wallet_type,
+                is_active = true,
+                updated_at = NOW()
+            RETURNING *
+            "#,
+        )
+        .bind(address)
+        .bind(chain_id)
+        .bind(wallet_type)
+        .fetch_one(pool)
+        .await?;
+
+        Ok(wallet)
+    }
+
+    pub async fn get_wallet_by_address(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<Option<Wallet>, Error> {
+        let wallet = sqlx::query_as::<_, Wallet>(
+            "SELECT * FROM wallets WHERE address = $1",
+        )
+        .bind(address)
+        .fetch_optional(pool)
+        .await?;
+
+        Ok(wallet)
+    }
+
+    pub async fn update_wallet_status(
+        pool: &DbPool,
+        address: &str,
+        is_active: bool,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            "UPDATE wallets SET is_active = $1, updated_at = NOW() WHERE address = $2",
+        )
+        .bind(is_active)
+        .bind(address)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    pub async fn get_all_active_wallets(pool: &DbPool) -> Result<Vec<Wallet>, Error> {
+        let wallets = sqlx::query_as::<_, Wallet>(
+            "SELECT * FROM wallets WHERE is_active = true ORDER BY connected_at DESC",
+        )
+        .fetch_all(pool)
+        .await?;
+
+        Ok(wallets)
+    }
+}
