@@ -82,4 +82,28 @@ impl WalletService {
 
         Ok(WalletResponse::from(wallet))
     }
+
+    pub async fn disconnect_wallet(pool: &DbPool, address: &str) -> Result<(), Error> {
+        // Verify wallet exists
+        let wallet = WalletRepository::get_wallet_by_address(pool, address)
+            .await?
+            .ok_or(Error::RowNotFound)?;
+
+        // Set wallet to inactive
+        WalletRepository::update_wallet_status(pool, address, false).await?;
+
+        // Stop monitoring (set status to inactive)
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring 
+            SET status = 'inactive', updated_at = NOW() 
+            WHERE wallet_id = $1
+            "#,
+        )
+        .bind(wallet.id)
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
 }

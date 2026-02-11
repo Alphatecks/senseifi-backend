@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use serde_json::{json, Value};
@@ -16,7 +16,7 @@ pub fn wallet_routes() -> Router<DbPool> {
     Router::new()
         .route("/connect", post(connect_wallet))
         .route("/{address}/status", get(get_wallet_status))
-        .route("/{address}", get(get_wallet))
+        .route("/{address}", get(get_wallet).delete(disconnect_wallet))
 }
 
 async fn connect_wallet(
@@ -100,6 +100,35 @@ async fn get_wallet(
                 Json(json!({
                     "success": false,
                     "error": "Failed to get wallet"
+                })),
+            ))
+        }
+    }
+}
+
+async fn disconnect_wallet(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    match WalletService::disconnect_wallet(&pool, &address).await {
+        Ok(_) => Ok(Json(json!({
+            "success": true,
+            "message": "Wallet disconnected successfully"
+        }))),
+        Err(Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": "Wallet not found"
+            })),
+        )),
+        Err(e) => {
+            eprintln!("Error disconnecting wallet: {:?}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "success": false,
+                    "error": "Failed to disconnect wallet"
                 })),
             ))
         }
