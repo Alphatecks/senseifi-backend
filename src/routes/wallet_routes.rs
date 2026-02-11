@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::Json,
-    routing::{delete, get, post},
+    routing::{get, post, delete},
     Router,
 };
 use serde_json::{json, Value};
@@ -16,7 +16,8 @@ pub fn wallet_routes() -> Router<DbPool> {
     Router::new()
         .route("/connect", post(connect_wallet))
         .route("/{address}/status", get(get_wallet_status))
-        .route("/{address}", get(get_wallet).delete(disconnect_wallet))
+        .route("/{address}", get(get_wallet))
+        .route("/{address}", delete(disconnect_wallet))
 }
 
 async fn connect_wallet(

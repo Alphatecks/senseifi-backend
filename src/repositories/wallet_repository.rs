@@ -63,6 +63,7 @@ impl WalletRepository {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get_all_active_wallets(pool: &DbPool) -> Result<Vec<Wallet>, Error> {
         let wallets = sqlx::query_as::<_, Wallet>(
             "SELECT * FROM wallets WHERE is_active = true ORDER BY connected_at DESC",
