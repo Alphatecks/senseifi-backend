@@ -15,8 +15,8 @@ use crate::services::wallet_service::WalletService;
 pub fn wallet_routes() -> Router<DbPool> {
     Router::new()
         .route("/connect", post(connect_wallet))
-        .route("/:address/status", get(get_wallet_status))
-        .route("/:address", get(get_wallet))
+        .route("/{address}/status", get(get_wallet_status))
+        .route("/{address}", get(get_wallet))
 }
 
 async fn connect_wallet(
