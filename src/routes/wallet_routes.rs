@@ -37,12 +37,14 @@ async fn connect_wallet(
             })),
         )),
         Err(e) => {
-            eprintln!("Error connecting wallet: {:?}", e);
+            let err_msg = e.to_string();
+            eprintln!("Error connecting wallet: {}", err_msg);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "success": false,
-                    "error": "Failed to connect wallet"
+                    "error": "Failed to connect wallet",
+                    "detail": err_msg
                 })),
             ))
         }
