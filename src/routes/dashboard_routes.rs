@@ -13,14 +13,14 @@ use crate::services::senseiguard_service::SenseiguardService;
 
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
-        .route("/:address/summary", get(dashboard_summary))
-        .route("/:address/security-status", get(security_status))
-        .route("/:address/scan", post(run_full_scan))
-        .route("/:address/threats", get(list_threats))
-        .route("/:address/scans", get(list_scans))
-        .route("/:address/alerts", get(list_alerts))
-        .route("/:address/activity", get(list_activity))
-        .route("/:address/assets", get(list_assets))
+        .route("/{address}/summary", get(dashboard_summary))
+        .route("/{address}/security-status", get(security_status))
+        .route("/{address}/scan", post(run_full_scan))
+        .route("/{address}/threats", get(list_threats))
+        .route("/{address}/scans", get(list_scans))
+        .route("/{address}/alerts", get(list_alerts))
+        .route("/{address}/activity", get(list_activity))
+        .route("/{address}/assets", get(list_assets))
 }
 
 fn bad_address() -> (StatusCode, Json<Value>) {
