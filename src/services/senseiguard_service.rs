@@ -1,7 +1,7 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ActivityFeedItem, Alert, DashboardSummaryResponse, SecurityStatusResponse, SecurityScan,
-    Threat, WalletAsset,
+    ActivityFeedItem, Alert, DashboardSummaryResponse, FullScanReportResponse,
+    ScanObservation, SecurityStatusResponse, SecurityScan, Threat, WalletAsset,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -70,16 +70,111 @@ impl SenseiguardService {
         }
     }
 
-    pub async fn run_full_scan(pool: &DbPool, address: &str) -> Result<SecurityScan, Error> {
+    pub async fn run_full_scan(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<FullScanReportResponse, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
-        // Placeholder: compute score (e.g. from existing threats, alerts). AI/real scanner later.
-        let threats = SenseiguardRepository::count_threats_this_month(pool, wallet_id).await?;
-        let high_risk = SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
+
+        let threats_count = SenseiguardRepository::count_threats_this_month(pool, wallet_id).await?;
+        let high_risk_alerts =
+            SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
+        let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
+        let assets = SenseiguardRepository::list_assets(pool, wallet_id).await?;
+        let activity = SenseiguardRepository::list_activity(pool, wallet_id, 10).await?;
+
+        let mut observations: Vec<ScanObservation> = Vec::new();
+
+        observations.push(ScanObservation {
+            observation_type: "threats".to_string(),
+            title: "Threats this month".to_string(),
+            description: Some(format!("{} threat(s) detected in the last 30 days.", threats_count)),
+            severity: if threats_count > 0 {
+                Some("warning".to_string())
+            } else {
+                Some("ok".to_string())
+            },
+            detail: Some(serde_json::json!({ "count": threats_count })),
+        });
+
+        observations.push(ScanObservation {
+            observation_type: "alerts".to_string(),
+            title: "Unread alerts".to_string(),
+            description: Some(format!("{} unread alert(s), {} high risk.", unread_alerts, high_risk_alerts)),
+            severity: if high_risk_alerts > 0 {
+                Some("critical".to_string())
+            } else if unread_alerts > 0 {
+                Some("warning".to_string())
+            } else {
+                Some("ok".to_string())
+            },
+            detail: Some(serde_json::json!({
+                "unread": unread_alerts,
+                "high_risk": high_risk_alerts
+            })),
+        });
+
+        observations.push(ScanObservation {
+            observation_type: "assets".to_string(),
+            title: "Connected wallet assets".to_string(),
+            description: Some(format!("{} asset(s) tracked.", assets.len())),
+            severity: Some("info".to_string()),
+            detail: Some(serde_json::json!({
+                "count": assets.len(),
+                "symbols": assets.iter().map(|a| a.symbol.as_str()).collect::<Vec<_>>()
+            })),
+        });
+
+        let suspicious_activity = activity
+            .iter()
+            .filter(|a| {
+                a.activity_type == "suspicious_approval"
+                    || a.activity_type == "blocked_interaction"
+            })
+            .count();
+        observations.push(ScanObservation {
+            observation_type: "activity".to_string(),
+            title: "Recent activity".to_string(),
+            description: Some(format!(
+                "{} recent event(s). {} suspicious or blocked.",
+                activity.len(),
+                suspicious_activity
+            )),
+            severity: if suspicious_activity > 0 {
+                Some("warning".to_string())
+            } else {
+                Some("ok".to_string())
+            },
+            detail: Some(serde_json::json!({
+                "total_recent": activity.len(),
+                "suspicious_or_blocked": suspicious_activity
+            })),
+        });
+
+        observations.push(ScanObservation {
+            observation_type: "summary".to_string(),
+            title: "Scan complete".to_string(),
+            description: Some("Wallet scanned. No on-chain data fetched in this version; integrate RPC/indexer for full analysis.".to_string()),
+            severity: Some("info".to_string()),
+            detail: None,
+        });
+
         let score = (100i32)
-            .saturating_sub(threats as i32 * 5)
-            .saturating_sub(high_risk as i32 * 10)
+            .saturating_sub(threats_count as i32 * 5)
+            .saturating_sub(high_risk_alerts as i32 * 10)
             .clamp(0, 100);
-        SenseiguardRepository::create_scan(pool, wallet_id, score).await
+
+        let observations_json = serde_json::to_value(&observations).unwrap_or_else(|_| serde_json::json!([]));
+        let scan = SenseiguardRepository::create_scan(pool, wallet_id, score, &observations_json).await?;
+
+        Ok(FullScanReportResponse {
+            scan_id: scan.id,
+            wallet_id: scan.wallet_id,
+            score: scan.score,
+            status: scan.status,
+            scanned_at: scan.scanned_at,
+            observations,
+        })
     }
 
     pub async fn dashboard_summary(
@@ -112,6 +207,30 @@ impl SenseiguardService {
             alerts_trend_percent: -2.3,
             issues_this_month,
         })
+    }
+
+    pub async fn get_latest_scan_report(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<Option<FullScanReportResponse>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let scan = SenseiguardRepository::get_latest_scan(pool, wallet_id).await?;
+        let scan = match scan {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let observations: Vec<ScanObservation> = scan
+            .observations
+            .and_then(|v| serde_json::from_value(v).ok())
+            .unwrap_or_default();
+        Ok(Some(FullScanReportResponse {
+            scan_id: scan.id,
+            wallet_id: scan.wallet_id,
+            score: scan.score,
+            status: scan.status,
+            scanned_at: scan.scanned_at,
+            observations,
+        }))
     }
 
     pub async fn list_threats(

@@ -15,7 +15,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
-        .route("/{address}/scan", post(run_full_scan))
+        .route("/{address}/scan", post(run_full_scan).get(get_latest_scan_report))
         .route("/{address}/threats", get(list_threats))
         .route("/{address}/scans", get(list_scans))
         .route("/{address}/alerts", get(list_alerts))
@@ -93,12 +93,15 @@ async fn run_full_scan(
         return Err(bad_address());
     }
     match SenseiguardService::run_full_scan(&pool, &address).await {
-        Ok(scan) => Ok(Json(json!({
+        Ok(report) => Ok(Json(json!({
             "success": true,
             "data": {
-                "score": scan.score,
-                "status": scan.status,
-                "scanned_at": scan.scanned_at
+                "scan_id": report.scan_id,
+                "wallet_id": report.wallet_id,
+                "score": report.score,
+                "status": report.status,
+                "scanned_at": report.scanned_at,
+                "observations": report.observations
             }
         }))),
         Err(sqlx::Error::RowNotFound) => Err((
@@ -110,6 +113,43 @@ async fn run_full_scan(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to run scan" })),
+            ))
+        }
+    }
+}
+
+async fn get_latest_scan_report(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::get_latest_scan_report(&pool, &address).await {
+        Ok(Some(report)) => Ok(Json(json!({
+            "success": true,
+            "data": {
+                "scan_id": report.scan_id,
+                "wallet_id": report.wallet_id,
+                "score": report.score,
+                "status": report.status,
+                "scanned_at": report.scanned_at,
+                "observations": report.observations
+            }
+        }))),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "No scan found for this wallet. Run a full scan first." })),
+        )),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("get_latest_scan_report: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to get scan report" })),
             ))
         }
     }

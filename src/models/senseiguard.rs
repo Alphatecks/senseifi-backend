@@ -11,6 +11,32 @@ pub struct SecurityScan {
     pub status: String,
     pub scanned_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub observations: Option<serde_json::Value>,
+}
+
+/// Single item in a scan report (what was observed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanObservation {
+    pub observation_type: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<serde_json::Value>,
+}
+
+/// Response for run full scan: scan metadata + list of observations.
+#[derive(Debug, Serialize)]
+pub struct FullScanReportResponse {
+    pub scan_id: Uuid,
+    pub wallet_id: Uuid,
+    pub score: i32,
+    pub status: String,
+    pub scanned_at: DateTime<Utc>,
+    pub observations: Vec<ScanObservation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

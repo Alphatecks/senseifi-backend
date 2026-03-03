@@ -11,14 +11,19 @@ pub struct SenseiguardRepository;
 impl SenseiguardRepository {
     pub async fn get_latest_scan(pool: &DbPool, wallet_id: Uuid) -> Result<Option<SecurityScan>, Error> {
         sqlx::query_as(
-            "SELECT * FROM security_scans WHERE wallet_id = $1 ORDER BY scanned_at DESC LIMIT 1",
+            "SELECT id, wallet_id, score, status, scanned_at, created_at, COALESCE(observations, '[]'::jsonb) as observations FROM security_scans WHERE wallet_id = $1 ORDER BY scanned_at DESC LIMIT 1",
         )
         .bind(wallet_id)
         .fetch_optional(pool)
         .await
     }
 
-    pub async fn create_scan(pool: &DbPool, wallet_id: Uuid, score: i32) -> Result<SecurityScan, Error> {
+    pub async fn create_scan(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        score: i32,
+        observations: &serde_json::Value,
+    ) -> Result<SecurityScan, Error> {
         let status = match score {
             0..=39 => "weak",
             40..=69 => "moderate",
@@ -26,14 +31,15 @@ impl SenseiguardRepository {
         };
         let row = sqlx::query_as(
             r#"
-            INSERT INTO security_scans (wallet_id, score, status, scanned_at)
-            VALUES ($1, $2, $3, NOW())
-            RETURNING *
+            INSERT INTO security_scans (wallet_id, score, status, scanned_at, observations)
+            VALUES ($1, $2, $3, NOW(), $4)
+            RETURNING id, wallet_id, score, status, scanned_at, created_at, observations
             "#,
         )
         .bind(wallet_id)
         .bind(score)
         .bind(status)
+        .bind(observations)
         .fetch_one(pool)
         .await?;
 
