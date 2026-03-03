@@ -153,13 +153,13 @@ impl SenseiguardRepository {
     }
 
     pub async fn get_wallet_issues_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i32, Error> {
-        let row: (Option<i32>,) = sqlx::query_as(
-            "SELECT issues_this_month FROM wallet_monitoring WHERE wallet_id = $1",
+        let row = sqlx::query_as(
+            "SELECT COALESCE(issues_this_month, 0) FROM wallet_monitoring WHERE wallet_id = $1",
         )
         .bind(wallet_id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?;
-        Ok(row.0.unwrap_or(0))
+        Ok(row.map(|r: (i32,)| r.0).unwrap_or(0))
     }
 
     pub async fn list_assets(pool: &DbPool, wallet_id: Uuid) -> Result<Vec<WalletAsset>, Error> {
