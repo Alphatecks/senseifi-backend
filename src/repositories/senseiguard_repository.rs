@@ -163,20 +163,22 @@ impl SenseiguardRepository {
     }
 
     pub async fn list_assets(pool: &DbPool, wallet_id: Uuid) -> Result<Vec<WalletAsset>, Error> {
-        sqlx::query_as("SELECT * FROM wallet_assets WHERE wallet_id = $1 ORDER BY usd_value DESC")
-            .bind(wallet_id)
-            .fetch_all(pool)
-            .await
+        sqlx::query_as(
+            "SELECT id, wallet_id, symbol, name, balance, usd_value::float8, change_percent::float8, created_at, updated_at FROM wallet_assets WHERE wallet_id = $1 ORDER BY usd_value DESC",
+        )
+        .bind(wallet_id)
+        .fetch_all(pool)
+        .await
     }
 
     pub async fn total_asset_usd(pool: &DbPool, wallet_id: Uuid) -> Result<f64, Error> {
-        let row: (Option<f64>,) = sqlx::query_as(
-            "SELECT COALESCE(SUM(usd_value), 0) FROM wallet_assets WHERE wallet_id = $1",
+        let row = sqlx::query_as(
+            "SELECT COALESCE(SUM(usd_value), 0)::float8 FROM wallet_assets WHERE wallet_id = $1",
         )
         .bind(wallet_id)
-        .fetch_one(pool)
+        .fetch_optional(pool)
         .await?;
-        Ok(row.0.unwrap_or(0.0))
+        Ok(row.map(|r: (f64,)| r.0).unwrap_or(0.0))
     }
 
     pub async fn upsert_asset(

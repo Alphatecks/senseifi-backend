@@ -50,7 +50,7 @@ async fn dashboard_summary(
             Json(json!({ "success": false, "error": "Wallet not found" })),
         )),
         Err(e) => {
-            eprintln!("dashboard_summary: {}", e);
+            eprintln!("dashboard_summary error: {:?}", e);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to load dashboard" })),

@@ -53,26 +53,31 @@ impl WalletService {
     }
 
     pub async fn start_monitoring(pool: &DbPool, address: &str) -> Result<(), Error> {
-        // Get wallet to ensure it exists
         let wallet = WalletRepository::get_wallet_by_address(pool, address)
             .await?
             .ok_or(Error::RowNotFound)?;
 
-        // Create or update monitoring record
-        sqlx::query(
+        let updated = sqlx::query(
             r#"
-            INSERT INTO wallet_monitoring (wallet_id, status, last_checked)
-            VALUES ($1, 'active', NOW())
-            ON CONFLICT (wallet_id) 
-            DO UPDATE SET 
-                status = 'active',
-                last_checked = NOW(),
-                updated_at = NOW()
+            UPDATE wallet_monitoring SET status = 'active', last_checked = NOW(), updated_at = NOW()
+            WHERE wallet_id = $1
             "#,
         )
         .bind(wallet.id)
         .execute(pool)
         .await?;
+
+        if updated.rows_affected() == 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO wallet_monitoring (wallet_id, status, last_checked)
+                VALUES ($1, 'active', NOW())
+                "#,
+            )
+            .bind(wallet.id)
+            .execute(pool)
+            .await?;
+        }
 
         Ok(())
     }
