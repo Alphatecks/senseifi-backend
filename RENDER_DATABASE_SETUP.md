@@ -33,6 +33,11 @@
 postgresql://senseifi_user:password123@dpg-xxxxx-a.singapore-postgres.render.com/senseifi_db
 ```
 
+## Security (production)
+
+- Set **ALLOWED_ORIGINS** on the web service to your frontend URL(s), e.g. `https://yourapp.onrender.com` (comma-separated for multiple). If unset, only localhost origins are allowed.
+- See **SECURITY.md** for rate limiting, headers, and auth recommendations.
+
 ## Important Notes
 
 - Use **Internal Database URL** (not External) for better performance
