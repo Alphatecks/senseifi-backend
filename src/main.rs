@@ -89,9 +89,10 @@ async fn main() {
         governor_limiter.retain_recent();
     });
 
+    // Layer order: last added = outermost. CORS must be outermost so every response
+    // (including 429 from rate limit, 404, 5xx) gets CORS headers.
     let app = Router::new()
         .nest("/api", routes::api_routes(pool))
-        .layer(cors)
         .layer(GovernorLayer::new(governor_conf))
         .layer(RequestBodyLimitLayer::new(256 * 1024)) // 256 KiB max body
         .layer(SetResponseHeaderLayer::overriding(
@@ -105,7 +106,8 @@ async fn main() {
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("referrer-policy"),
             HeaderValue::from_static("strict-origin-when-cross-origin"),
-        ));
+        ))
+        .layer(cors);
 
     let port = std::env::var("PORT")
         .ok()
