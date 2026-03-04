@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
     Router,
@@ -8,6 +8,7 @@ use axum::{
 use serde_json::{json, Value};
 
 use crate::db::DbPool;
+use crate::models::senseiguard::IngestActivityRequest;
 use crate::models::wallet::is_valid_eth_address;
 use crate::services::senseiguard_service::SenseiguardService;
 
@@ -19,7 +20,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/{address}/threats", get(list_threats))
         .route("/{address}/scans", get(list_scans))
         .route("/{address}/alerts", get(list_alerts))
-        .route("/{address}/activity", get(list_activity))
+        .route("/{address}/activity", get(list_activity).post(ingest_activity))
         .route("/{address}/assets", get(list_assets))
 }
 
@@ -271,6 +272,55 @@ async fn list_activity(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list activity" })),
+            ))
+        }
+    }
+}
+
+async fn ingest_activity(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<IngestActivityRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    if let Ok(secret) = std::env::var("INGEST_SECRET") {
+        let token = headers
+            .get("x-ingest-token")
+            .and_then(|v: &http::HeaderValue| v.to_str().ok())
+            .unwrap_or("");
+        if token != secret {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "success": false, "error": "Invalid or missing x-ingest-token" })),
+            ));
+        }
+    }
+    if body.activity_type.is_empty() || body.title.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "error": "activity_type and title are required"
+            })),
+        ));
+    }
+    match SenseiguardService::ingest_activity(&pool, &address, body).await {
+        Ok(activity) => Ok(Json(json!({
+            "success": true,
+            "data": activity
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("ingest_activity: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to ingest activity" })),
             ))
         }
     }

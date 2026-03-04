@@ -62,6 +62,24 @@ pub struct Alert {
     pub created_at: DateTime<Utc>,
 }
 
+/// Request body for ingesting a live activity (e.g. from chain indexer or security worker).
+#[derive(Debug, Deserialize)]
+pub struct IngestActivityRequest {
+    pub activity_type: String,
+    pub title: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+/// Activity types that match the Live Activity UI.
+pub mod activity_types {
+    pub const OUTGOING_TX: &str = "outgoing_tx";
+    pub const SUSPICIOUS_APPROVAL: &str = "suspicious_approval";
+    pub const BLOCKED_INTERACTION: &str = "blocked_interaction";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ActivityFeedItem {
     pub id: Uuid,

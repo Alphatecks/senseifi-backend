@@ -1,7 +1,8 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     ActivityFeedItem, Alert, DashboardSummaryResponse, FullScanReportResponse,
-    ScanObservation, SecurityStatusResponse, SecurityScan, Threat, WalletAsset,
+    IngestActivityRequest, ScanObservation, SecurityStatusResponse, SecurityScan, Threat,
+    WalletAsset,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -231,6 +232,23 @@ impl SenseiguardService {
             scanned_at: scan.scanned_at,
             observations,
         }))
+    }
+
+    pub async fn ingest_activity(
+        pool: &DbPool,
+        address: &str,
+        request: IngestActivityRequest,
+    ) -> Result<ActivityFeedItem, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::create_activity(
+            pool,
+            wallet_id,
+            &request.activity_type,
+            &request.title,
+            request.description.as_deref(),
+            request.metadata,
+        )
+        .await
     }
 
     pub async fn list_threats(
