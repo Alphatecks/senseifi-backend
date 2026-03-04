@@ -223,10 +223,25 @@ impl SenseiguardRepository {
         title: &str,
         source_contract: Option<&str>,
     ) -> Result<Threat, Error> {
+        Self::create_threat_with_surface(pool, wallet_id, severity, title, source_contract, None, None, None).await
+    }
+
+    /// Create a threat with surface and explanation (transaction lie detector pipeline).
+    pub async fn create_threat_with_surface(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        severity: &str,
+        title: &str,
+        source_contract: Option<&str>,
+        threat_type: Option<&str>,
+        surface: Option<&str>,
+        explanation: Option<&str>,
+    ) -> Result<Threat, Error> {
+        let risk_breakdown: Option<serde_json::Value> = None;
         sqlx::query_as(
             r#"
-            INSERT INTO threats (wallet_id, severity, title, source_contract, detected_at)
-            VALUES ($1, $2, $3, $4, NOW())
+            INSERT INTO threats (wallet_id, severity, title, source_contract, threat_type, surface, explanation, risk_breakdown, detected_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
             RETURNING *
             "#,
         )
@@ -234,6 +249,10 @@ impl SenseiguardRepository {
         .bind(severity)
         .bind(title)
         .bind(source_contract)
+        .bind(threat_type)
+        .bind(surface)
+        .bind(explanation)
+        .bind(risk_breakdown)
         .fetch_one(pool)
         .await
     }

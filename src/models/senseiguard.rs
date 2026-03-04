@@ -39,6 +39,24 @@ pub struct FullScanReportResponse {
     pub observations: Vec<ScanObservation>,
 }
 
+/// Surface where the threat was detected (see SENSEIGUARD_ARCHITECTURE.md).
+pub const SURFACE_WALLET_STATE: &str = "wallet_state";
+pub const SURFACE_TX_INTENT: &str = "tx_intent";
+pub const SURFACE_CONTRACT: &str = "contract";
+pub const SURFACE_OFF_CHAIN: &str = "off_chain";
+
+/// Threat types we detect and store for dashboard metrics.
+pub mod threat_types {
+    pub const MALICIOUS_TRANSACTION: &str = "malicious_transaction";
+    pub const PHISHING_INDICATOR: &str = "phishing_indicator";
+    pub const RISKY_TOKEN: &str = "risky_token";
+    pub const UNLIMITED_APPROVAL: &str = "unlimited_approval";
+    pub const SIGNATURE_PHISHING: &str = "signature_phishing";
+    pub const DRAINER_PATTERN: &str = "drainer_pattern";
+    pub const BEHAVIORAL_ANOMALY: &str = "behavioral_anomaly";
+    pub const FRONTEND_PHISHING: &str = "frontend_phishing";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Threat {
     pub id: Uuid,
@@ -48,6 +66,14 @@ pub struct Threat {
     pub source_contract: Option<String>,
     pub detected_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub threat_type: Option<String>,
+    #[serde(default)]
+    pub surface: Option<String>,
+    #[serde(default)]
+    pub explanation: Option<String>,
+    #[serde(default)]
+    pub risk_breakdown: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
