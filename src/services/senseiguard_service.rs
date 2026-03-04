@@ -291,4 +291,20 @@ impl SenseiguardService {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
         SenseiguardRepository::list_assets(pool, wallet_id).await
     }
+
+    /// Recent activity for all active wallets. Used when polling every 6s for live activity.
+    pub async fn recent_activity_all_wallets(
+        pool: &DbPool,
+        limit_per_wallet: i64,
+    ) -> Result<Vec<(String, Vec<ActivityFeedItem>)>, Error> {
+        let wallets = WalletRepository::get_all_active_wallets(pool).await?;
+        let mut out = Vec::with_capacity(wallets.len());
+        for w in wallets {
+            let activities = SenseiguardRepository::list_activity(pool, w.id, limit_per_wallet)
+                .await
+                .unwrap_or_default();
+            out.push((w.address, activities));
+        }
+        Ok(out)
+    }
 }

@@ -12,8 +12,18 @@ use crate::models::senseiguard::IngestActivityRequest;
 use crate::models::wallet::is_valid_eth_address;
 use crate::services::senseiguard_service::SenseiguardService;
 
+#[derive(Debug, serde::Deserialize)]
+struct RecentActivityQuery {
+    #[serde(default = "default_per_wallet")]
+    per_wallet: i64,
+}
+fn default_per_wallet() -> i64 {
+    20
+}
+
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
+        .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
         .route("/{address}/scan", post(run_full_scan).get(get_latest_scan_report))
@@ -244,6 +254,26 @@ async fn list_alerts(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list alerts" })),
+            ))
+        }
+    }
+}
+
+async fn recent_activity_all_wallets(
+    State(pool): State<DbPool>,
+    Query(q): Query<RecentActivityQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let per_wallet = q.per_wallet.clamp(1, 50);
+    match SenseiguardService::recent_activity_all_wallets(&pool, per_wallet).await {
+        Ok(list) => Ok(Json(json!({
+            "success": true,
+            "data": list.iter().map(|(addr, acts)| json!({ "address": addr, "activities": acts })).collect::<Vec<_>>()
+        }))),
+        Err(e) => {
+            eprintln!("recent_activity_all_wallets: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load recent activity" })),
             ))
         }
     }
