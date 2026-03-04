@@ -31,64 +31,52 @@ async fn main() {
 
     println!("Database connected and migrations completed");
 
-    // CORS: allow frontend origins. Set ALLOWED_ORIGINS (comma-separated) in production, e.g.:
-    //   https://your-app.vercel.app,https://senseiguard.example.com
-    // Dev fallback includes http://localhost:3000 and localhost:5173.
-    // CorsLayer handles OPTIONS preflight (returns 204 + CORS headers).
-    let cors = match std::env::var("ALLOWED_ORIGINS") {
-        Ok(origins) => {
-            let list: Vec<HeaderValue> = origins
-                .split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .map(|s| HeaderValue::try_from(s).unwrap_or_else(|_| HeaderValue::from_static("")))
-                .filter(|v| !v.as_bytes().is_empty())
-                .collect();
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(list))
-                .allow_methods([
-                    http::Method::GET,
-                    http::Method::POST,
-                    http::Method::PUT,
-                    http::Method::DELETE,
-                    http::Method::OPTIONS,
-                ])
-                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
-                .max_age(Duration::from_secs(86400))
+    // CORS: allow frontend origins. Always include localhost so local dev works.
+    // Set ALLOWED_ORIGINS (comma-separated) for production, e.g. https://your-app.vercel.app
+    let dev_origins: [&str; 4] = [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ];
+    let mut list: Vec<HeaderValue> = dev_origins
+        .iter()
+        .map(|s| HeaderValue::from_static(s))
+        .collect();
+    if let Ok(origins) = std::env::var("ALLOWED_ORIGINS") {
+        for s in origins.split(',') {
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            if let Ok(v) = HeaderValue::try_from(s) {
+                if !v.as_bytes().is_empty() && !list.iter().any(|e| e.as_bytes() == v.as_bytes()) {
+                    list.push(v);
+                }
+            }
         }
-        Err(_) => {
-            let list: Vec<HeaderValue> = [
-                "http://localhost:3000",
-                "http://127.0.0.1:3000",
-                "http://localhost:5173",
-                "http://127.0.0.1:5173",
-            ]
-            .iter()
-            .map(|s| HeaderValue::from_static(s))
-            .collect();
-            CorsLayer::new()
-                .allow_origin(AllowOrigin::list(list))
-                .allow_methods([
-                    http::Method::GET,
-                    http::Method::POST,
-                    http::Method::PUT,
-                    http::Method::DELETE,
-                    http::Method::OPTIONS,
-                ])
-                .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
-                .max_age(Duration::from_secs(86400))
-        }
-    };
+    }
+    let cors = CorsLayer::new()
+        .allow_origin(AllowOrigin::list(list))
+        .allow_methods([
+            http::Method::GET,
+            http::Method::POST,
+            http::Method::PUT,
+            http::Method::DELETE,
+            http::Method::OPTIONS,
+        ])
+        .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+        .max_age(Duration::from_secs(86400));
 
-    // Rate limiting: per-IP, configurable via env
+    // Rate limiting: per-IP. Higher defaults so dashboard polling (e.g. activity every few sec) doesn't 429.
     let rate_per_sec = std::env::var("RATE_LIMIT_PER_SEC")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(10);
+        .unwrap_or(30);
     let burst = std::env::var("RATE_LIMIT_BURST")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(20);
+        .unwrap_or(60);
     let governor_conf = GovernorConfigBuilder::default()
         .per_second(rate_per_sec)
         .burst_size(burst)
