@@ -31,7 +31,10 @@ async fn main() {
 
     println!("Database connected and migrations completed");
 
-    // CORS: restrict to allowed origins when ALLOWED_ORIGINS is set
+    // CORS: allow frontend origins. Set ALLOWED_ORIGINS (comma-separated) in production, e.g.:
+    //   https://your-app.vercel.app,https://senseiguard.example.com
+    // Dev fallback includes http://localhost:3000 and localhost:5173.
+    // CorsLayer handles OPTIONS preflight (returns 204 + CORS headers).
     let cors = match std::env::var("ALLOWED_ORIGINS") {
         Ok(origins) => {
             let list: Vec<HeaderValue> = origins
@@ -43,11 +46,17 @@ async fn main() {
                 .collect();
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(list))
-                .allow_methods([http::Method::GET, http::Method::POST, http::Method::DELETE, http::Method::OPTIONS])
+                .allow_methods([
+                    http::Method::GET,
+                    http::Method::POST,
+                    http::Method::PUT,
+                    http::Method::DELETE,
+                    http::Method::OPTIONS,
+                ])
                 .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+                .max_age(Duration::from_secs(86400))
         }
         Err(_) => {
-            // Dev fallback: allow same-origin and common localhost origins
             let list: Vec<HeaderValue> = [
                 "http://localhost:3000",
                 "http://127.0.0.1:3000",
@@ -59,8 +68,15 @@ async fn main() {
             .collect();
             CorsLayer::new()
                 .allow_origin(AllowOrigin::list(list))
-                .allow_methods([http::Method::GET, http::Method::POST, http::Method::DELETE, http::Method::OPTIONS])
+                .allow_methods([
+                    http::Method::GET,
+                    http::Method::POST,
+                    http::Method::PUT,
+                    http::Method::DELETE,
+                    http::Method::OPTIONS,
+                ])
                 .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+                .max_age(Duration::from_secs(86400))
         }
     };
 
