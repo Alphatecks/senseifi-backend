@@ -1,8 +1,8 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ActivityFeedItem, Alert, DashboardSummaryResponse, FullScanReportResponse,
-    IngestActivityRequest, ScanObservation, SecurityStatusResponse, SecurityScan, Threat,
-    WalletAsset,
+    threat_types, ActivityFeedItem, Alert, DashboardMetricsResponse, DashboardSummaryResponse,
+    FullScanReportResponse, IngestActivityRequest, MetricCard, ScanObservation,
+    SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard, WalletAsset,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -306,5 +306,110 @@ impl SenseiguardService {
             out.push((w.address, activities));
         }
         Ok(out)
+    }
+
+    /// Four dashboard metric cards: malicious tx, phishing, risky tokens, active threat level (this month + trend %).
+    pub async fn get_dashboard_metrics(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<DashboardMetricsResponse, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+
+        let (mal_this, mal_prev) = (
+            SenseiguardRepository::count_threats_by_type_this_month(
+                pool,
+                wallet_id,
+                threat_types::MALICIOUS_TRANSACTION,
+            )
+            .await?,
+            SenseiguardRepository::count_threats_by_type_previous_month(
+                pool,
+                wallet_id,
+                threat_types::MALICIOUS_TRANSACTION,
+            )
+            .await?,
+        );
+        let phish_this = SenseiguardRepository::count_threats_by_type_this_month(
+            pool,
+            wallet_id,
+            threat_types::PHISHING_INDICATOR,
+        )
+        .await?
+        + SenseiguardRepository::count_threats_by_type_this_month(
+            pool,
+            wallet_id,
+            threat_types::FRONTEND_PHISHING,
+        )
+        .await?;
+        let phish_prev = SenseiguardRepository::count_threats_by_type_previous_month(
+            pool,
+            wallet_id,
+            threat_types::PHISHING_INDICATOR,
+        )
+        .await?
+        + SenseiguardRepository::count_threats_by_type_previous_month(
+            pool,
+            wallet_id,
+            threat_types::FRONTEND_PHISHING,
+        )
+        .await?;
+        let (risk_this, risk_prev) = (
+            SenseiguardRepository::count_threats_by_type_this_month(
+                pool,
+                wallet_id,
+                threat_types::RISKY_TOKEN,
+            )
+            .await?,
+            SenseiguardRepository::count_threats_by_type_previous_month(
+                pool,
+                wallet_id,
+                threat_types::RISKY_TOKEN,
+            )
+            .await?,
+        );
+
+        let score: i32 = sqlx::query_as(
+            "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_optional(pool)
+        .await?
+        .map(|r: (i32,)| r.0)
+        .unwrap_or(0);
+
+        Ok(DashboardMetricsResponse {
+            malicious_transaction: MetricCard {
+                value: mal_this,
+                change_percent: change_percent(mal_this, mal_prev),
+            },
+            phishing_indicators: MetricCard {
+                value: phish_this,
+                change_percent: change_percent(phish_this, phish_prev),
+            },
+            risky_tokens: MetricCard {
+                value: risk_this,
+                change_percent: change_percent(risk_this, risk_prev),
+            },
+            active_threat_level: ThreatLevelCard {
+                value: score_to_level(score),
+                change_percent: 0.0, // no historical score stored yet
+            },
+        })
+    }
+}
+
+fn change_percent(this_month: i64, prev_month: i64) -> f64 {
+    if prev_month == 0 {
+        return 0.0;
+    }
+    let d = (this_month - prev_month) as f64 / prev_month as f64 * 100.0;
+    (d * 10.0).round() / 10.0
+}
+
+fn score_to_level(score: i32) -> String {
+    match score {
+        0..=33 => "High".to_string(),
+        34..=66 => "Medium".to_string(),
+        _ => "Low".to_string(),
     }
 }

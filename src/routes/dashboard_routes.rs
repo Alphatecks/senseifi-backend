@@ -24,6 +24,7 @@ fn default_per_wallet() -> i64 {
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/activity/recent", get(recent_activity_all_wallets))
+        .route("/{address}/metrics", get(dashboard_metrics))
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
         .route("/{address}/scan", post(run_full_scan).get(get_latest_scan_report))
@@ -42,6 +43,32 @@ fn bad_address() -> (StatusCode, Json<Value>) {
             "error": "Invalid wallet address format"
         })),
     )
+}
+
+async fn dashboard_metrics(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::get_dashboard_metrics(&pool, &address).await {
+        Ok(metrics) => Ok(Json(json!({
+            "success": true,
+            "data": metrics
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("dashboard_metrics: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load metrics" })),
+            ))
+        }
+    }
 }
 
 async fn dashboard_summary(

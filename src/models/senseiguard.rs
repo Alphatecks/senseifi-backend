@@ -153,6 +153,29 @@ pub struct DashboardSummaryResponse {
     pub issues_this_month: i32,
 }
 
+/// One metric card: value (count) + trend % (this month vs previous month).
+#[derive(Debug, Clone, Serialize)]
+pub struct MetricCard {
+    pub value: i64,
+    pub change_percent: f64,
+}
+
+/// Active threat level card: "Low" | "Medium" | "High" from security_score + trend %.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreatLevelCard {
+    pub value: String,
+    pub change_percent: f64,
+}
+
+/// Response for GET /api/dashboard/{address}/metrics (four cards on frontend).
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardMetricsResponse {
+    pub malicious_transaction: MetricCard,
+    pub phishing_indicators: MetricCard,
+    pub risky_tokens: MetricCard,
+    pub active_threat_level: ThreatLevelCard,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RunScanResponse {
     pub score: i32,

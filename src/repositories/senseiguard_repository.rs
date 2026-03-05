@@ -2,9 +2,16 @@ use crate::db::DbPool;
 use crate::models::senseiguard::{
     ActivityFeedItem, Alert, SecurityScan, Threat, WalletAsset,
 };
-use chrono::{DateTime, Utc};
+use chrono::{Datelike, DateTime, NaiveDate, Utc};
 use sqlx::Error;
 use uuid::Uuid;
+
+fn month_start_utc(dt: DateTime<Utc>) -> DateTime<Utc> {
+    NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|t| DateTime::from_naive_utc_and_offset(t, Utc))
+        .unwrap_or_else(|| dt)
+}
 
 pub struct SenseiguardRepository;
 
@@ -65,6 +72,53 @@ impl SenseiguardRepository {
         )
         .bind(wallet_id)
         .bind(start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Count threats by type in calendar month (start of month to now).
+    pub async fn count_threats_by_type_this_month(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_type: &str,
+    ) -> Result<i64, Error> {
+        let start = month_start_utc(Utc::now());
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threats WHERE wallet_id = $1 AND threat_type = $2 AND detected_at >= $3",
+        )
+        .bind(wallet_id)
+        .bind(threat_type)
+        .bind(start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Count threats by type in previous calendar month.
+    pub async fn count_threats_by_type_previous_month(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_type: &str,
+    ) -> Result<i64, Error> {
+        let now = Utc::now();
+        let this_start = month_start_utc(now);
+        let (prev_year, prev_month) = if now.month() == 1 {
+            (now.year() - 1, 12u32)
+        } else {
+            (now.year(), now.month() - 1)
+        };
+        let prev_start = NaiveDate::from_ymd_opt(prev_year as i32, prev_month, 1)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|t| DateTime::from_naive_utc_and_offset(t, Utc))
+            .unwrap_or(this_start);
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threats WHERE wallet_id = $1 AND threat_type = $2 AND detected_at >= $3 AND detected_at < $4",
+        )
+        .bind(wallet_id)
+        .bind(threat_type)
+        .bind(prev_start)
+        .bind(this_start)
         .fetch_one(pool)
         .await?;
         Ok(row.0)
