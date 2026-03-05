@@ -28,7 +28,7 @@ fn default_per_page() -> Option<u32> {
 
 pub fn wallet_routes() -> Router<DbPool> {
     Router::new()
-        .route("", get(list_connected_wallets))
+        .route("/", get(list_connected_wallets))
         .route("/connect", post(connect_wallet))
         .route("/{address}/status", get(get_wallet_status))
         .route("/{address}", get(get_wallet))
