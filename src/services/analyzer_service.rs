@@ -53,41 +53,54 @@ fn bytecode_has_delegatecall(code: &[u8]) -> bool {
 
 pub struct AnalyzerService;
 
+/// Result of one contract analysis (single Etherscan fetch).
+pub struct AnalysisResult {
+    pub owner_privileges: OwnerPrivileges,
+    pub dangerous_functions: Vec<String>,
+    /// True when ABI was fetched from Etherscan; false when using stub/fallback.
+    pub abi_from_etherscan: bool,
+}
+
 impl AnalyzerService {
-    /// Extract owner/admin privileges from ABI (and optionally bytecode). Uses Etherscan + RPC when configured.
-    pub async fn extract_owner_privileges(contract_address: &str) -> OwnerPrivileges {
+    /// Run analyzer with a single Etherscan fetch. Returns privileges, dangerous functions, and whether ABI was from Etherscan.
+    pub async fn analyze_contract(contract_address: &str) -> AnalysisResult {
         let (abi, _verified) = match etherscan::fetch_abi_and_verified(contract_address).await {
             Ok((a, v)) if !a.is_empty() => (a, v),
             Ok((_, _)) => {
-                tracing::info!("Analyzer: empty ABI for {}; using stub owner privileges", contract_address);
-                return Self::stub_owner_privileges();
+                tracing::info!("Analyzer: empty ABI for {} (contract not verified?); using stub", contract_address);
+                return AnalysisResult {
+                    owner_privileges: Self::stub_owner_privileges(),
+                    dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
+                    abi_from_etherscan: false,
+                };
             }
             Err(e) => {
-                tracing::warn!("Analyzer: Etherscan fetch failed for {}: {}; using stub owner privileges", contract_address, e);
-                return Self::stub_owner_privileges();
+                tracing::warn!("Analyzer: Etherscan fetch failed for {}: {}; using stub", contract_address, e);
+                return AnalysisResult {
+                    owner_privileges: Self::stub_owner_privileges(),
+                    dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
+                    abi_from_etherscan: false,
+                };
             }
         };
 
-        OwnerPrivileges {
+        let owner_privileges = OwnerPrivileges {
             mint: Some(abi_has_function(&abi, MINT_NAMES)),
             pause: Some(abi_has_function(&abi, PAUSE_NAMES)),
             upgradeable: Some(abi_has_function(&abi, UPGRADE_NAMES)),
             withdraw_liquidity: Some(abi_has_function(&abi, WITHDRAW_NAMES)),
             blacklist: Some(abi_has_function(&abi, BLACKLIST_NAMES)),
+        };
+        let dangerous_functions = Self::dangerous_functions_from_abi_impl(abi.clone(), contract_address.to_string()).await;
+        AnalysisResult {
+            owner_privileges,
+            dangerous_functions,
+            abi_from_etherscan: true,
         }
     }
 
-    /// Dangerous function names from ABI; plus "delegatecall" if bytecode contains DELEGATECALL.
-    pub async fn dangerous_functions(contract_address: &str) -> Vec<String> {
+    async fn dangerous_functions_from_abi_impl(abi: String, contract_address: String) -> Vec<String> {
         let mut out = Vec::new();
-        let abi = match etherscan::fetch_abi_and_verified(contract_address).await {
-            Ok((a, _)) if !a.is_empty() => a,
-            _ => {
-                tracing::info!("Analyzer: empty ABI or fetch failed for {}; using fallback dangerous_functions list", contract_address);
-                return vec!["delegatecall".to_string(), "setApprovalForAll".to_string()];
-            }
-        };
-
         #[derive(Debug, Deserialize)]
         struct AbiItem {
             name: Option<String>,
@@ -100,6 +113,7 @@ impl AnalyzerService {
             return out;
         };
         let abi_lower = abi.to_lowercase();
+        let contract_address = contract_address.as_str();
         for n in DANGEROUS_NAMES {
             if abi_lower.contains(n) {
                 let name = n
@@ -136,6 +150,16 @@ impl AnalyzerService {
             out.push("setApprovalForAll".to_string());
         }
         out
+    }
+
+    /// Extract owner/admin privileges from ABI (and optionally bytecode). Uses Etherscan + RPC when configured.
+    pub async fn extract_owner_privileges(contract_address: &str) -> OwnerPrivileges {
+        Self::analyze_contract(contract_address).await.owner_privileges
+    }
+
+    /// Dangerous function names from ABI; plus "delegatecall" if bytecode contains DELEGATECALL.
+    pub async fn dangerous_functions(contract_address: &str) -> Vec<String> {
+        Self::analyze_contract(contract_address).await.dangerous_functions
     }
 
     fn stub_owner_privileges() -> OwnerPrivileges {

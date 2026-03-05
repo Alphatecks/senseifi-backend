@@ -287,6 +287,9 @@ pub struct ScanDetailsPayload {
     pub user_anomaly_score: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rug_pull_probability: Option<String>, // "Low" | "Medium" | "High"
+    /// "etherscan" when ABI was fetched from chain explorer; "stub" when contract unverified or fetch failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub abi_source: Option<String>,
 }
 
 /// Smart Wallet Scanner: one scan result (trust score, risk flags, tokens, owner count).

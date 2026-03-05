@@ -11,11 +11,11 @@ Used to fetch contract ABI and whether the contract is verified.
 - **Get an API key**: [Etherscan → API-KEYs](https://etherscan.io/myapikey). Create an account, then add a key. Free tier: 3–5 calls/sec, 100k calls/day.
 - **Set**:
   - `ETHERSCAN_API_KEY` — your key (required for getabi; recommended for rate limits).
-  - `ETHERSCAN_BASE_URL` — optional. Default: `https://api.etherscan.io/api`. For other chains use:
+  - `ETHERSCAN_BASE_URL` — optional. Default: `https://api.etherscan.io/api` (Ethereum only). If you get NOTOK or stub data, the contract may be on another chain — set the URL and RPC for that chain:
+    - BSC: `https://api.bscscan.com/api`
     - Arbitrum: `https://api.arbiscan.io/api`
     - Base: `https://api.basescan.org/api`
     - Polygon: `https://api.polygonscan.com/api`
-    - BSC: `https://api.bscscan.com/api`
 
 Example `.env`:
 

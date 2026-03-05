@@ -96,6 +96,9 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
             tracing::info!("Etherscan: contract {} not verified; using empty ABI (stub data)", address);
             return Ok((String::new(), false));
         }
+        // Log why getabi didn't succeed so we can debug NOTOK / wrong chain / rate limit
+        let result_preview = body.result.chars().take(200).collect::<String>();
+        tracing::warn!("Etherscan getabi did not return ABI for {}: status={} message={} result_preview={:?}", address, body.status, body.message, result_preview);
     }
 
     // Fallback: getsourcecode (returns ABI + source; verified = SourceCode non-empty)
@@ -122,7 +125,14 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
         e.to_string()
     })?;
     if body.status != "1" {
-        return Err(body.message);
+        let reason = body.result.as_ref().and_then(|r| {
+            r.as_str()
+                .map(String::from)
+                .or_else(|| r.get("message").and_then(|m| m.as_str()).map(String::from))
+                .or_else(|| Some(r.to_string()))
+        }).unwrap_or_else(|| body.message.clone());
+        tracing::warn!("Etherscan getsourcecode NOTOK for {}: {} (check ETHERSCAN_BASE_URL if this is a non-Ethereum contract)", address, reason);
+        return Err(reason);
     }
     let item = first_result_item(body.result.as_ref());
     let abi = item

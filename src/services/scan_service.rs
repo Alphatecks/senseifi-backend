@@ -24,9 +24,11 @@ impl ScanService {
         let tokens_controlled: Vec<String> = vec!["ETH".into(), "USDC".into()];
         let token_controlled_str = tokens_controlled.join(", ");
 
-        // 1. Analyzer: owner privileges, dangerous functions (Etherscan + RPC when configured)
-        let owner_privileges = AnalyzerService::extract_owner_privileges(contract_address).await;
-        let dangerous_functions = AnalyzerService::dangerous_functions(contract_address).await;
+        // 1. Analyzer: single Etherscan fetch → owner privileges, dangerous functions, and whether ABI was real
+        let analysis = AnalyzerService::analyze_contract(contract_address).await;
+        let owner_privileges = analysis.owner_privileges;
+        let dangerous_functions = analysis.dangerous_functions;
+        let abi_source = if analysis.abi_from_etherscan { "etherscan" } else { "stub" };
 
         // 2. Simulation
         let simulation = SimulationService::simulate_contract(
@@ -93,6 +95,7 @@ impl ScanService {
             simulation: Some(sim_with_fns),
             owner_privileges: Some(owner_privileges.clone()),
             reputation: Some(reputation),
+            abi_source: Some(abi_source.to_string()),
             trend: Some(trend),
             risk_breakdown: Some(risk_breakdown),
             ai_summary: Some(ai_summary.clone()),
