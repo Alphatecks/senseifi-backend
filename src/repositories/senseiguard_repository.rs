@@ -1,7 +1,8 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ActivityFeedItem, Alert, ContractFingerprint, ContractScan, MonitoredTransaction, ScamReport,
-    SecurityScan, Threat, UserBlockedContract, UserContractWatchlist, WalletApproval, WalletAsset,
+    ActivityFeedItem, Alert, ContractFingerprint, ContractScan, MonitoredTransaction,
+    ProtectionAutoScan, ScamReport, SecurityScan, Threat, UserBlockedContract, UserContractWatchlist,
+    UserProtectionSettings, WalletApproval, WalletApprovalAlert, WalletAsset, WalletSecurityRule,
 };
 use chrono::{Datelike, DateTime, NaiveDate, Utc};
 use sqlx::Error;
@@ -634,5 +635,260 @@ impl SenseiguardRepository {
         .fetch_one(pool)
         .await?;
         Ok(row.0)
+    }
+
+    pub async fn get_protection_settings(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<Option<UserProtectionSettings>, Error> {
+        sqlx::query_as(
+            "SELECT wallet_address, auto_security_scan, high_risk_tx_warnings, new_approval_alerts, new_dapp_connection_alerts, auto_block_high_risk, COALESCE(emergency_lock, false) as emergency_lock, whitelisted_addresses, created_at, updated_at FROM user_protection_settings WHERE wallet_address = $1",
+        )
+        .bind(wallet_address)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn upsert_protection_settings(
+        pool: &DbPool,
+        wallet_address: &str,
+        auto_security_scan: bool,
+        high_risk_tx_warnings: bool,
+        new_approval_alerts: bool,
+        new_dapp_connection_alerts: bool,
+        auto_block_high_risk: bool,
+    ) -> Result<UserProtectionSettings, Error> {
+        Self::upsert_protection_settings_full(
+            pool,
+            wallet_address,
+            auto_security_scan,
+            high_risk_tx_warnings,
+            new_approval_alerts,
+            new_dapp_connection_alerts,
+            auto_block_high_risk,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Full upsert including emergency_lock and whitelisted_addresses.
+    pub async fn upsert_protection_settings_full(
+        pool: &DbPool,
+        wallet_address: &str,
+        auto_security_scan: bool,
+        high_risk_tx_warnings: bool,
+        new_approval_alerts: bool,
+        new_dapp_connection_alerts: bool,
+        auto_block_high_risk: bool,
+        emergency_lock: Option<bool>,
+        whitelisted_addresses: Option<serde_json::Value>,
+    ) -> Result<UserProtectionSettings, Error> {
+        let (em_lock, whitelist) = match (emergency_lock, whitelisted_addresses) {
+            (Some(el), Some(w)) => (el, w),
+            (Some(el), None) => (el, serde_json::json!([])),
+            (None, Some(w)) => (false, w),
+            (None, None) => {
+                let existing = Self::get_protection_settings(pool, wallet_address).await?;
+                match existing {
+                    Some(s) => (s.emergency_lock, s.whitelisted_addresses.unwrap_or(serde_json::json!([]))),
+                    None => (false, serde_json::json!([]))
+                }
+            }
+        };
+        sqlx::query_as(
+            r#"
+            INSERT INTO user_protection_settings (wallet_address, auto_security_scan, high_risk_tx_warnings, new_approval_alerts, new_dapp_connection_alerts, auto_block_high_risk, emergency_lock, whitelisted_addresses, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            ON CONFLICT (wallet_address) DO UPDATE SET
+                auto_security_scan = EXCLUDED.auto_security_scan,
+                high_risk_tx_warnings = EXCLUDED.high_risk_tx_warnings,
+                new_approval_alerts = EXCLUDED.new_approval_alerts,
+                new_dapp_connection_alerts = EXCLUDED.new_dapp_connection_alerts,
+                auto_block_high_risk = EXCLUDED.auto_block_high_risk,
+                emergency_lock = EXCLUDED.emergency_lock,
+                whitelisted_addresses = EXCLUDED.whitelisted_addresses,
+                updated_at = NOW()
+            RETURNING wallet_address, auto_security_scan, high_risk_tx_warnings, new_approval_alerts, new_dapp_connection_alerts, auto_block_high_risk, emergency_lock, whitelisted_addresses, created_at, updated_at
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(auto_security_scan)
+        .bind(high_risk_tx_warnings)
+        .bind(new_approval_alerts)
+        .bind(new_dapp_connection_alerts)
+        .bind(auto_block_high_risk)
+        .bind(em_lock)
+        .bind(whitelist)
+        .fetch_one(pool)
+        .await
+    }
+
+    // ---- Protection auto-scan (protection_auto_scan table) ----
+    pub async fn get_protection_auto_scan(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<Option<ProtectionAutoScan>, Error> {
+        sqlx::query_as(
+            "SELECT wallet_address, auto_scan_enabled, last_scan_at, scan_interval_seconds, updated_at FROM protection_auto_scan WHERE wallet_address = $1",
+        )
+        .bind(wallet_address)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn upsert_protection_auto_scan(
+        pool: &DbPool,
+        wallet_address: &str,
+        auto_scan_enabled: bool,
+        scan_interval_seconds: i32,
+    ) -> Result<ProtectionAutoScan, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO protection_auto_scan (wallet_address, auto_scan_enabled, scan_interval_seconds, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (wallet_address) DO UPDATE SET
+                auto_scan_enabled = EXCLUDED.auto_scan_enabled,
+                scan_interval_seconds = EXCLUDED.scan_interval_seconds,
+                updated_at = NOW()
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(auto_scan_enabled)
+        .bind(scan_interval_seconds)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn list_wallets_to_monitor(pool: &DbPool) -> Result<Vec<ProtectionAutoScan>, Error> {
+        sqlx::query_as(
+            "SELECT wallet_address, auto_scan_enabled, last_scan_at, scan_interval_seconds, updated_at FROM protection_auto_scan WHERE auto_scan_enabled = true",
+        )
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn update_auto_scan_last_scan_at(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<u64, Error> {
+        let r = sqlx::query(
+            "UPDATE protection_auto_scan SET last_scan_at = NOW(), updated_at = NOW() WHERE wallet_address = $1",
+        )
+        .bind(wallet_address)
+        .execute(pool)
+        .await?;
+        Ok(r.rows_affected())
+    }
+
+    // ---- Wallet approval alerts ----
+    pub async fn create_approval_alert(
+        pool: &DbPool,
+        wallet_address: &str,
+        token_address: Option<&str>,
+        spender_address: &str,
+        amount_raw: Option<&str>,
+        risk_score: i32,
+    ) -> Result<WalletApprovalAlert, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO wallet_approval_alerts (wallet_address, token_address, spender_address, amount_raw, risk_score)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(token_address)
+        .bind(spender_address)
+        .bind(amount_raw)
+        .bind(risk_score)
+        .fetch_one(pool)
+        .await
+    }
+
+    // ---- Wallet security rules ----
+    pub async fn create_security_rule(
+        pool: &DbPool,
+        wallet_address: &str,
+        rule_type: &str,
+        condition_json: &serde_json::Value,
+        action: &str,
+    ) -> Result<WalletSecurityRule, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO wallet_security_rules (wallet_address, rule_type, condition_json, action, enabled)
+            VALUES ($1, $2, $3, $4, true)
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(rule_type)
+        .bind(condition_json)
+        .bind(action)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn list_security_rules(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<Vec<WalletSecurityRule>, Error> {
+        sqlx::query_as(
+            "SELECT id, wallet_address, rule_type, condition_json, action, enabled, created_at FROM wallet_security_rules WHERE wallet_address = $1 ORDER BY created_at ASC",
+        )
+        .bind(wallet_address)
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn update_security_rule(
+        pool: &DbPool,
+        rule_id: Uuid,
+        wallet_address: &str,
+        enabled: Option<bool>,
+        condition_json: Option<&serde_json::Value>,
+        action: Option<&str>,
+    ) -> Result<Option<WalletSecurityRule>, Error> {
+        let current: Option<WalletSecurityRule> = sqlx::query_as(
+            "SELECT id, wallet_address, rule_type, condition_json, action, enabled, created_at FROM wallet_security_rules WHERE id = $1 AND wallet_address = $2",
+        )
+        .bind(rule_id)
+        .bind(wallet_address)
+        .fetch_optional(pool)
+        .await?;
+        let Some(rule) = current else {
+            return Ok(None);
+        };
+        let enabled = enabled.unwrap_or(rule.enabled);
+        let condition_json = condition_json.unwrap_or(&rule.condition_json);
+        let action = action.unwrap_or(&rule.action);
+        let updated: WalletSecurityRule = sqlx::query_as(
+            r#"
+            UPDATE wallet_security_rules SET enabled = $1, condition_json = $2, action = $3 WHERE id = $4 AND wallet_address = $5
+            RETURNING *
+            "#,
+        )
+        .bind(enabled)
+        .bind(condition_json)
+        .bind(action)
+        .bind(rule_id)
+        .bind(wallet_address)
+        .fetch_one(pool)
+        .await?;
+        Ok(Some(updated))
+    }
+
+    pub async fn delete_security_rule(
+        pool: &DbPool,
+        rule_id: Uuid,
+        wallet_address: &str,
+    ) -> Result<u64, Error> {
+        let r = sqlx::query("DELETE FROM wallet_security_rules WHERE id = $1 AND wallet_address = $2")
+            .bind(rule_id)
+            .bind(wallet_address)
+            .execute(pool)
+            .await?;
+        Ok(r.rows_affected())
     }
 }

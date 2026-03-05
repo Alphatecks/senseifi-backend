@@ -374,6 +374,66 @@ pub struct ReportScamRequest {
     pub reporter_wallet_address: Option<String>,
 }
 
+/// Protection Control UI: toggle state for the 5 switches (stored per wallet).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UserProtectionSettings {
+    pub wallet_address: String,
+    pub auto_security_scan: bool,
+    pub high_risk_tx_warnings: bool,
+    pub new_approval_alerts: bool,
+    pub new_dapp_connection_alerts: bool,
+    pub auto_block_high_risk: bool,
+    #[serde(default)]
+    pub emergency_lock: bool,
+    #[serde(default)]
+    pub whitelisted_addresses: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateProtectionSettingsRequest {
+    pub wallet_address: String,
+    #[serde(default)]
+    pub auto_security_scan: Option<bool>,
+    #[serde(default)]
+    pub high_risk_tx_warnings: Option<bool>,
+    #[serde(default)]
+    pub new_approval_alerts: Option<bool>,
+    #[serde(default)]
+    pub new_dapp_connection_alerts: Option<bool>,
+    #[serde(default)]
+    pub auto_block_high_risk: Option<bool>,
+    #[serde(default)]
+    pub emergency_lock: Option<bool>,
+    #[serde(default)]
+    pub whitelisted_addresses: Option<Vec<String>>,
+}
+
+/// Pre-sign transaction simulation request (from, to, data, value, chain_id).
+#[derive(Debug, Deserialize)]
+pub struct SimulateTxRequest {
+    pub wallet_address: String,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub chain_id: Option<i64>,
+}
+
+/// Pre-sign simulation result: risk level, expected loss, dangerous patterns.
+#[derive(Debug, Serialize)]
+pub struct SimulateTxResponse {
+    pub risk_level: String,
+    pub expected_token_loss: Option<String>,
+    pub hidden_internal_calls: u32,
+    pub dangerous_functions: Vec<String>,
+    pub should_warn: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct ContractFingerprint {
     pub id: Uuid,
@@ -391,4 +451,115 @@ pub struct RunScanResponse {
     pub score: i32,
     pub status: String,
     pub scanned_at: DateTime<Utc>,
+}
+
+// ---- Protection engine: transaction analyze, dApp check, rules, auto-scan ----
+
+/// Request for POST /api/transaction/analyze (pre-sign threat analysis).
+#[derive(Debug, Deserialize)]
+pub struct AnalyzeTxRequest {
+    pub wallet_address: String,
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub chain_id: Option<i64>,
+}
+
+/// Response: risk score, warning, recommended action; or skipped if toggle off.
+#[derive(Debug, Serialize)]
+pub struct AnalyzeTxResponse {
+    pub skipped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_score: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Request for POST /api/dapp/connection-check.
+#[derive(Debug, Deserialize)]
+pub struct DappConnectionCheckRequest {
+    pub wallet_address: String,
+    pub domain: String,
+}
+
+/// Response: risk score and phishing flag; or skipped if toggle off.
+#[derive(Debug, Serialize)]
+pub struct DappConnectionCheckResponse {
+    pub skipped: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_score: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phishing_risk: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// One row in protection_auto_scan (which addresses have Auto Security Scan on).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ProtectionAutoScan {
+    pub wallet_address: String,
+    pub auto_scan_enabled: bool,
+    pub last_scan_at: Option<DateTime<Utc>>,
+    pub scan_interval_seconds: i32,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// One approval alert (when New Approval Alerts is on).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WalletApprovalAlert {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub token_address: Option<String>,
+    pub spender_address: String,
+    pub amount_raw: Option<String>,
+    pub risk_score: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One custom security rule (block tx >$5k, block contract <24h, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WalletSecurityRule {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub rule_type: String,
+    pub condition_json: serde_json::Value,
+    pub action: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateSecurityRuleRequest {
+    pub wallet_address: String,
+    pub rule_type: String,
+    #[serde(default)]
+    pub condition_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateSecurityRuleRequest {
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub condition_json: Option<serde_json::Value>,
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
+/// Emergency lock: set/clear firewall mode and whitelist.
+#[derive(Debug, Deserialize)]
+pub struct EmergencyLockRequest {
+    pub wallet_address: String,
+    pub lock: bool,
+    #[serde(default)]
+    pub whitelisted_addresses: Option<Vec<String>>,
 }
