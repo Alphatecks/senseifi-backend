@@ -17,13 +17,8 @@ use crate::services::wallet_service::WalletService;
 
 #[derive(Debug, Deserialize)]
 struct ListWalletsQuery {
-    #[serde(default)]
-    page: Option<u32>,
-    #[serde(default = "default_per_page")]
-    per_page: Option<u32>,
-}
-fn default_per_page() -> Option<u32> {
-    Some(6)
+    /// Active account address: only this wallet is returned (the one used for security checks).
+    for_address: Option<String>,
 }
 
 pub fn wallet_routes() -> Router<DbPool> {
@@ -108,17 +103,32 @@ async fn list_connected_wallets(
     State(pool): State<DbPool>,
     Query(q): Query<ListWalletsQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let page = q.page.unwrap_or(1).max(1);
-    let per_page = q.per_page.unwrap_or(6).clamp(1, 50);
-    match WalletService::list_connected_wallets(&pool, page, per_page).await {
+    let address = match &q.for_address {
+        Some(a) if !a.is_empty() => a.as_str(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "error": "for_address is required (active account address used for security checks)"
+                })),
+            ));
+        }
+    };
+    if !is_valid_eth_address(address) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "error": "Invalid wallet address format"
+            })),
+        ));
+    }
+    match WalletService::list_connected_wallets_for_account(&pool, address).await {
         Ok((data, total)) => Ok(Json(json!({
             "success": true,
             "data": data,
-            "pagination": {
-                "page": page,
-                "per_page": per_page,
-                "total": total
-            }
+            "pagination": { "page": 1, "per_page": total.max(1), "total": total }
         }))),
         Err(e) => {
             eprintln!("list_connected_wallets: {:?}", e);

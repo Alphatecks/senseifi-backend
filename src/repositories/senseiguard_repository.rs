@@ -1,6 +1,6 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ActivityFeedItem, Alert, SecurityScan, Threat, WalletApproval, WalletAsset,
+    ActivityFeedItem, Alert, MonitoredTransaction, SecurityScan, Threat, WalletApproval, WalletAsset,
 };
 use chrono::{Datelike, DateTime, NaiveDate, Utc};
 use sqlx::Error;
@@ -255,6 +255,31 @@ impl SenseiguardRepository {
         .bind(wallet_id)
         .fetch_all(pool)
         .await
+    }
+
+    pub async fn list_transaction_monitoring_paginated(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<MonitoredTransaction>, i64), Error> {
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM transaction_monitoring WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        let offset = (page.saturating_sub(1) as i64) * (per_page as i64);
+        let limit = per_page as i64;
+        let rows = sqlx::query_as::<_, MonitoredTransaction>(
+            "SELECT * FROM transaction_monitoring WHERE wallet_id = $1 ORDER BY detected_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(wallet_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+        Ok((rows, total.0))
     }
 
     pub async fn total_asset_usd(pool: &DbPool, wallet_id: Uuid) -> Result<f64, Error> {

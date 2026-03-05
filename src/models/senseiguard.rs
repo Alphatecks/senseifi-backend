@@ -142,6 +142,17 @@ pub struct WalletApproval {
     pub created_at: DateTime<Utc>,
 }
 
+/// One row for Transaction monitoring UI: title (e.g. "Swap ETH → USDC") + risk level.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct MonitoredTransaction {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub title: String,
+    pub risk_level: String,
+    pub detected_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SecurityStatusResponse {
     pub score: i32,

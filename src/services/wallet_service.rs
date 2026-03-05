@@ -92,14 +92,12 @@ impl WalletService {
         Ok(WalletResponse::from(wallet))
     }
 
-    /// Paginated list for Connected Wallet UI: provider, currency, address per row.
-    pub async fn list_connected_wallets(
+    /// Connected Wallet list scoped to the active account (single address). Returns only the wallet for that address (0 or 1 row).
+    pub async fn list_connected_wallets_for_account(
         pool: &DbPool,
-        page: u32,
-        per_page: u32,
+        address: &str,
     ) -> Result<(Vec<ConnectedWalletItem>, i64), Error> {
-        let (wallets, total) =
-            WalletRepository::list_wallets_paginated(pool, page, per_page).await?;
+        let (wallets, total) = WalletRepository::list_wallets_for_address(pool, address).await?;
         let items = wallets
             .into_iter()
             .map(|w| ConnectedWalletItem {

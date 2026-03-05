@@ -1,8 +1,9 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActivityFeedItem, Alert, DashboardMetricsResponse, DashboardSummaryResponse,
-    FullScanReportResponse, IngestActivityRequest, MetricCard, ScanObservation,
-    SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset,
+    FullScanReportResponse, IngestActivityRequest, MetricCard, MonitoredTransaction,
+    ScanObservation, SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard,
+    WalletApproval, WalletAsset,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -310,6 +311,18 @@ impl SenseiguardService {
     pub async fn list_assets(pool: &DbPool, address: &str) -> Result<Vec<WalletAsset>, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
         SenseiguardRepository::list_assets(pool, wallet_id).await
+    }
+
+    /// Paginated list for Transaction monitoring UI: title + risk level per row.
+    pub async fn list_transaction_monitoring(
+        pool: &DbPool,
+        address: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<MonitoredTransaction>, i64), Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::list_transaction_monitoring_paginated(pool, wallet_id, page, per_page)
+            .await
     }
 
     /// Recent activity for all active wallets. Used when polling every 6s for live activity.

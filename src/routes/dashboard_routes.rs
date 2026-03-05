@@ -33,6 +33,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/{address}/alerts", get(list_alerts))
         .route("/{address}/activity", get(list_activity).post(ingest_activity))
         .route("/{address}/approvals", get(list_approvals))
+        .route("/{address}/transaction-monitoring", get(list_transaction_monitoring))
         .route("/{address}/assets", get(list_assets))
 }
 
@@ -214,6 +215,17 @@ fn default_approvals_limit() -> i64 {
     50
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct TransactionMonitoringQuery {
+    #[serde(default)]
+    page: Option<u32>,
+    #[serde(default = "default_tm_per_page")]
+    per_page: Option<u32>,
+}
+fn default_tm_per_page() -> Option<u32> {
+    Some(10)
+}
+
 async fn list_threats(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
@@ -342,6 +354,36 @@ async fn list_approvals(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list approvals" })),
+            ))
+        }
+    }
+}
+
+async fn list_transaction_monitoring(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<TransactionMonitoringQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(10).clamp(1, 50);
+    match SenseiguardService::list_transaction_monitoring(&pool, &address, page, per_page).await {
+        Ok((data, total)) => Ok(Json(json!({
+            "success": true,
+            "data": data,
+            "pagination": { "page": page, "per_page": per_page, "total": total }
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("list_transaction_monitoring: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to list transaction monitoring" })),
             ))
         }
     }

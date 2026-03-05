@@ -98,4 +98,22 @@ impl WalletRepository {
 
         Ok((wallets, total.0))
     }
+
+    /// List only the wallet(s) for the active account (by address). Returns 0 or 1 row; used for Connected Wallet UI scoped to current user.
+    pub async fn list_wallets_for_address(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<(Vec<Wallet>, i64), Error> {
+        let wallet = sqlx::query_as::<_, Wallet>(
+            "SELECT * FROM wallets WHERE address = $1 AND is_active = true",
+        )
+        .bind(address)
+        .fetch_optional(pool)
+        .await?;
+        let (list, total) = match wallet {
+            Some(w) => (vec![w], 1i64),
+            None => (vec![], 0i64),
+        };
+        Ok((list, total))
+    }
 }
