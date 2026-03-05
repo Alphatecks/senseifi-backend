@@ -1,10 +1,14 @@
 //! Etherscan API client: ABI and contract source/verification.
-//! Set ETHERSCAN_API_KEY and optionally ETHERSCAN_BASE_URL (default: https://api.etherscan.io/api).
+//! Uses Etherscan API V2 (https://api.etherscan.io/v2/api) with chainid. Set ETHERSCAN_API_KEY; optional ETHERSCAN_BASE_URL, ETHERSCAN_CHAIN_ID (default 1 = Ethereum).
 
 use serde::Deserialize;
 
 fn base_url() -> String {
-    std::env::var("ETHERSCAN_BASE_URL").unwrap_or_else(|_| "https://api.etherscan.io/api".to_string())
+    std::env::var("ETHERSCAN_BASE_URL").unwrap_or_else(|_| "https://api.etherscan.io/v2/api".to_string())
+}
+
+fn chain_id() -> String {
+    std::env::var("ETHERSCAN_CHAIN_ID").unwrap_or_else(|_| "1".to_string())
 }
 
 fn api_key() -> Option<String> {
@@ -66,10 +70,12 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Prefer getabi (returns ABI only)
+    // Prefer getabi (returns ABI only). V2 requires chainid.
+    let cid = chain_id();
     if key.is_some() {
-        tracing::info!("Etherscan getabi request for contract {}", address);
+        tracing::info!("Etherscan getabi request for contract {} (chainid={})", address, cid);
         let mut params = vec![
+            ("chainid", cid.as_str()),
             ("module", "contract"),
             ("action", "getabi"),
             ("address", address),
@@ -101,9 +107,11 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
         tracing::warn!("Etherscan getabi did not return ABI for {}: status={} message={} result_preview={:?}", address, body.status, body.message, result_preview);
     }
 
-    // Fallback: getsourcecode (returns ABI + source; verified = SourceCode non-empty)
-    tracing::info!("Etherscan getsourcecode request for contract {}", address);
+    // Fallback: getsourcecode (returns ABI + source; verified = SourceCode non-empty). V2 requires chainid.
+    let cid2 = chain_id();
+    tracing::info!("Etherscan getsourcecode request for contract {} (chainid={})", address, cid2);
     let mut params = vec![
+        ("chainid", cid2.as_str()),
         ("module", "contract"),
         ("action", "getsourcecode"),
         ("address", address),

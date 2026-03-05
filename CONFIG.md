@@ -6,22 +6,19 @@ To make the contract scanner **real** (ABI + bytecode analysis instead of stubs)
 
 ## 1. Etherscan (ABI + verification)
 
-Used to fetch contract ABI and whether the contract is verified.
+Used to fetch contract ABI and whether the contract is verified. **Uses Etherscan API V2** (V1 deprecated Aug 2025).
 
-- **Get an API key**: [Etherscan → API-KEYs](https://etherscan.io/myapikey). Create an account, then add a key. Free tier: 3–5 calls/sec, 100k calls/day.
+- **Get an API key**: [Etherscan API dashboard](https://etherscan.io/apidashboard). One key works for all [supported chains](https://docs.etherscan.io/supported-chains) with V2.
 - **Set**:
-  - `ETHERSCAN_API_KEY` — your key (required for getabi; recommended for rate limits).
-  - `ETHERSCAN_BASE_URL` — optional. Default: `https://api.etherscan.io/api` (Ethereum only). If you get NOTOK or stub data, the contract may be on another chain — set the URL and RPC for that chain:
-    - BSC: `https://api.bscscan.com/api`
-    - Arbitrum: `https://api.arbiscan.io/api`
-    - Base: `https://api.basescan.org/api`
-    - Polygon: `https://api.polygonscan.com/api`
+  - `ETHERSCAN_API_KEY` — your key (required).
+  - `ETHERSCAN_BASE_URL` — optional. Default: `https://api.etherscan.io/v2/api`.
+  - `ETHERSCAN_CHAIN_ID` — optional. Default: `1` (Ethereum). Use the chain ID for the network you scan, e.g. `56` BSC, `137` Polygon, `8453` Base, `42161` Arbitrum.
 
 Example `.env`:
 
 ```bash
 ETHERSCAN_API_KEY=YourEtherscanKeyHere
-# ETHERSCAN_BASE_URL=https://api.etherscan.io/api
+# ETHERSCAN_CHAIN_ID=1
 ```
 
 ---
