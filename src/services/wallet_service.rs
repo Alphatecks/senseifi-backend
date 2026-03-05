@@ -1,5 +1,7 @@
 use crate::db::DbPool;
-use crate::models::wallet::{ConnectWalletRequest, WalletResponse, WalletStatusResponse};
+use crate::models::wallet::{
+    ConnectWalletRequest, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
+};
 use crate::repositories::wallet_repository::WalletRepository;
 use sqlx::Error;
 
@@ -90,6 +92,27 @@ impl WalletService {
         Ok(WalletResponse::from(wallet))
     }
 
+    /// Paginated list for Connected Wallet UI: provider, currency, address per row.
+    pub async fn list_connected_wallets(
+        pool: &DbPool,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<ConnectedWalletItem>, i64), Error> {
+        let (wallets, total) =
+            WalletRepository::list_wallets_paginated(pool, page, per_page).await?;
+        let items = wallets
+            .into_iter()
+            .map(|w| ConnectedWalletItem {
+                id: w.id,
+                address: w.address,
+                provider: wallet_type_to_provider(&w.wallet_type),
+                currency: chain_id_to_currency(w.chain_id),
+                connected_at: w.connected_at,
+            })
+            .collect();
+        Ok((items, total))
+    }
+
     pub async fn disconnect_wallet(pool: &DbPool, address: &str) -> Result<(), Error> {
         // Verify wallet exists
         let wallet = WalletRepository::get_wallet_by_address(pool, address)
@@ -112,5 +135,38 @@ impl WalletService {
         .await?;
 
         Ok(())
+    }
+}
+
+fn wallet_type_to_provider(wallet_type: &str) -> String {
+    match wallet_type.to_lowercase().as_str() {
+        "metamask" => "MetaMask".to_string(),
+        "coinbase" => "Coinbase".to_string(),
+        "binance" => "Binance".to_string(),
+        "kraken" => "Kraken".to_string(),
+        "bitstamp" => "Bitstamp".to_string(),
+        _ => {
+            let mut s = wallet_type.to_string();
+            if let Some(r) = s.get_mut(0..1) {
+                r.make_ascii_uppercase();
+            }
+            s
+        }
+    }
+}
+
+fn chain_id_to_currency(chain_id: i64) -> String {
+    match chain_id {
+        1 => "Ethereum".to_string(),
+        56 => "BNB".to_string(),
+        137 => "Polygon".to_string(),
+        43114 => "Avalanche".to_string(),
+        8453 => "Base".to_string(),
+        42161 => "Arbitrum".to_string(),
+        10 => "Optimism".to_string(),
+        250 => "Fantom".to_string(),
+        5 => "Goerli".to_string(),
+        11155111 => "Sepolia".to_string(),
+        _ => format!("Chain {}", chain_id),
     }
 }

@@ -73,4 +73,29 @@ impl WalletRepository {
 
         Ok(wallets)
     }
+
+    /// Paginated list of active wallets for Connected Wallet UI. Returns (wallets, total_count).
+    pub async fn list_wallets_paginated(
+        pool: &DbPool,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Wallet>, i64), Error> {
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM wallets WHERE is_active = true",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        let offset = (page.saturating_sub(1) as i64) * (per_page as i64);
+        let limit = per_page as i64;
+        let wallets = sqlx::query_as::<_, Wallet>(
+            "SELECT * FROM wallets WHERE is_active = true ORDER BY connected_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        Ok((wallets, total.0))
+    }
 }

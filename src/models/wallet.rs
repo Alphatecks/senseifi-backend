@@ -67,3 +67,13 @@ pub struct WalletStatusResponse {
     pub monitoring_status: String,
     pub connected_at: DateTime<Utc>,
 }
+
+/// One row for Connected Wallet list UI: provider name, currency, address.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConnectedWalletItem {
+    pub id: Uuid,
+    pub address: String,
+    pub provider: String,
+    pub currency: String,
+    pub connected_at: DateTime<Utc>,
+}

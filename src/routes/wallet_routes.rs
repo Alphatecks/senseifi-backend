@@ -1,10 +1,11 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
     routing::{get, post, delete},
     Router,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Error;
 
@@ -14,8 +15,20 @@ use crate::models::wallet::{
 };
 use crate::services::wallet_service::WalletService;
 
+#[derive(Debug, Deserialize)]
+struct ListWalletsQuery {
+    #[serde(default)]
+    page: Option<u32>,
+    #[serde(default = "default_per_page")]
+    per_page: Option<u32>,
+}
+fn default_per_page() -> Option<u32> {
+    Some(6)
+}
+
 pub fn wallet_routes() -> Router<DbPool> {
     Router::new()
+        .route("", get(list_connected_wallets))
         .route("/connect", post(connect_wallet))
         .route("/{address}/status", get(get_wallet_status))
         .route("/{address}", get(get_wallet))
@@ -89,6 +102,35 @@ fn bad_request_address() -> (StatusCode, Json<Value>) {
             "error": "Invalid wallet address format"
         })),
     )
+}
+
+async fn list_connected_wallets(
+    State(pool): State<DbPool>,
+    Query(q): Query<ListWalletsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(6).clamp(1, 50);
+    match WalletService::list_connected_wallets(&pool, page, per_page).await {
+        Ok((data, total)) => Ok(Json(json!({
+            "success": true,
+            "data": data,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total
+            }
+        }))),
+        Err(e) => {
+            eprintln!("list_connected_wallets: {:?}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "success": false,
+                    "error": "Failed to list connected wallets"
+                })),
+            ))
+        }
+    }
 }
 
 async fn get_wallet_status(
