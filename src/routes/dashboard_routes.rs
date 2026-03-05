@@ -32,6 +32,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/{address}/scans", get(list_scans))
         .route("/{address}/alerts", get(list_alerts))
         .route("/{address}/activity", get(list_activity).post(ingest_activity))
+        .route("/{address}/approvals", get(list_approvals))
         .route("/{address}/assets", get(list_assets))
 }
 
@@ -202,6 +203,17 @@ fn default_limit() -> i64 {
     20
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct ApprovalsQuery {
+    #[serde(default)]
+    period: Option<String>,
+    #[serde(default = "default_approvals_limit")]
+    limit: i64,
+}
+fn default_approvals_limit() -> i64 {
+    50
+}
+
 async fn list_threats(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
@@ -301,6 +313,35 @@ async fn recent_activity_all_wallets(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to load recent activity" })),
+            ))
+        }
+    }
+}
+
+async fn list_approvals(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<ApprovalsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let limit = q.limit.clamp(1, 100);
+    let period = q.period.as_deref();
+    match SenseiguardService::list_approvals(&pool, &address, period, limit).await {
+        Ok(list) => Ok(Json(json!({
+            "success": true,
+            "data": list
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("list_approvals: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to list approvals" })),
             ))
         }
     }

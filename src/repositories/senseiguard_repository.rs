@@ -1,6 +1,6 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ActivityFeedItem, Alert, SecurityScan, Threat, WalletAsset,
+    ActivityFeedItem, Alert, SecurityScan, Threat, WalletApproval, WalletAsset,
 };
 use chrono::{Datelike, DateTime, NaiveDate, Utc};
 use sqlx::Error;
@@ -210,6 +210,32 @@ impl SenseiguardRepository {
         .bind(limit)
         .fetch_all(pool)
         .await
+    }
+
+    pub async fn list_approvals(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        since: Option<DateTime<Utc>>,
+        limit: i64,
+    ) -> Result<Vec<WalletApproval>, Error> {
+        let rows = if let Some(s) = since {
+            sqlx::query_as(
+                "SELECT * FROM wallet_approvals WHERE wallet_id = $1 AND detected_at >= $2 ORDER BY detected_at DESC LIMIT $3",
+            )
+            .bind(wallet_id)
+            .bind(s)
+            .bind(limit)
+            .fetch_all(pool)
+        } else {
+            sqlx::query_as(
+                "SELECT * FROM wallet_approvals WHERE wallet_id = $1 ORDER BY detected_at DESC LIMIT $2",
+            )
+            .bind(wallet_id)
+            .bind(limit)
+            .fetch_all(pool)
+        }
+        .await?;
+        Ok(rows)
     }
 
     pub async fn get_wallet_issues_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i32, Error> {

@@ -130,6 +130,18 @@ pub struct WalletAsset {
     pub updated_at: DateTime<Utc>,
 }
 
+/// One row for Approval & Permission UI: contract, type (unlimited/limited), risk, date.
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct WalletApproval {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub contract_address: String,
+    pub approval_type: String,
+    pub risk_level: String,
+    pub detected_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SecurityStatusResponse {
     pub score: i32,

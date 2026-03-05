@@ -2,10 +2,11 @@ use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActivityFeedItem, Alert, DashboardMetricsResponse, DashboardSummaryResponse,
     FullScanReportResponse, IngestActivityRequest, MetricCard, ScanObservation,
-    SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard, WalletAsset,
+    SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
+use chrono::{Datelike, DateTime, NaiveDate, Utc};
 use sqlx::Error;
 use uuid::Uuid;
 
@@ -285,6 +286,25 @@ impl SenseiguardService {
     ) -> Result<Vec<ActivityFeedItem>, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
         SenseiguardRepository::list_activity(pool, wallet_id, limit).await
+    }
+
+    /// List approvals for Approval & Permission UI. period = "this_month" filters to current calendar month.
+    pub async fn list_approvals(
+        pool: &DbPool,
+        address: &str,
+        period: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<WalletApproval>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let since = if period == Some("this_month") {
+            let now = Utc::now();
+            NaiveDate::from_ymd_opt(now.year(), now.month(), 1)
+                .and_then(|d| d.and_hms_opt(0, 0, 0))
+                .map(|t| DateTime::from_naive_utc_and_offset(t, Utc))
+        } else {
+            None
+        };
+        SenseiguardRepository::list_approvals(pool, wallet_id, since, limit).await
     }
 
     pub async fn list_assets(pool: &DbPool, address: &str) -> Result<Vec<WalletAsset>, Error> {
