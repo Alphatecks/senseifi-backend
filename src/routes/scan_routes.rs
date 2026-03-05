@@ -38,7 +38,7 @@ fn normalize_contract_input(input: &str) -> String {
 pub fn scan_routes() -> Router<DbPool> {
     Router::new()
         .route("/", post(scan_contract))
-        .route("/:scan_id", get(get_scan_details))
+        .route("/{scan_id}", get(get_scan_details))
 }
 
 async fn scan_contract(
