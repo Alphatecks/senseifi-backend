@@ -1,3 +1,9 @@
+pub mod ai_insight_service;
+pub mod analyzer_service;
 pub mod hello_service;
+pub mod reputation_service;
+pub mod scan_service;
 pub mod senseiguard_service;
+pub mod simulation_service;
+pub mod scoring_engine;
 pub mod wallet_service;

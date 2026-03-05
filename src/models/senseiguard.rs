@@ -199,6 +199,193 @@ pub struct DashboardMetricsResponse {
     pub active_threat_level: ThreatLevelCard,
 }
 
+// ---- Smart Wallet Scanner: detail blocks (stored in contract_scans.details JSONB) ----
+
+/// Simulation result: what will happen if user interacts (drains, hidden calls, approvals).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SimulationResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drains_full_balance: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden_internal_calls: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dangerous_functions: Option<Vec<String>>,
+}
+
+/// Owner/admin privilege analysis: mint, pause, upgrade, withdraw liquidity.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OwnerPrivileges {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upgradeable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub withdraw_liquidity: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blacklist: Option<bool>,
+}
+
+/// External reputation: GoPlus, Chainabuse, verified source, etc.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReputationInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reported_scam: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub community_flags: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_source: Option<bool>,
+}
+
+/// Trend: scans today, wallets affected, risk_trend badge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScanTrend {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scans_today: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wallets_affected: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_trend: Option<String>, // "increasing" | "stable" | "low_concern"
+}
+
+/// Explainable trust score: contribution per factor (percent of total risk).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RiskBreakdown {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simulation: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_privileges: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reputation: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anomaly: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_control_scope: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_age: Option<u8>,
+}
+
+/// Full details payload for one contract scan (stored in details JSONB).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ScanDetailsPayload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simulation: Option<SimulationResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_privileges: Option<OwnerPrivileges>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reputation: Option<ReputationInfo>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trend: Option<ScanTrend>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_breakdown: Option<RiskBreakdown>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_anomaly_score: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rug_pull_probability: Option<String>, // "Low" | "Medium" | "High"
+}
+
+/// Smart Wallet Scanner: one scan result (trust score, risk flags, tokens, owner count).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ContractScan {
+    pub id: Uuid,
+    pub contract_address: String,
+    pub trust_score: i32,
+    pub critical_risk_flags: i32,
+    pub token_controlled: String,
+    pub owner_admin_count: i32,
+    #[serde(default)]
+    pub details: Option<serde_json::Value>,
+    pub scanned_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub scanned_for_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScanContractRequest {
+    pub contract_address: String,
+    /// Optional: wallet address for user-aware risk (behavioral anomaly) and trend.
+    #[serde(default)]
+    pub for_address: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScanContractResponse {
+    pub scan_id: Uuid,
+    pub contract_address: String,
+    pub trust_score: i32,
+    pub critical_risk_flags: i32,
+    pub token_controlled: String,
+    pub owner_admin_count: i32,
+    pub scanned_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ai_summary: Option<String>,
+}
+
+// ---- Protection: block, watchlist, report ----
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UserBlockedContract {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub contract_address: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct UserContractWatchlist {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub contract_address: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ScamReport {
+    pub id: Uuid,
+    pub contract_address: String,
+    pub reporter_wallet_address: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BlockContractRequest {
+    pub wallet_address: String,
+    pub contract_address: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WatchlistContractRequest {
+    pub wallet_address: String,
+    pub contract_address: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReportScamRequest {
+    pub contract_address: String,
+    #[serde(default)]
+    pub reporter_wallet_address: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ContractFingerprint {
+    pub id: Uuid,
+    pub contract_address: String,
+    pub bytecode_hash: String,
+    pub abi_pattern_hash: Option<String>,
+    pub family: Option<String>,
+    pub known_attack_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RunScanResponse {
     pub score: i32,

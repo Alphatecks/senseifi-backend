@@ -1,6 +1,7 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ActivityFeedItem, Alert, MonitoredTransaction, SecurityScan, Threat, WalletApproval, WalletAsset,
+    ActivityFeedItem, Alert, ContractFingerprint, ContractScan, MonitoredTransaction, ScamReport,
+    SecurityScan, Threat, UserBlockedContract, UserContractWatchlist, WalletApproval, WalletAsset,
 };
 use chrono::{Datelike, DateTime, NaiveDate, Utc};
 use sqlx::Error;
@@ -408,5 +409,230 @@ impl SenseiguardRepository {
         .bind(metadata)
         .fetch_one(pool)
         .await
+    }
+
+    pub async fn create_contract_scan(
+        pool: &DbPool,
+        contract_address: &str,
+        trust_score: i32,
+        critical_risk_flags: i32,
+        token_controlled: &str,
+        owner_admin_count: i32,
+        details: Option<&serde_json::Value>,
+        scanned_for_address: Option<&str>,
+    ) -> Result<ContractScan, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO contract_scans (contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, scanned_for_address)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
+            RETURNING *
+            "#,
+        )
+        .bind(contract_address)
+        .bind(trust_score)
+        .bind(critical_risk_flags)
+        .bind(token_controlled)
+        .bind(owner_admin_count)
+        .bind(details)
+        .bind(scanned_for_address)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn get_contract_scan_by_id(
+        pool: &DbPool,
+        scan_id: Uuid,
+    ) -> Result<Option<ContractScan>, Error> {
+        sqlx::query_as("SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address FROM contract_scans WHERE id = $1")
+            .bind(scan_id)
+            .fetch_optional(pool)
+            .await
+    }
+
+    /// Trend for a contract: scans in last 24h, distinct wallets, risk_trend hint.
+    pub async fn get_contract_scan_trend(
+        pool: &DbPool,
+        contract_address: &str,
+    ) -> Result<(i64, i64), Error> {
+        let scans_today: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM contract_scans WHERE contract_address = $1 AND scanned_at > NOW() - INTERVAL '24 hours'",
+        )
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await?;
+        let wallets_affected: (i64,) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT scanned_for_address)::bigint FROM contract_scans WHERE contract_address = $1 AND scanned_at > NOW() - INTERVAL '7 days' AND scanned_for_address IS NOT NULL",
+        )
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await?;
+        Ok((scans_today.0, wallets_affected.0))
+    }
+
+    // ---- Contract fingerprints ----
+    pub async fn get_fingerprint_by_contract(
+        pool: &DbPool,
+        contract_address: &str,
+    ) -> Result<Option<ContractFingerprint>, Error> {
+        sqlx::query_as("SELECT * FROM contract_fingerprints WHERE contract_address = $1")
+            .bind(contract_address)
+            .fetch_optional(pool)
+            .await
+    }
+
+    pub async fn upsert_contract_fingerprint(
+        pool: &DbPool,
+        contract_address: &str,
+        bytecode_hash: &str,
+        abi_pattern_hash: Option<&str>,
+        family: Option<&str>,
+        known_attack_type: Option<&str>,
+    ) -> Result<ContractFingerprint, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO contract_fingerprints (contract_address, bytecode_hash, abi_pattern_hash, family, known_attack_type, updated_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            ON CONFLICT (contract_address) DO UPDATE SET
+                bytecode_hash = EXCLUDED.bytecode_hash,
+                abi_pattern_hash = EXCLUDED.abi_pattern_hash,
+                family = EXCLUDED.family,
+                known_attack_type = EXCLUDED.known_attack_type,
+                updated_at = NOW()
+            RETURNING *
+            "#,
+        )
+        .bind(contract_address)
+        .bind(bytecode_hash)
+        .bind(abi_pattern_hash)
+        .bind(family)
+        .bind(known_attack_type)
+        .fetch_one(pool)
+        .await
+    }
+
+    // ---- Protection: block ----
+    pub async fn block_contract(
+        pool: &DbPool,
+        wallet_address: &str,
+        contract_address: &str,
+    ) -> Result<UserBlockedContract, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO user_blocked_contracts (wallet_address, contract_address)
+            VALUES ($1, $2)
+            ON CONFLICT (wallet_address, contract_address) DO UPDATE SET wallet_address = user_blocked_contracts.wallet_address
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn unblock_contract(
+        pool: &DbPool,
+        wallet_address: &str,
+        contract_address: &str,
+    ) -> Result<u64, Error> {
+        let r = sqlx::query("DELETE FROM user_blocked_contracts WHERE wallet_address = $1 AND contract_address = $2")
+            .bind(wallet_address)
+            .bind(contract_address)
+            .execute(pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    pub async fn is_contract_blocked(
+        pool: &DbPool,
+        wallet_address: &str,
+        contract_address: &str,
+    ) -> Result<bool, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM user_blocked_contracts WHERE wallet_address = $1 AND contract_address = $2",
+        )
+        .bind(wallet_address)
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0 > 0)
+    }
+
+    pub async fn list_blocked_contracts(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<Vec<UserBlockedContract>, Error> {
+        sqlx::query_as("SELECT * FROM user_blocked_contracts WHERE wallet_address = $1 ORDER BY created_at DESC")
+            .bind(wallet_address)
+            .fetch_all(pool)
+            .await
+    }
+
+    // ---- Protection: watchlist ----
+    pub async fn add_to_watchlist(
+        pool: &DbPool,
+        wallet_address: &str,
+        contract_address: &str,
+    ) -> Result<UserContractWatchlist, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO user_contract_watchlist (wallet_address, contract_address)
+            VALUES ($1, $2)
+            ON CONFLICT (wallet_address, contract_address) DO UPDATE SET wallet_address = user_contract_watchlist.wallet_address
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn remove_from_watchlist(
+        pool: &DbPool,
+        wallet_address: &str,
+        contract_address: &str,
+    ) -> Result<u64, Error> {
+        let r = sqlx::query("DELETE FROM user_contract_watchlist WHERE wallet_address = $1 AND contract_address = $2")
+            .bind(wallet_address)
+            .bind(contract_address)
+            .execute(pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
+    pub async fn list_watchlist(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<Vec<UserContractWatchlist>, Error> {
+        sqlx::query_as("SELECT * FROM user_contract_watchlist WHERE wallet_address = $1 ORDER BY created_at DESC")
+            .bind(wallet_address)
+            .fetch_all(pool)
+            .await
+    }
+
+    // ---- Protection: scam report ----
+    pub async fn create_scam_report(
+        pool: &DbPool,
+        contract_address: &str,
+        reporter_wallet_address: Option<&str>,
+    ) -> Result<ScamReport, Error> {
+        sqlx::query_as(
+            "INSERT INTO scam_reports (contract_address, reporter_wallet_address) VALUES ($1, $2) RETURNING *",
+        )
+        .bind(contract_address)
+        .bind(reporter_wallet_address)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn count_scam_reports(pool: &DbPool, contract_address: &str) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM scam_reports WHERE contract_address = $1",
+        )
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
     }
 }
