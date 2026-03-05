@@ -429,6 +429,7 @@ impl SenseiguardService {
             },
         })
     }
+
 }
 
 fn change_percent(this_month: i64, prev_month: i64) -> f64 {

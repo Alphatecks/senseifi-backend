@@ -58,7 +58,14 @@ impl AnalyzerService {
     pub async fn extract_owner_privileges(contract_address: &str) -> OwnerPrivileges {
         let (abi, _verified) = match etherscan::fetch_abi_and_verified(contract_address).await {
             Ok((a, v)) if !a.is_empty() => (a, v),
-            _ => return Self::stub_owner_privileges(),
+            Ok((_, _)) => {
+                tracing::info!("Analyzer: empty ABI for {}; using stub owner privileges", contract_address);
+                return Self::stub_owner_privileges();
+            }
+            Err(e) => {
+                tracing::warn!("Analyzer: Etherscan fetch failed for {}: {}; using stub owner privileges", contract_address, e);
+                return Self::stub_owner_privileges();
+            }
         };
 
         OwnerPrivileges {
@@ -76,6 +83,7 @@ impl AnalyzerService {
         let abi = match etherscan::fetch_abi_and_verified(contract_address).await {
             Ok((a, _)) if !a.is_empty() => a,
             _ => {
+                tracing::info!("Analyzer: empty ABI or fetch failed for {}; using fallback dangerous_functions list", contract_address);
                 return vec!["delegatecall".to_string(), "setApprovalForAll".to_string()];
             }
         };

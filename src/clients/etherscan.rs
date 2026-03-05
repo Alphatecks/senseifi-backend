@@ -40,6 +40,11 @@ pub struct EtherscanSourceResponse {
 pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), String> {
     let key = api_key();
     let url = base_url();
+    if key.is_some() {
+        tracing::info!("ETHERSCAN_API_KEY is set; will call Etherscan API");
+    } else {
+        tracing::warn!("ETHERSCAN_API_KEY is missing or empty; Etherscan calls will not use your key (rate limits / no activity on your key)");
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
         .build()
@@ -47,6 +52,7 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
 
     // Prefer getabi (returns ABI only)
     if key.is_some() {
+        tracing::info!("Etherscan getabi request for contract {}", address);
         let mut params = vec![
             ("module", "contract"),
             ("action", "getabi"),
@@ -60,18 +66,24 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
             .query(&params)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                tracing::error!("Etherscan getabi request failed: {}", e);
+                e.to_string()
+            })?;
         let _status = res.status();
         let body: EtherscanAbiResponse = res.json().await.map_err(|e| e.to_string())?;
         if body.status == "1" && body.result.trim_start().starts_with('[') {
+            tracing::info!("Etherscan getabi success: ABI received for {}", address);
             return Ok((body.result, true)); // getabi only returns for verified
         }
         if body.message == "NOTOK" && body.result.contains("Contract source code not verified") {
+            tracing::info!("Etherscan: contract {} not verified; using empty ABI (stub data)", address);
             return Ok((String::new(), false));
         }
     }
 
     // Fallback: getsourcecode (returns ABI + source; verified = SourceCode non-empty)
+    tracing::info!("Etherscan getsourcecode request for contract {}", address);
     let mut params = vec![
         ("module", "contract"),
         ("action", "getsourcecode"),
@@ -85,7 +97,10 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
         .query(&params)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::error!("Etherscan getsourcecode request failed: {}", e);
+            e.to_string()
+        })?;
     let body: EtherscanSourceResponse = res.json().await.map_err(|e| e.to_string())?;
     if body.status != "1" {
         return Err(body.message);
