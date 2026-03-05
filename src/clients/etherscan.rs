@@ -3,8 +3,16 @@
 
 use serde::Deserialize;
 
+const ETHERSCAN_V2_BASE: &str = "https://api.etherscan.io/v2/api";
+
 fn base_url() -> String {
-    std::env::var("ETHERSCAN_BASE_URL").unwrap_or_else(|_| "https://api.etherscan.io/v2/api".to_string())
+    let url = std::env::var("ETHERSCAN_BASE_URL").unwrap_or_else(|_| ETHERSCAN_V2_BASE.to_string());
+    // If env is set to legacy V1 URL, use V2 so we don't get deprecation errors
+    if url.trim_end_matches('/').ends_with("/api") && !url.contains("/v2") {
+        tracing::info!("ETHERSCAN_BASE_URL looks like V1 ({}); using V2 endpoint", url);
+        return ETHERSCAN_V2_BASE.to_string();
+    }
+    url
 }
 
 fn chain_id() -> String {
