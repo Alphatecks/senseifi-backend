@@ -129,16 +129,21 @@ async fn dashboard_overview(
             let _ = WalletRepository::update_wallet_user_id(&pool, addr, &user_id).await;
         }
     }
-    // Fallback: when both user_id and wallet_address are missing, if exactly one active wallet exists, use it so "1 connected" shows correctly.
-    // Set OVERVIEW_SINGLE_WALLET_FALLBACK=false to disable (e.g. multi-tenant where one wallet must not be shown to all).
+    // Fallback: when both user_id and wallet_address are missing, use the most recently connected active wallet so "1 connected" shows.
+    // Set OVERVIEW_SINGLE_WALLET_FALLBACK=false to disable (e.g. multi-tenant).
     let single_wallet_fallback = std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK")
         .map(|s| s != "false")
         .unwrap_or(true);
-    let user_id = if user_id.is_empty() && single_wallet_fallback
-    {
+    let user_id = if user_id.is_empty() && single_wallet_fallback {
         match WalletRepository::get_all_active_wallets(&pool).await {
-            Ok(wallets) if wallets.len() == 1 => {
+            Ok(wallets) if !wallets.is_empty() => {
+                // Use most recently connected wallet (already ordered by connected_at DESC).
                 let w = &wallets[0];
+                tracing::info!(
+                    "dashboard_overview: no user_id/wallet_address; active_wallets={}, using fallback for {}",
+                    wallets.len(),
+                    &w.address
+                );
                 if let Some(uid) = w.user_id.as_ref().filter(|s| !s.is_empty()) {
                     uid.clone()
                 } else {
@@ -150,11 +155,21 @@ async fn dashboard_overview(
                                     .await;
                             du.user_id
                         }
-                        Err(_) => String::new(),
+                        Err(e) => {
+                            tracing::warn!("dashboard_overview: get_or_create_for_wallet failed for {}: {}", w.address, e);
+                            String::new()
+                        }
                     }
                 }
             }
-            _ => user_id,
+            Ok(_wallets) => {
+                tracing::info!("dashboard_overview: no user_id/wallet_address; active_wallets=0, overview will show 0");
+                user_id
+            }
+            Err(e) => {
+                tracing::warn!("dashboard_overview: get_all_active_wallets failed: {}", e);
+                user_id
+            }
         }
     } else {
         user_id
