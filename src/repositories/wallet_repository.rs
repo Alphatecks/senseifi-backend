@@ -10,16 +10,18 @@ impl WalletRepository {
         address: &str,
         chain_id: i64,
         wallet_type: &str,
+        user_id: Option<&str>,
     ) -> Result<Wallet, Error> {
         let wallet = sqlx::query_as::<_, Wallet>(
             r#"
-            INSERT INTO wallets (address, chain_id, wallet_type, connected_at, is_active)
-            VALUES ($1, $2, $3, NOW(), true)
-            ON CONFLICT (address) 
-            DO UPDATE SET 
+            INSERT INTO wallets (address, chain_id, wallet_type, connected_at, is_active, user_id)
+            VALUES ($1, $2, $3, NOW(), true, $4)
+            ON CONFLICT (address)
+            DO UPDATE SET
                 chain_id = EXCLUDED.chain_id,
                 wallet_type = EXCLUDED.wallet_type,
                 is_active = true,
+                user_id = EXCLUDED.user_id,
                 updated_at = NOW()
             RETURNING *
             "#,
@@ -27,6 +29,7 @@ impl WalletRepository {
         .bind(address)
         .bind(chain_id)
         .bind(wallet_type)
+        .bind(user_id)
         .fetch_one(pool)
         .await?;
 
@@ -68,6 +71,21 @@ impl WalletRepository {
         let wallets = sqlx::query_as::<_, Wallet>(
             "SELECT * FROM wallets WHERE is_active = true ORDER BY connected_at DESC",
         )
+        .fetch_all(pool)
+        .await?;
+
+        Ok(wallets)
+    }
+
+    /// Active wallets for one user (dashboard overview scope).
+    pub async fn get_all_active_wallets_by_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<Vec<Wallet>, Error> {
+        let wallets = sqlx::query_as::<_, Wallet>(
+            "SELECT * FROM wallets WHERE is_active = true AND user_id = $1 ORDER BY connected_at DESC",
+        )
+        .bind(user_id)
         .fetch_all(pool)
         .await?;
 

@@ -133,7 +133,7 @@ Dashboard endpoints return **only real data** from your database (and, where con
 
 | Endpoint | Data source | Notes |
 |----------|-------------|--------|
-| `GET /api/dashboard/overview` | DB only | Wallet status (active count, last scan, status), alerts by severity, activity timeline, recent activity counts (24h), connected risk (transaction_monitoring). |
+| `GET /api/dashboard/overview?user_id=<id>` | DB only | **Requires `user_id`** (e.g. from auth). Wallet status (active count, last scan, status), alerts, activity timeline, recent activity, and connected risk are **scoped to that user's connected wallets only**. |
 | `GET /api/dashboard/{address}/summary` | DB only | Per-wallet summary; trend % are computed from previous period (no hardcoded -2.3 / 2.3). |
 | `GET /api/dashboard/{address}/metrics` | DB only | Threat counts by type and security score. |
 | `GET /api/dashboard/{address}/threats` | DB only | Stored threats. |
@@ -145,6 +145,10 @@ Dashboard endpoints return **only real data** from your database (and, where con
 
 - **`recent_activity.contract_calls_24h`** — Not derived from DB today. To get real values: ingest contract-call events into `activity_feed` (e.g. with `activity_type = 'contract_call'`) or use an external API (e.g. Alchemy `alchemy_getAssetTransfers` or similar) and either store results or aggregate in your backend.
 - **`connected_risk.active_dapps`** — No dApp table in DB. To get real values: add a `dapp_connections` (or similar) table and ingest when the user connects to a dApp, or use an external provider that tracks dApp usage.
+
+**User-scoped dashboard**
+
+- **`user_id`** — When connecting a wallet (`POST /api/wallets/connect`), send `user_id` in the body (e.g. your auth provider's user/sub id). That links the wallet to the user. `GET /api/dashboard/overview?user_id=<id>` then shows only that user's wallets and their alerts/activity/risk. Wallets connected without `user_id` (legacy) are not included in any user's overview.
 
 **External APIs used by the backend (for reference)**
 

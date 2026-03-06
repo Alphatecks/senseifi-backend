@@ -17,12 +17,13 @@ impl WalletService {
             return Err(Error::RowNotFound);
         }
 
-        // Create or update wallet
+        // Create or update wallet (user_id scopes dashboard to this user)
         let wallet = WalletRepository::create_wallet(
             pool,
             &request.address,
             request.chain_id,
             &request.wallet_type,
+            request.user_id.as_deref(),
         )
         .await?;
 

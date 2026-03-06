@@ -13,6 +13,8 @@ pub struct Wallet {
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// User who connected this wallet (e.g. auth provider sub). NULL = legacy.
+    pub user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -20,6 +22,8 @@ pub struct ConnectWalletRequest {
     pub address: String,
     pub chain_id: i64,
     pub wallet_type: String, // "metamask" or "coinbase"
+    /// Current user identifier (e.g. from auth). Required for dashboard to show only this user's wallets.
+    pub user_id: Option<String>,
 }
 
 /// Valid Ethereum address: 0x + 40 hex chars. Used to reject path/body injection and malformed input.

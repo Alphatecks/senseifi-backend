@@ -439,34 +439,37 @@ impl SenseiguardService {
         })
     }
 
-    /// Dashboard overview for the UI: all real data from DB (no simulations or hardcoded values).
+    /// Dashboard overview for the UI: all real data from DB, scoped to one user's wallets.
     pub async fn get_dashboard_overview(
         pool: &DbPool,
+        user_id: &str,
         timeline_limit: i64,
     ) -> Result<DashboardOverviewResponse, Error> {
-        let wallets = WalletRepository::get_all_active_wallets(pool).await?;
+        let wallets = WalletRepository::get_all_active_wallets_by_user(pool, user_id).await?;
         let active_wallet_count = wallets.len() as i64;
 
-        let min_score = SenseiguardRepository::min_security_score_active_wallets(pool).await?;
+        let min_score =
+            SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id).await?;
         let status = match min_score {
             None => "safe".to_string(),
             Some(s) => overview_status_from_score(s),
         };
 
-        let last_scan_at = SenseiguardRepository::global_last_scan_at(pool).await?;
+        let last_scan_at =
+            SenseiguardRepository::global_last_scan_at_for_user(pool, user_id).await?;
         let (alerts_high, alerts_medium, alerts_low) =
-            SenseiguardRepository::alerts_count_by_severity_global(pool).await?;
+            SenseiguardRepository::alerts_count_by_severity_global_for_user(pool, user_id).await?;
         let activity_timeline =
-            SenseiguardRepository::list_activity_across_wallets(pool, timeline_limit).await?;
+            SenseiguardRepository::list_activity_across_wallets_for_user(pool, user_id, timeline_limit).await?;
 
         let since_24h = Utc::now() - chrono::Duration::hours(24);
         let transactions_24h =
-            SenseiguardRepository::activity_count_since_global(pool, since_24h).await?;
+            SenseiguardRepository::activity_count_since_global_for_user(pool, user_id, since_24h).await?;
         let suspicious_events_24h =
-            SenseiguardRepository::activity_suspicious_count_since_global(pool, since_24h).await?;
+            SenseiguardRepository::activity_suspicious_count_since_global_for_user(pool, user_id, since_24h).await?;
 
         let (total_risk_items, high_risk_connections) =
-            SenseiguardRepository::transaction_monitoring_global_totals(pool).await?;
+            SenseiguardRepository::transaction_monitoring_global_totals_for_user(pool, user_id).await?;
 
         Ok(DashboardOverviewResponse {
             wallet_status: WalletStatusOverview {

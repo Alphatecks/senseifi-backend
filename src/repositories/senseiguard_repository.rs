@@ -305,13 +305,27 @@ impl SenseiguardRepository {
         Ok(row.0)
     }
 
-    // ---- Dashboard overview (aggregate across all active wallets) ----
+    // ---- Dashboard overview (aggregate across wallets; use _for_user to scope by one user) ----
 
     /// Minimum security score among active wallets (for overview status).
     pub async fn min_security_score_active_wallets(pool: &DbPool) -> Result<Option<i32>, Error> {
         let row: (Option<i32>,) = sqlx::query_as(
             "SELECT MIN(COALESCE(wm.security_score, 100)) FROM wallet_monitoring wm JOIN wallets w ON w.id = wm.wallet_id WHERE w.is_active = true",
         )
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Minimum security score among active wallets for one user.
+    pub async fn min_security_score_active_wallets_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<Option<i32>, Error> {
+        let row: (Option<i32>,) = sqlx::query_as(
+            "SELECT MIN(COALESCE(wm.security_score, 100)) FROM wallet_monitoring wm JOIN wallets w ON w.id = wm.wallet_id WHERE w.is_active = true AND w.user_id = $1",
+        )
+        .bind(user_id)
         .fetch_one(pool)
         .await?;
         Ok(row.0)
@@ -330,6 +344,29 @@ impl SenseiguardRepository {
         let row2: (Option<DateTime<Utc>>,) = sqlx::query_as(
             "SELECT MAX(scanned_at) FROM security_scans",
         )
+        .fetch_one(pool)
+        .await?;
+        Ok(row2.0)
+    }
+
+    /// Latest scan time across wallets for one user.
+    pub async fn global_last_scan_at_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<Option<DateTime<Utc>>, Error> {
+        let row: (Option<DateTime<Utc>>,) = sqlx::query_as(
+            "SELECT MAX(wm.last_scan_at) FROM wallet_monitoring wm JOIN wallets w ON w.id = wm.wallet_id WHERE w.is_active = true AND w.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        if row.0.is_some() {
+            return Ok(row.0);
+        }
+        let row2: (Option<DateTime<Utc>>,) = sqlx::query_as(
+            "SELECT MAX(ss.scanned_at) FROM security_scans ss JOIN wallets w ON w.id = ss.wallet_id WHERE w.is_active = true AND w.user_id = $1",
+        )
+        .bind(user_id)
         .fetch_one(pool)
         .await?;
         Ok(row2.0)
@@ -355,6 +392,32 @@ impl SenseiguardRepository {
         Ok((high.0, medium.0, low.0))
     }
 
+    /// Unread alerts by severity across wallets for one user: (high, medium, low).
+    pub async fn alerts_count_by_severity_global_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<(i64, i64, i64), Error> {
+        let high: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts a JOIN wallets w ON w.id = a.wallet_id WHERE w.is_active = true AND w.user_id = $1 AND a.read_at IS NULL AND a.severity = 'high'",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        let medium: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts a JOIN wallets w ON w.id = a.wallet_id WHERE w.is_active = true AND w.user_id = $1 AND a.read_at IS NULL AND a.severity = 'medium'",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        let low: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts a JOIN wallets w ON w.id = a.wallet_id WHERE w.is_active = true AND w.user_id = $1 AND a.read_at IS NULL AND a.severity = 'low'",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((high.0, medium.0, low.0))
+    }
+
     /// Activity feed across all active wallets, most recent first.
     pub async fn list_activity_across_wallets(pool: &DbPool, limit: i64) -> Result<Vec<ActivityFeedItemWithAddress>, Error> {
         sqlx::query_as(
@@ -372,6 +435,28 @@ impl SenseiguardRepository {
         .await
     }
 
+    /// Activity feed across active wallets for one user, most recent first.
+    pub async fn list_activity_across_wallets_for_user(
+        pool: &DbPool,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ActivityFeedItemWithAddress>, Error> {
+        sqlx::query_as(
+            r#"
+            SELECT af.id, af.wallet_id, w.address AS wallet_address, af.activity_type, af.title, af.description, af.metadata, af.created_at
+            FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true AND w.user_id = $1
+            ORDER BY af.created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
     /// Total activity count in the last 24h across all active wallets.
     pub async fn activity_count_since_global(pool: &DbPool, since: DateTime<Utc>) -> Result<i64, Error> {
         let row: (i64,) = sqlx::query_as(
@@ -381,6 +466,26 @@ impl SenseiguardRepository {
             WHERE w.is_active = true AND af.created_at >= $1
             "#,
         )
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Total activity count in the last 24h across active wallets for one user.
+    pub async fn activity_count_since_global_for_user(
+        pool: &DbPool,
+        user_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true AND w.user_id = $1 AND af.created_at >= $2
+            "#,
+        )
+        .bind(user_id)
         .bind(since)
         .fetch_one(pool)
         .await?;
@@ -402,6 +507,26 @@ impl SenseiguardRepository {
         Ok(row.0)
     }
 
+    /// Suspicious/blocked activity count in the last 24h across wallets for one user.
+    pub async fn activity_suspicious_count_since_global_for_user(
+        pool: &DbPool,
+        user_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true AND w.user_id = $1 AND af.created_at >= $2 AND af.activity_type IN ('suspicious_approval', 'blocked_interaction')
+            "#,
+        )
+        .bind(user_id)
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
     /// Transaction monitoring totals across all wallets: (total_rows, high_risk_count).
     pub async fn transaction_monitoring_global_totals(pool: &DbPool) -> Result<(i64, i64), Error> {
         let total: (i64,) = sqlx::query_as(
@@ -412,6 +537,26 @@ impl SenseiguardRepository {
         let high: (i64,) = sqlx::query_as(
             "SELECT COUNT(*)::bigint FROM transaction_monitoring tm JOIN wallets w ON w.id = tm.wallet_id WHERE w.is_active = true AND tm.risk_level = 'high'",
         )
+        .fetch_one(pool)
+        .await?;
+        Ok((total.0, high.0))
+    }
+
+    /// Transaction monitoring totals across wallets for one user.
+    pub async fn transaction_monitoring_global_totals_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<(i64, i64), Error> {
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM transaction_monitoring tm JOIN wallets w ON w.id = tm.wallet_id WHERE w.is_active = true AND w.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        let high: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM transaction_monitoring tm JOIN wallets w ON w.id = tm.wallet_id WHERE w.is_active = true AND w.user_id = $1 AND tm.risk_level = 'high'",
+        )
+        .bind(user_id)
         .fetch_one(pool)
         .await?;
         Ok((total.0, high.0))

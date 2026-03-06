@@ -23,6 +23,8 @@ fn default_per_wallet() -> i64 {
 
 #[derive(Debug, serde::Deserialize)]
 struct OverviewQuery {
+    /// Required: current user id (e.g. from auth). Dashboard shows only this user's connected wallets.
+    user_id: Option<String>,
     #[serde(default = "default_timeline_limit")]
     timeline_limit: i64,
 }
@@ -61,8 +63,20 @@ async fn dashboard_overview(
     State(pool): State<DbPool>,
     Query(q): Query<OverviewQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = match &q.user_id {
+        Some(id) if !id.trim().is_empty() => id.trim(),
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "error": "user_id is required. Pass the current user's id (e.g. from auth) so the dashboard shows only that user's connected wallets."
+                })),
+            ));
+        }
+    };
     let limit = q.timeline_limit.clamp(1, 100);
-    match SenseiguardService::get_dashboard_overview(&pool, limit).await {
+    match SenseiguardService::get_dashboard_overview(&pool, user_id, limit).await {
         Ok(overview) => Ok(Json(json!({
             "success": true,
             "data": overview
