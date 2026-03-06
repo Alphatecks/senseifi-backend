@@ -117,6 +117,20 @@ pub struct ActivityFeedItem {
     pub created_at: DateTime<Utc>,
 }
 
+/// Activity feed item with wallet address for dashboard overview (all wallets).
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ActivityFeedItemWithAddress {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    #[serde(rename = "wallet_address")]
+    pub wallet_address: String,
+    pub activity_type: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WalletAsset {
     pub id: Uuid,
@@ -174,6 +188,49 @@ pub struct DashboardSummaryResponse {
     pub high_risk_alerts: i64,
     pub alerts_trend_percent: f64,
     pub issues_this_month: i32,
+}
+
+/// Response for GET /dashboard/overview — real data only (no simulations or hardcoded values).
+#[derive(Debug, Serialize)]
+pub struct DashboardOverviewResponse {
+    pub wallet_status: WalletStatusOverview,
+    pub active_alerts: ActiveAlertsOverview,
+    pub activity_timeline: Vec<ActivityFeedItemWithAddress>,
+    pub recent_activity: RecentActivityOverview,
+    pub connected_risk: ConnectedRiskOverview,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletStatusOverview {
+    pub active_wallet_count: i64,
+    /// "safe" | "moderate" | "attention" from worst wallet score.
+    pub status: String,
+    pub last_scan_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ActiveAlertsOverview {
+    pub total: i64,
+    pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RecentActivityOverview {
+    /// Activity feed events in last 24h (all wallets).
+    pub transactions_24h: i64,
+    /// From activity_feed where activity_type suggests contract interaction. No external API; 0 if not tracked.
+    pub contract_calls_24h: i64,
+    pub suspicious_events_24h: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectedRiskOverview {
+    pub total_risk_items: i64,
+    pub high_risk_connections: i64,
+    /// dApp connections not stored in DB; 0 until ingest or external API.
+    pub active_dapps: i64,
 }
 
 /// One metric card: value (count) + trend % (this month vs previous month).
