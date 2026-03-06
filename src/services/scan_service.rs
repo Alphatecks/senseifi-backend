@@ -52,13 +52,14 @@ impl ScanService {
         }).unwrap_or(30);
         let owner_admin_count = creation.as_ref().map(|_| 1i32).unwrap_or(1);
 
-        // 3. Simulation (stub until Tenderly/Alchemy integrated)
+        // 3. Simulation (Alchemy when RPC is Alchemy; else stub)
         let simulation = SimulationService::simulate_contract(
             contract_address,
             &tokens_controlled,
+            &dangerous_functions,
+            chain_id,
         ).await;
-        let mut sim_with_fns = simulation.clone();
-        sim_with_fns.dangerous_functions = Some(dangerous_functions);
+        let sim_with_fns = simulation;
 
         // 4. Reputation (uses pool for scam_reports)
         let reputation = ReputationService::get_reputation(pool, contract_address).await;
@@ -97,7 +98,7 @@ impl ScanService {
 
         // 8. Scoring
         let (trust_score, risk_breakdown) = ScoringEngine::compute(
-            &simulation,
+            &sim_with_fns,
             &owner_privileges,
             &reputation,
             user_anomaly_score,
@@ -114,7 +115,7 @@ impl ScanService {
             &token_controlled_str,
         );
 
-        let critical_risk_flags = [simulation.drains_full_balance == Some(true), reputation.reported_scam == Some(true)]
+        let critical_risk_flags = [sim_with_fns.drains_full_balance == Some(true), reputation.reported_scam == Some(true)]
             .into_iter()
             .filter(|&b| b)
             .count() as i32

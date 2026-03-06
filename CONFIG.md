@@ -109,24 +109,13 @@ The analyzer:
 6. **User anomaly** uses your DB (how often this wallet has scanned this contract).
 7. If any step fails or config is missing, uses stub values so the API still responds.
 
-**What is real now:** Owner privileges, dangerous functions, contract age risk, owner/admin count (from creation), tokens controlled (from ABI), reputation (DB), trend (DB), user anomaly (DB scan count).
+**What is real now:** Owner privileges, dangerous functions, contract age risk, owner/admin count (from creation), tokens controlled (from ABI), reputation (DB), trend (DB), user anomaly (DB scan count), and **simulation** when your RPC URL is Alchemy.
 
-**Still stub:** **Simulation** (drains_full_balance, hidden_internal_calls, approval_scope). To make it real, integrate Tenderly or Alchemy simulation below.
-
----
-
-## 5. Optional: simulation (to make risk 100% real)
-
-The **simulation** block (drains_full_balance, approval_scope, hidden_internal_calls) is currently a fixed placeholder. To make it real:
-
-- **Tenderly**: [tenderly.co](https://tenderly.co) — simulate transactions and inspect internal calls. Env: `TENDERLY_ACCESS_KEY`, `TENDERLY_PROJECT`, `TENDERLY_USER`. Wire `SimulationService::simulate_contract` to call Tenderly Simulation API.
-- **Alchemy**: If you use Alchemy RPC, their [simulation APIs](https://docs.alchemy.com/reference/simulate-asset-changes) (e.g. `alchemy_simulateAssetChanges`) can show what a call would do. Wire `SimulationService` to use that when `ETHEREUM_RPC_URL` (or chain RPC) is Alchemy.
-
-Until then, simulation stays stub and trust score is partly estimated.
+**Simulation:** When `ETHEREUM_RPC_URL` (or the chain’s RPC) is an Alchemy URL (`alchemy.com`), the backend calls `alchemy_simulateAssetChanges` to get real **drains_full_balance** and **hidden_internal_calls**; **approval_scope** is derived from the contract’s dangerous functions (approve/setApprovalForAll → "unlimited"). If the RPC is not Alchemy or the call fails, simulation falls back to stub values.
 
 ---
 
-## 6. Render / production
+## 5. Render / production
 
 In Render (or any host), set the same variables in the **Environment** tab:
 
