@@ -1,9 +1,10 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    threat_types, ActivityFeedItem, Alert, DashboardMetricsResponse, DashboardSummaryResponse,
+    threat_types, ActiveAlertsOverview, ActivityFeedItem, Alert, ConnectedRiskOverview,
+    DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse,
     FullScanReportResponse, IngestActivityRequest, MetricCard, MonitoredTransaction,
-    ScanObservation, SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard,
-    WalletApproval, WalletAsset,
+    RecentActivityOverview, ScanObservation, SecurityStatusResponse, SecurityScan, Threat,
+    ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -188,26 +189,34 @@ impl SenseiguardService {
         let security_status = Self::get_security_status(pool, address).await?;
         let threats_this_month =
             SenseiguardRepository::count_threats_this_month(pool, wallet_id).await?;
+        let threats_prev =
+            SenseiguardRepository::count_threats_previous_period(pool, wallet_id).await?;
         let scans_this_month =
             SenseiguardRepository::count_scans_this_month(pool, wallet_id).await?;
+        let scans_prev =
+            SenseiguardRepository::count_scans_previous_period(pool, wallet_id).await?;
         let total_asset_usd = SenseiguardRepository::total_asset_usd(pool, wallet_id).await?;
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
         let high_risk_alerts =
             SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
+        let alerts_created_this =
+            SenseiguardRepository::count_alerts_created_this_month(pool, wallet_id).await?;
+        let alerts_created_prev =
+            SenseiguardRepository::count_alerts_created_previous_month(pool, wallet_id).await?;
         let issues_this_month =
             SenseiguardRepository::get_wallet_issues_this_month(pool, wallet_id).await?;
 
         Ok(DashboardSummaryResponse {
             security_status,
             threats_this_month,
-            threats_trend_percent: -2.3,
+            threats_trend_percent: change_percent(threats_this_month, threats_prev),
             scans_this_month,
-            scans_trend_percent: 2.3,
+            scans_trend_percent: change_percent(scans_this_month, scans_prev),
             total_asset_usd: format!("{:.2}", total_asset_usd),
-            total_asset_trend_percent: 2.3,
+            total_asset_trend_percent: 0.0, // no historical asset snapshots in DB
             unread_alerts,
             high_risk_alerts,
-            alerts_trend_percent: -2.3,
+            alerts_trend_percent: change_percent(alerts_created_this, alerts_created_prev),
             issues_this_month,
         })
     }
@@ -430,6 +439,68 @@ impl SenseiguardService {
         })
     }
 
+    /// Dashboard overview for the UI: all real data from DB (no simulations or hardcoded values).
+    pub async fn get_dashboard_overview(
+        pool: &DbPool,
+        timeline_limit: i64,
+    ) -> Result<DashboardOverviewResponse, Error> {
+        let wallets = WalletRepository::get_all_active_wallets(pool).await?;
+        let active_wallet_count = wallets.len() as i64;
+
+        let min_score = SenseiguardRepository::min_security_score_active_wallets(pool).await?;
+        let status = match min_score {
+            None => "safe".to_string(),
+            Some(s) => overview_status_from_score(s),
+        };
+
+        let last_scan_at = SenseiguardRepository::global_last_scan_at(pool).await?;
+        let (alerts_high, alerts_medium, alerts_low) =
+            SenseiguardRepository::alerts_count_by_severity_global(pool).await?;
+        let activity_timeline =
+            SenseiguardRepository::list_activity_across_wallets(pool, timeline_limit).await?;
+
+        let since_24h = Utc::now() - chrono::Duration::hours(24);
+        let transactions_24h =
+            SenseiguardRepository::activity_count_since_global(pool, since_24h).await?;
+        let suspicious_events_24h =
+            SenseiguardRepository::activity_suspicious_count_since_global(pool, since_24h).await?;
+
+        let (total_risk_items, high_risk_connections) =
+            SenseiguardRepository::transaction_monitoring_global_totals(pool).await?;
+
+        Ok(DashboardOverviewResponse {
+            wallet_status: WalletStatusOverview {
+                active_wallet_count,
+                status,
+                last_scan_at,
+            },
+            active_alerts: ActiveAlertsOverview {
+                total: alerts_high + alerts_medium + alerts_low,
+                high: alerts_high,
+                medium: alerts_medium,
+                low: alerts_low,
+            },
+            activity_timeline,
+            recent_activity: RecentActivityOverview {
+                transactions_24h,
+                contract_calls_24h: 0, // not tracked in DB; use ingest or external API to populate
+                suspicious_events_24h,
+            },
+            connected_risk: ConnectedRiskOverview {
+                total_risk_items,
+                high_risk_connections,
+                active_dapps: 0, // no dApp table; use ingest or external API to populate
+            },
+        })
+    }
+}
+
+fn overview_status_from_score(score: i32) -> String {
+    match score {
+        0..=39 => "attention".to_string(),
+        40..=69 => "moderate".to_string(),
+        _ => "safe".to_string(),
+    }
 }
 
 fn change_percent(this_month: i64, prev_month: i64) -> f64 {

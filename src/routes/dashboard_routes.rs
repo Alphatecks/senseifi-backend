@@ -21,8 +21,18 @@ fn default_per_wallet() -> i64 {
     20
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct OverviewQuery {
+    #[serde(default = "default_timeline_limit")]
+    timeline_limit: i64,
+}
+fn default_timeline_limit() -> i64 {
+    20
+}
+
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
+        .route("/overview", get(dashboard_overview))
         .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/{address}/metrics", get(dashboard_metrics))
         .route("/{address}/summary", get(dashboard_summary))
@@ -45,6 +55,26 @@ fn bad_address() -> (StatusCode, Json<Value>) {
             "error": "Invalid wallet address format"
         })),
     )
+}
+
+async fn dashboard_overview(
+    State(pool): State<DbPool>,
+    Query(q): Query<OverviewQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let limit = q.timeline_limit.clamp(1, 100);
+    match SenseiguardService::get_dashboard_overview(&pool, limit).await {
+        Ok(overview) => Ok(Json(json!({
+            "success": true,
+            "data": overview
+        }))),
+        Err(e) => {
+            eprintln!("dashboard_overview: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load dashboard overview" })),
+            ))
+        }
+    }
 }
 
 async fn dashboard_metrics(

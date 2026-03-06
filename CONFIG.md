@@ -124,3 +124,30 @@ In Render (or any host), set the same variables in the **Environment** tab:
 - Optionally `ETHERSCAN_BASE_URL` for non-mainnet.
 
 Do **not** commit `.env` or keys to git.
+
+---
+
+## 6. Dashboard APIs — real data only
+
+Dashboard endpoints return **only real data** from your database (and, where configured, from Etherscan/RPC). No simulations or hardcoded fake values.
+
+| Endpoint | Data source | Notes |
+|----------|-------------|--------|
+| `GET /api/dashboard/overview` | DB only | Wallet status (active count, last scan, status), alerts by severity, activity timeline, recent activity counts (24h), connected risk (transaction_monitoring). |
+| `GET /api/dashboard/{address}/summary` | DB only | Per-wallet summary; trend % are computed from previous period (no hardcoded -2.3 / 2.3). |
+| `GET /api/dashboard/{address}/metrics` | DB only | Threat counts by type and security score. |
+| `GET /api/dashboard/{address}/threats` | DB only | Stored threats. |
+| `GET /api/dashboard/{address}/alerts` | DB only | Stored alerts. |
+| `GET /api/dashboard/{address}/activity` | DB only | Activity feed (ingest via `POST .../activity` or workers). |
+| `GET /api/dashboard/{address}/transaction-monitoring` | DB only | Monitored transactions / risk items. |
+
+**Fields that are 0 until you add data or an external source**
+
+- **`recent_activity.contract_calls_24h`** — Not derived from DB today. To get real values: ingest contract-call events into `activity_feed` (e.g. with `activity_type = 'contract_call'`) or use an external API (e.g. Alchemy `alchemy_getAssetTransfers` or similar) and either store results or aggregate in your backend.
+- **`connected_risk.active_dapps`** — No dApp table in DB. To get real values: add a `dapp_connections` (or similar) table and ingest when the user connects to a dApp, or use an external provider that tracks dApp usage.
+
+**External APIs used by the backend (for reference)**
+
+- **Etherscan V2** — Contract scan (ABI, source, contract creation). See §1 above.
+- **Ethereum/chain RPC** — Bytecode, and when the RPC URL is Alchemy, **simulation** (`alchemy_simulateAssetChanges`) for scan results. See §2 and §5.
+- **Dashboard overview/summary** — No external API; all from your DB. If you later add Alchemy (or another provider) for transaction/history, that would be documented here.
