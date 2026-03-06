@@ -66,6 +66,20 @@ impl WalletRepository {
         Ok(())
     }
 
+    /// Set user_id on a wallet (e.g. after resolving from dashboard_user so overview shows it).
+    pub async fn update_wallet_user_id(
+        pool: &DbPool,
+        address: &str,
+        user_id: &str,
+    ) -> Result<(), Error> {
+        sqlx::query("UPDATE wallets SET user_id = $1, updated_at = NOW() WHERE address = $2")
+            .bind(user_id)
+            .bind(address)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub async fn get_all_active_wallets(pool: &DbPool) -> Result<Vec<Wallet>, Error> {
         let wallets = sqlx::query_as::<_, Wallet>(

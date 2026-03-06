@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 use crate::db::DbPool;
 use crate::models::senseiguard::IngestActivityRequest;
 use crate::models::wallet::is_valid_eth_address;
+use crate::repositories::wallet_repository::WalletRepository;
+use crate::services::dashboard_user_service;
 use crate::services::senseiguard_service::SenseiguardService;
 
 #[derive(Debug, serde::Deserialize)]
@@ -39,8 +41,10 @@ fn default_per_page_10() -> u32 {
 
 #[derive(Debug, serde::Deserialize)]
 struct OverviewQuery {
-    /// Required: current user id (e.g. from auth). Dashboard shows only this user's connected wallets.
+    /// Current user id (e.g. from auth or dashboard_user from connect). Scopes to that user's wallets.
     user_id: Option<String>,
+    /// When user_id is missing, use this wallet's user_id so a connected wallet still shows in overview.
+    wallet_address: Option<String>,
     #[serde(default = "default_timeline_limit")]
     timeline_limit: i64,
 }
@@ -80,16 +84,52 @@ async fn dashboard_overview(
     State(pool): State<DbPool>,
     Query(q): Query<OverviewQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    // When user_id is missing or empty, return 200 with empty overview so the dashboard page
-    // loads (e.g. before login). Frontend should send user_id from auth when available.
+    let limit = q.timeline_limit.clamp(1, 100);
+    // Prefer user_id. When missing, resolve from wallet_address so "connected wallet" still shows 1 active.
     let user_id = q
         .user_id
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("");
-    let limit = q.timeline_limit.clamp(1, 100);
-    match SenseiguardService::get_dashboard_overview(&pool, user_id, limit).await {
+        .map(String::from);
+    let user_id = match user_id {
+        Some(id) => id,
+        None => {
+            let addr = q.wallet_address.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            match addr.filter(|a| is_valid_eth_address(a)) {
+                Some(address) => {
+                    match WalletRepository::get_wallet_by_address(&pool, address).await {
+                        Ok(Some(w)) => {
+                            if let Some(uid) = w.user_id.filter(|s| !s.is_empty()) {
+                                uid
+                            } else {
+                                // Wallet connected but user_id null (e.g. legacy). Assign dashboard user.
+                                match dashboard_user_service::get_or_create_for_wallet(
+                                    &pool,
+                                    address,
+                                )
+                                .await
+                                {
+                                    Ok(du) => du.user_id,
+                                    Err(_) => String::new(),
+                                }
+                            }
+                        }
+                        Ok(None) => String::new(),
+                        Err(_) => String::new(),
+                    }
+                }
+                None => String::new(),
+            }
+        }
+    };
+    // When we resolved user_id from wallet_address, persist it on the wallet so it stays linked.
+    if !user_id.is_empty() {
+        if let Some(addr) = q.wallet_address.as_deref().filter(|a| is_valid_eth_address(a)) {
+            let _ = WalletRepository::update_wallet_user_id(&pool, addr, &user_id).await;
+        }
+    }
+    match SenseiguardService::get_dashboard_overview(&pool, &user_id, limit).await {
         Ok(overview) => Ok(Json(json!({
             "success": true,
             "data": overview
