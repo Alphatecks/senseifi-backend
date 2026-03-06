@@ -129,6 +129,38 @@ async fn dashboard_overview(
             let _ = WalletRepository::update_wallet_user_id(&pool, addr, &user_id).await;
         }
     }
+    // Fallback: when both user_id and wallet_address are missing, if env allows and exactly one active wallet exists, use it.
+    let single_wallet_fallback = std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK")
+        .map(|s| s == "true")
+        .unwrap_or(false);
+    let user_id = if user_id.is_empty() && single_wallet_fallback
+    {
+        match WalletRepository::get_all_active_wallets(&pool).await {
+            Ok(wallets) if wallets.len() == 1 => {
+                let w = &wallets[0];
+                if let Some(uid) = w.user_id.as_ref().filter(|s| !s.is_empty()) {
+                    uid.clone()
+                } else {
+                    match dashboard_user_service::get_or_create_for_wallet(&pool, &w.address).await
+                    {
+                        Ok(du) => {
+                            let _ =
+                                WalletRepository::update_wallet_user_id(&pool, &w.address, &du.user_id)
+                                    .await;
+                            du.user_id
+                        }
+                        Err(_) => String::new(),
+                    }
+                }
+            }
+            _ => user_id,
+        }
+    } else {
+        user_id
+    };
+    if user_id.is_empty() {
+        tracing::debug!("dashboard_overview: no user_id or wallet_address; overview will show 0 active wallets");
+    }
     match SenseiguardService::get_dashboard_overview(&pool, &user_id, limit).await {
         Ok(overview) => Ok(Json(json!({
             "success": true,
