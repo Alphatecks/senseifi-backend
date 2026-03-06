@@ -1,14 +1,16 @@
+use crate::clients::rpc;
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActiveAlertsOverview, ActivityFeedItem, Alert, ConnectedRiskOverview,
-    DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse,
-    FullScanReportResponse, IngestActivityRequest, MetricCard, MonitoredTransaction,
-    RecentActivityOverview, ScanObservation, SecurityStatusResponse, SecurityScan, Threat,
-    ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
+    ConnectedWalletModalBalance, ConnectedWalletModalDetails, ConnectedWalletModalResponse,
+    ConnectedWalletModalSecurity, DashboardMetricsResponse, DashboardOverviewResponse,
+    DashboardSummaryResponse, FullScanReportResponse, IngestActivityRequest, MetricCard,
+    MonitoredTransaction, RecentActivityOverview, ScanObservation, SecurityStatusResponse,
+    SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
-use chrono::{Datelike, DateTime, NaiveDate, Utc};
+use chrono::{Datelike, Duration, DateTime, NaiveDate, Utc};
 use sqlx::Error;
 use uuid::Uuid;
 
@@ -209,14 +211,14 @@ impl SenseiguardService {
         Ok(DashboardSummaryResponse {
             security_status,
             threats_this_month,
-            threats_trend_percent: change_percent(threats_this_month, threats_prev),
+            threats_trend_percent: Self::change_percent(threats_this_month, threats_prev),
             scans_this_month,
-            scans_trend_percent: change_percent(scans_this_month, scans_prev),
+            scans_trend_percent: Self::change_percent(scans_this_month, scans_prev),
             total_asset_usd: format!("{:.2}", total_asset_usd),
             total_asset_trend_percent: 0.0, // no historical asset snapshots in DB
             unread_alerts,
             high_risk_alerts,
-            alerts_trend_percent: change_percent(alerts_created_this, alerts_created_prev),
+            alerts_trend_percent: Self::change_percent(alerts_created_this, alerts_created_prev),
             issues_this_month,
         })
     }
@@ -422,18 +424,18 @@ impl SenseiguardService {
         Ok(DashboardMetricsResponse {
             malicious_transaction: MetricCard {
                 value: mal_this,
-                change_percent: change_percent(mal_this, mal_prev),
+                change_percent: Self::change_percent(mal_this, mal_prev),
             },
             phishing_indicators: MetricCard {
                 value: phish_this,
-                change_percent: change_percent(phish_this, phish_prev),
+                change_percent: Self::change_percent(phish_this, phish_prev),
             },
             risky_tokens: MetricCard {
                 value: risk_this,
-                change_percent: change_percent(risk_this, risk_prev),
+                change_percent: Self::change_percent(risk_this, risk_prev),
             },
             active_threat_level: ThreatLevelCard {
-                value: score_to_level(score),
+                value: Self::score_to_level(score),
                 change_percent: 0.0, // no historical score stored yet
             },
         })
@@ -452,7 +454,7 @@ impl SenseiguardService {
             SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id).await?;
         let status = match min_score {
             None => "safe".to_string(),
-            Some(s) => overview_status_from_score(s),
+            Some(s) => Self::overview_status_from_score(s),
         };
 
         let last_scan_at =
@@ -496,7 +498,6 @@ impl SenseiguardService {
             },
         })
     }
-}
 
 fn overview_status_from_score(score: i32) -> String {
     match score {
@@ -520,4 +521,133 @@ fn score_to_level(score: i32) -> String {
         34..=66 => "Medium".to_string(),
         _ => "Low".to_string(),
     }
+}
+
+    /// Real data for connected-wallet modal (Details, Balance, Security, Activity). No stubs.
+    pub async fn get_connected_wallet_modal(
+        pool: &DbPool,
+        address: &str,
+        activity_limit: i64,
+    ) -> Result<ConnectedWalletModalResponse, Error> {
+        let wallet = WalletRepository::get_wallet_by_address(pool, address)
+            .await?
+            .ok_or(Error::RowNotFound)?;
+
+        let security = Self::get_security_status(pool, address).await?;
+        let assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
+        let total_usd = SenseiguardRepository::total_asset_usd(pool, wallet.id).await.unwrap_or(0.0);
+        let approval_count = SenseiguardRepository::count_approvals(pool, wallet.id).await.unwrap_or(0);
+        let (high_risk, total_monitored) =
+            SenseiguardRepository::transaction_monitoring_risk_counts(pool, wallet.id)
+                .await
+                .unwrap_or((0, 0));
+        let risk_exposure_percent = if total_monitored > 0 {
+            (high_risk as f64 / total_monitored as f64 * 100.0).round()
+        } else {
+            0.0
+        };
+
+        let native_balance_wei = rpc::fetch_balance_wei(address, Some(wallet.chain_id as u64))
+            .await
+            .unwrap_or_else(|_| "0x0".to_string());
+        let native_balance_eth =
+            parse_wei_hex(&native_balance_wei).map(|w| w as f64 / 1e18).unwrap_or(0.0);
+
+        let activity =
+            SenseiguardRepository::list_activity(pool, wallet.id, activity_limit).await?;
+
+        let provider = match wallet.wallet_type.to_lowercase().as_str() {
+            "metamask" => "MetaMask".to_string(),
+            "coinbase" => "Coinbase".to_string(),
+            _ => {
+                let mut s = wallet.wallet_type.clone();
+                if let Some(r) = s.get_mut(0..1) {
+                    r.make_ascii_uppercase();
+                }
+                s
+            }
+        };
+        let network = chain_id_to_network(wallet.chain_id);
+        let security_status = match security.status.as_str() {
+            "strong" => "Secured",
+            "moderate" => "Moderate",
+            _ => "At risk",
+        };
+        let last_scan_ago = security
+            .last_scan_at
+            .map(|t| format_duration_ago(Utc::now() - t));
+
+        Ok(ConnectedWalletModalResponse {
+            details: ConnectedWalletModalDetails {
+                provider,
+                wallet_address: wallet.address,
+                network,
+                connected_at: wallet.connected_at,
+                wallet_type: "Non-Custodial".to_string(),
+                connected_via: "Browser Extension".to_string(),
+                security_status: security_status.to_string(),
+            },
+            balance: ConnectedWalletModalBalance {
+                total_usd,
+                native_balance_eth,
+                native_balance_wei: native_balance_wei.clone(),
+                assets,
+            },
+            security: ConnectedWalletModalSecurity {
+                two_fa: None,
+                active_approvals: approval_count,
+                last_scan_at: security.last_scan_at,
+                last_scan_ago,
+                threat_level: Self::score_to_level(security.score),
+                risk_exposure_percent,
+            },
+            activity,
+        })
+    }
+}
+
+fn parse_wei_hex(s: &str) -> Option<u64> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    u64::from_str_radix(s, 16).ok()
+}
+
+fn chain_id_to_network(chain_id: i64) -> String {
+    match chain_id {
+        1 => "Ethereum Mainnet".to_string(),
+        56 => "BNB Smart Chain".to_string(),
+        137 => "Polygon".to_string(),
+        8453 => "Base".to_string(),
+        42161 => "Arbitrum One".to_string(),
+        10 => "Optimism".to_string(),
+        5 => "Goerli".to_string(),
+        11155111 => "Sepolia".to_string(),
+        _ => format!("Chain {}", chain_id),
+    }
+}
+
+fn format_duration_ago(d: Duration) -> String {
+    let secs = d.num_seconds();
+    if secs < 60 {
+        return "just now".to_string();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("{}min ago", mins);
+    }
+    let hours = secs / 3600;
+    if hours < 24 {
+        return format!("{}hr ago", hours);
+    }
+    let days = secs / 86400;
+    if days == 1 {
+        return "1 day ago".to_string();
+    }
+    if days < 30 {
+        return format!("{} days ago", days);
+    }
+    let months = days / 30;
+    if months == 1 {
+        return "1 month ago".to_string();
+    }
+    format!("{} months ago", months)
 }

@@ -16,6 +16,7 @@ use crate::models::wallet::{
 };
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::services::dashboard_user_service;
+use crate::services::senseiguard_service::SenseiguardService;
 use crate::services::wallet_service::WalletService;
 
 #[derive(Debug, Deserialize)]
@@ -36,6 +37,7 @@ pub fn wallet_routes() -> Router<DbPool> {
         .route("/connect", post(connect_wallet))
         .route("/{address}/balance", get(get_wallet_balance))
         .route("/{address}/dashboard-user", get(get_dashboard_user))
+        .route("/{address}/modal", get(get_connected_wallet_modal))
         .route("/{address}/status", get(get_wallet_status))
         .route("/{address}", get(get_wallet))
         .route("/{address}", delete(disconnect_wallet))
@@ -182,6 +184,39 @@ async fn get_wallet_balance(
 fn parse_wei_hex(s: &str) -> Option<u64> {
     let s = s.strip_prefix("0x").unwrap_or(s);
     u64::from_str_radix(s, 16).ok()
+}
+
+async fn get_connected_wallet_modal(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_request_address());
+    }
+    const ACTIVITY_LIMIT: i64 = 20;
+    match SenseiguardService::get_connected_wallet_modal(&pool, &address, ACTIVITY_LIMIT).await {
+        Ok(modal) => Ok(Json(json!({
+            "success": true,
+            "data": modal
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "success": false,
+                "error": "Wallet not found"
+            })),
+        )),
+        Err(e) => {
+            eprintln!("get_connected_wallet_modal: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "success": false,
+                    "error": "Failed to load wallet modal"
+                })),
+            ))
+        }
+    }
 }
 
 async fn get_dashboard_user(

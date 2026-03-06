@@ -175,6 +175,47 @@ pub struct SecurityStatusResponse {
     pub last_scan_at: Option<DateTime<Utc>>,
 }
 
+/// Response for GET /api/wallets/{address}/modal — real data for connected-wallet modal (Details, Balance, Security, Activity).
+#[derive(Debug, Serialize)]
+pub struct ConnectedWalletModalResponse {
+    pub details: ConnectedWalletModalDetails,
+    pub balance: ConnectedWalletModalBalance,
+    pub security: ConnectedWalletModalSecurity,
+    pub activity: Vec<ActivityFeedItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectedWalletModalDetails {
+    pub provider: String,
+    pub wallet_address: String,
+    pub network: String,
+    pub connected_at: DateTime<Utc>,
+    pub wallet_type: String,
+    pub connected_via: String,
+    pub security_status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectedWalletModalBalance {
+    pub total_usd: f64,
+    pub native_balance_eth: f64,
+    pub native_balance_wei: String,
+    pub assets: Vec<WalletAsset>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ConnectedWalletModalSecurity {
+    /// 2FA not tracked in backend; null when unknown.
+    pub two_fa: Option<String>,
+    pub active_approvals: i64,
+    pub last_scan_at: Option<DateTime<Utc>>,
+    pub last_scan_ago: Option<String>,
+    /// "Low" | "Medium" | "High" from security score.
+    pub threat_level: String,
+    /// 0-100 from transaction_monitoring high_risk/total.
+    pub risk_exposure_percent: f64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct DashboardSummaryResponse {
     pub security_status: SecurityStatusResponse,

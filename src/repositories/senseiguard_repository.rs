@@ -624,6 +624,37 @@ impl SenseiguardRepository {
         .await
     }
 
+    /// Count of active approvals for this wallet (for Security tab "Active Approval").
+    pub async fn count_approvals(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM wallet_approvals WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Risk exposure: (high_risk_count, total_count) for transaction_monitoring. Percent = high*100/total when total > 0.
+    pub async fn transaction_monitoring_risk_counts(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<(i64, i64), Error> {
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM transaction_monitoring WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        let high: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM transaction_monitoring WHERE wallet_id = $1 AND risk_level = 'high'",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((high.0, total.0))
+    }
+
     pub async fn list_approvals(
         pool: &DbPool,
         wallet_id: Uuid,

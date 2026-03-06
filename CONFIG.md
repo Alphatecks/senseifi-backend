@@ -155,6 +155,7 @@ Dashboard endpoints return **only real data** from your database (and, where con
 - If the frontend does **not** send `user_id` on connect, the backend creates or reuses a **dashboard user** for that wallet: a random `user_id` (e.g. `fetrtwgebejhssns`), a random **display name** (e.g. "Stealth bag", "Megatron", "Alpha"), and a **user number** (e.g. 2314 for "User 2314"). The connect response then includes `dashboard_user: { user_id, display_name, user_number, user_label }`. Use `user_id` for `GET /api/dashboard/overview?user_id=...`.
 - **`GET /api/wallets/{address}/dashboard-user`** — Returns the dashboard user for that wallet (404 if never connected).
 - **`GET /api/wallets/{address}/balance?chain_id=1`** — Fetches native balance from RPC (`eth_getBalance`). Requires `ETHEREUM_RPC_URL` (or chain-specific RPC). Response: `{ balance_wei, balance_eth, chain_id }`.
+- **`GET /api/wallets/{address}/modal`** — **Real data only** for the connected-wallet modal (Details, Balance, Security, Activity). One response: `details` (provider, address, network, connected_at, security_status), `balance` (total_usd from DB assets, native_balance_eth from RPC, `assets[]` from `wallet_assets`), `security` (active_approvals, last_scan_at, last_scan_ago, threat_level, risk_exposure_percent from DB), `activity` (from `activity_feed`). No stubs; 2FA is `null` (not tracked).
 
 **External APIs used by the backend (for reference)**
 
