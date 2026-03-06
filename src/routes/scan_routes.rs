@@ -61,7 +61,7 @@ async fn scan_contract(
         .map(|s| normalize_contract_input(s))
         .filter(|s| is_valid_eth_address(s));
     let for_ref = for_address.as_deref();
-    match ScanService::scan_contract(&pool, &address, for_ref).await {
+    match ScanService::scan_contract(&pool, &address, for_ref, request.chain_id).await {
         Ok(res) => Ok(Json(res)),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,

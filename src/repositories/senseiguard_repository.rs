@@ -470,6 +470,22 @@ impl SenseiguardRepository {
         Ok((scans_today.0, wallets_affected.0))
     }
 
+    /// Count how many times this wallet has scanned this contract (for user anomaly).
+    pub async fn count_scans_for_wallet_contract(
+        pool: &DbPool,
+        wallet_address: &str,
+        contract_address: &str,
+    ) -> Result<i64, Error> {
+        let (count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM contract_scans WHERE scanned_for_address = $1 AND contract_address = $2",
+        )
+        .bind(wallet_address)
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await?;
+        Ok(count)
+    }
+
     // ---- Contract fingerprints ----
     pub async fn get_fingerprint_by_contract(
         pool: &DbPool,

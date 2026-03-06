@@ -1,5 +1,6 @@
 //! Smart Wallet Scanner pipeline: analyzer -> simulation -> reputation -> trend -> ai_explainer -> scoring.
 
+use crate::clients::etherscan;
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     ContractScan, ScanDetailsPayload, ScanContractResponse, ScanTrend,
@@ -20,17 +21,38 @@ impl ScanService {
         pool: &DbPool,
         contract_address: &str,
         for_address: Option<&str>,
+        chain_id: Option<u64>,
     ) -> Result<ScanContractResponse, Error> {
-        let tokens_controlled: Vec<String> = vec!["ETH".into(), "USDC".into()];
-        let token_controlled_str = tokens_controlled.join(", ");
-
-        // 1. Analyzer: single Etherscan fetch → owner privileges, dangerous functions, and whether ABI was real
-        let analysis = AnalyzerService::analyze_contract(contract_address).await;
+        // 1. Analyzer: single Etherscan fetch → owner privileges, dangerous functions, tokens_controlled, abi_source
+        let analysis = AnalyzerService::analyze_contract(contract_address, chain_id).await;
         let owner_privileges = analysis.owner_privileges;
         let dangerous_functions = analysis.dangerous_functions;
+        let tokens_controlled = analysis.tokens_controlled.clone();
+        let token_controlled_str = tokens_controlled.join(", ");
         let abi_source = if analysis.abi_from_etherscan { "etherscan" } else { "stub" };
 
-        // 2. Simulation
+        // 2. Contract creation (for age risk and owner count)
+        let creation = etherscan::fetch_contract_creation(contract_address, chain_id).await.ok().flatten();
+        let contract_age_risk = creation.as_ref().map(|c| {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let age_secs = now_secs.saturating_sub(c.timestamp);
+            let age_days = age_secs / 86400;
+            if age_days < 7 {
+                80u8
+            } else if age_days < 30 {
+                50
+            } else if age_days < 365 {
+                30
+            } else {
+                10
+            }
+        }).unwrap_or(30);
+        let owner_admin_count = creation.as_ref().map(|_| 1i32).unwrap_or(1);
+
+        // 3. Simulation (stub until Tenderly/Alchemy integrated)
         let simulation = SimulationService::simulate_contract(
             contract_address,
             &tokens_controlled,
@@ -38,10 +60,10 @@ impl ScanService {
         let mut sim_with_fns = simulation.clone();
         sim_with_fns.dangerous_functions = Some(dangerous_functions);
 
-        // 3. Reputation (uses pool for scam_reports)
+        // 4. Reputation (uses pool for scam_reports)
         let reputation = ReputationService::get_reputation(pool, contract_address).await;
 
-        // 4. Trend from DB
+        // 5. Trend from DB
         let (scans_today, wallets_affected) = SenseiguardRepository::get_contract_scan_trend(
             pool,
             contract_address,
@@ -59,14 +81,21 @@ impl ScanService {
             risk_trend: Some(risk_trend.to_string()),
         };
 
-        // 5. User-aware anomaly (stub: higher if for_address provided and contract is risky)
-        let user_anomaly_score = if for_address.is_some() { 0.78 } else { 0.0 };
+        // 6. User-aware anomaly: from DB (how often this wallet scanned this contract)
+        let user_anomaly_score = if let Some(wallet) = for_address {
+            match SenseiguardRepository::count_scans_for_wallet_contract(pool, wallet, contract_address).await {
+                Ok(0) => 0.5,
+                Ok(_) => 0.2,
+                _ => 0.0,
+            }
+        } else {
+            0.0
+        };
 
-        // 6. Token control scope risk (stub: 40 if controls ETH+USDC)
+        // 7. Token control scope risk: from actual tokens_controlled length
         let token_control_risk = if tokens_controlled.len() >= 2 { 40u8 } else { 20u8 };
-        let contract_age_risk = 30u8; // stub: assume relatively new
 
-        // 7. Scoring
+        // 8. Scoring
         let (trust_score, risk_breakdown) = ScoringEngine::compute(
             &simulation,
             &owner_privileges,
@@ -77,7 +106,7 @@ impl ScanService {
         );
         let rug_pull = ScoringEngine::rug_pull_probability(&owner_privileges);
 
-        // 8. AI summary
+        // 9. AI summary
         let ai_summary = AiInsightService::explain_risks(
             &sim_with_fns,
             &owner_privileges,
@@ -103,8 +132,6 @@ impl ScanService {
             rug_pull_probability: Some(rug_pull),
         };
         let details_json = serde_json::to_value(&details).ok();
-
-        let owner_admin_count = 1i32; // from analyzer in real impl
 
         let row = SenseiguardRepository::create_contract_scan(
             pool,

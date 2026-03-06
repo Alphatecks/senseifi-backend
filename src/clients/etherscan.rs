@@ -65,7 +65,8 @@ fn source_code_non_empty(v: &serde_json::Value) -> bool {
 }
 
 /// Returns (abi_json_string, verified). Uses getabi if API key set; else tries getsourcecode for ABI.
-pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), String> {
+/// request_chain_id: if Some, use for this request; else use ETHERSCAN_CHAIN_ID env or 1.
+pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>) -> Result<(String, bool), String> {
     let key = api_key();
     let url = base_url();
     if key.is_some() {
@@ -79,7 +80,9 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
         .map_err(|e| e.to_string())?;
 
     // Prefer getabi (returns ABI only). V2 requires chainid.
-    let cid = chain_id();
+    let cid = request_chain_id
+        .map(|n| n.to_string())
+        .unwrap_or_else(chain_id);
     if key.is_some() {
         tracing::info!("Etherscan getabi request for contract {} (chainid={})", address, cid);
         let mut params = vec![
@@ -116,7 +119,9 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
     }
 
     // Fallback: getsourcecode (returns ABI + source; verified = SourceCode non-empty). V2 requires chainid.
-    let cid2 = chain_id();
+    let cid2 = request_chain_id
+        .map(|n| n.to_string())
+        .unwrap_or_else(chain_id);
     tracing::info!("Etherscan getsourcecode request for contract {} (chainid={})", address, cid2);
     let mut params = vec![
         ("chainid", cid2.as_str()),
@@ -160,4 +165,81 @@ pub async fn fetch_abi_and_verified(address: &str) -> Result<(String, bool), Str
         .map(source_code_non_empty)
         .unwrap_or(false);
     Ok((abi, verified))
+}
+
+/// Contract creation info from getcontractcreation (block, timestamp, creator).
+#[derive(Debug, Clone)]
+pub struct ContractCreationInfo {
+    pub block_number: u64,
+    pub timestamp: u64,
+    pub contract_creator: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct EtherscanContractCreationResponse {
+    status: String,
+    message: String,
+    #[serde(default)]
+    result: Option<serde_json::Value>,
+}
+
+/// Fetch contract creation block, timestamp, and creator. Uses getcontractcreation (V2 with chainid).
+pub async fn fetch_contract_creation(
+    address: &str,
+    request_chain_id: Option<u64>,
+) -> Result<Option<ContractCreationInfo>, String> {
+    let cid = request_chain_id
+        .map(|n| n.to_string())
+        .unwrap_or_else(chain_id);
+    let url = base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let params = [
+        ("chainid", cid.as_str()),
+        ("module", "contract"),
+        ("action", "getcontractcreation"),
+        ("contractaddresses", address),
+    ];
+    let mut request = client.get(&url).query(&params);
+    if let Some(k) = api_key() {
+        request = request.query(&[("apikey", k.as_str())]);
+    }
+    let res = request.send().await.map_err(|e| e.to_string())?;
+    let body: EtherscanContractCreationResponse = res.json().await.map_err(|e| e.to_string())?;
+    if body.status != "1" {
+        return Ok(None);
+    }
+    let result = match &body.result {
+        Some(serde_json::Value::Array(arr)) => arr.first(),
+        _ => None,
+    };
+    let item = match result {
+        Some(serde_json::Value::Object(m)) => m,
+        _ => return Ok(None),
+    };
+    let block_number = item
+        .get("blockNumber")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let timestamp = item
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    let contract_creator = item
+        .get("contractCreator")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if contract_creator.is_empty() && timestamp == 0 {
+        return Ok(None);
+    }
+    Ok(Some(ContractCreationInfo {
+        block_number,
+        timestamp,
+        contract_creator,
+    }))
 }

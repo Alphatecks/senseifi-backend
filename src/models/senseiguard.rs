@@ -315,6 +315,9 @@ pub struct ScanContractRequest {
     /// Optional: wallet address for user-aware risk (behavioral anomaly) and trend.
     #[serde(default)]
     pub for_address: Option<String>,
+    /// Optional: chain ID for the contract (1=Ethereum, 56=BSC, 137=Polygon, 8453=Base, 42161=Arbitrum). If omitted, uses ETHERSCAN_CHAIN_ID env or 1.
+    #[serde(default)]
+    pub chain_id: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
