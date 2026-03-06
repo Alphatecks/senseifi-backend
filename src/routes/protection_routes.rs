@@ -18,6 +18,7 @@ use crate::models::senseiguard::{
 };
 use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
+use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::protection_engine::{
     build_analyze_tx_response, build_dapp_check_response, evaluate_approval, evaluate_dapp_connection,
     evaluate_transaction, run_monitor_cycle,
@@ -58,6 +59,8 @@ pub fn protection_routes() -> Router<DbPool> {
         .route("/rules/{rule_id}", put(update_rule).delete(delete_rule))
         .route("/emergency-lock", post(emergency_lock))
         .route("/approvals/ingest", post(approvals_ingest))
+        .route("/security-alerts", get(security_alerts))
+        .route("/address-safety", get(address_safety))
         .route("/simulate-tx", post(simulate_tx))
         .route("/block-malicious", post(block_malicious))
         .route("/block-contract", post(block_contract).delete(unblock_contract))
@@ -346,6 +349,131 @@ async fn approvals_ingest(
             Json(json!({ "success": false, "error": e })),
         )),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct SecurityAlertsQuery {
+    wallet_address: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+async fn security_alerts(
+    State(pool): State<DbPool>,
+    Query(q): Query<SecurityAlertsQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !is_valid_eth_address(&q.wallet_address) {
+        return Err(bad_address());
+    }
+    let limit = q.limit.unwrap_or(20).min(100) as i64;
+
+    let approval_alerts = match SenseiguardRepository::list_approval_alerts(&pool, &q.wallet_address, limit).await {
+        Ok(list) => list
+            .into_iter()
+            .map(|a| {
+                json!({
+                    "id": a.id,
+                    "type": "high_risk_approval",
+                    "title": "High-Risk Approval Detected",
+                    "contract": a.spender_address,
+                    "contract_truncated": truncate_address(&a.spender_address),
+                    "token_address": a.token_address,
+                    "risk_score": a.risk_score,
+                    "created_at": a.created_at,
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": e.to_string() })),
+            ));
+        }
+    };
+
+    let mut general: Vec<serde_json::Value> = Vec::new();
+    if let Ok(Some(wallet)) = WalletRepository::get_wallet_by_address(&pool, &q.wallet_address).await {
+        if let Ok(alerts) = SenseiguardRepository::list_alerts(&pool, wallet.id, limit).await {
+            for a in alerts {
+                general.push(json!({
+                    "id": a.id,
+                    "type": "alert",
+                    "title": a.title,
+                    "severity": a.severity,
+                    "body": a.body,
+                    "created_at": a.created_at,
+                }));
+            }
+        }
+    }
+
+    let mut data: Vec<serde_json::Value> = approval_alerts;
+    data.extend(general);
+    data.sort_by(|a, b| {
+        let t_a = a.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let t_b = b.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        t_b.cmp(t_a)
+    });
+    let data: Vec<serde_json::Value> = data.into_iter().take(limit as usize).collect();
+
+    Ok(Json(json!({ "success": true, "data": data })))
+}
+
+#[derive(Debug, Deserialize)]
+struct AddressSafetyQuery {
+    wallet_address: String,
+}
+
+fn truncate_address(addr: &str) -> String {
+    if addr.len() <= 14 {
+        return addr.to_string();
+    }
+    format!("{}...{}", &addr[..6], &addr[addr.len()-4..])
+}
+
+fn risk_level_from_score(score: i32) -> &'static str {
+    if score >= 70 {
+        "Low Risk"
+    } else if score >= 40 {
+        "Medium Risk"
+    } else {
+        "High Risk"
+    }
+}
+
+async fn address_safety(
+    State(pool): State<DbPool>,
+    Query(q): Query<AddressSafetyQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !is_valid_eth_address(&q.wallet_address) {
+        return Err(bad_address());
+    }
+
+    let addresses = match SenseiguardRepository::list_relevant_addresses_for_wallet(&pool, &q.wallet_address).await {
+        Ok(a) => a,
+        Err(e) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": e.to_string() })),
+            ));
+        }
+    };
+
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    for addr in addresses {
+        let trust = SenseiguardRepository::get_latest_trust_score(&pool, &addr).await.ok().flatten().unwrap_or(50);
+        let scam_count: i64 = SenseiguardRepository::count_scam_reports(&pool, &addr).await.unwrap_or(0);
+        let safety_score = (trust - (scam_count * 15) as i32).clamp(0, 100);
+        results.push(json!({
+            "address": addr,
+            "address_truncated": truncate_address(&addr),
+            "safety_score": safety_score,
+            "risk_level": risk_level_from_score(safety_score),
+        }));
+    }
+    results.sort_by(|a, b| b.get("safety_score").and_then(|v| v.as_i64()).unwrap_or(0).cmp(&a.get("safety_score").and_then(|v| v.as_i64()).unwrap_or(0)));
+
+    Ok(Json(json!({ "success": true, "data": results })))
 }
 
 async fn list_rules(

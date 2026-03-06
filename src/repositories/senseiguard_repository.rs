@@ -1,8 +1,9 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ActivityFeedItem, Alert, ContractFingerprint, ContractScan, MonitoredTransaction,
-    ProtectionAutoScan, ScamReport, SecurityScan, Threat, UserBlockedContract, UserContractWatchlist,
-    UserProtectionSettings, WalletApproval, WalletApprovalAlert, WalletAsset, WalletSecurityRule,
+    ActivityFeedItem, ActivityFeedItemWithAddress, Alert, ContractFingerprint, ContractScan,
+    MonitoredTransaction, ProtectionAutoScan, ScamReport, SecurityScan, Threat,
+    UserBlockedContract, UserContractWatchlist, UserProtectionSettings, WalletApproval,
+    WalletApprovalAlert, WalletAsset, WalletSecurityRule,
 };
 use chrono::{Datelike, DateTime, NaiveDate, Utc};
 use sqlx::Error;
@@ -150,6 +151,270 @@ impl SenseiguardRepository {
         .fetch_one(pool)
         .await?;
         Ok(row.0)
+    }
+
+    /// Scans in the previous 30-day window (days 31–60 ago) for trend vs count_scans_this_month.
+    pub async fn count_scans_previous_period(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let now = Utc::now();
+        let end = now - chrono::Duration::days(30);
+        let start = now - chrono::Duration::days(60);
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM security_scans WHERE wallet_id = $1 AND scanned_at >= $2 AND scanned_at < $3",
+        )
+        .bind(wallet_id)
+        .bind(start)
+        .bind(end)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Threats in the previous 30-day window (days 31–60 ago) for trend.
+    pub async fn count_threats_previous_period(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let now = Utc::now();
+        let end = now - chrono::Duration::days(30);
+        let start = now - chrono::Duration::days(60);
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threats WHERE wallet_id = $1 AND detected_at >= $2 AND detected_at < $3",
+        )
+        .bind(wallet_id)
+        .bind(start)
+        .bind(end)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Unread alerts created this month vs previous month for trend (calendar months).
+    pub async fn count_unread_alerts_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let start = month_start_utc(Utc::now());
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND read_at IS NULL AND created_at >= $2",
+        )
+        .bind(wallet_id)
+        .bind(start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    pub async fn count_unread_alerts_previous_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let now = Utc::now();
+        let this_start = month_start_utc(now);
+        let (prev_year, prev_month) = if now.month() == 1 {
+            (now.year() - 1, 12u32)
+        } else {
+            (now.year(), now.month() - 1)
+        };
+        let prev_start = NaiveDate::from_ymd_opt(prev_year as i32, prev_month, 1)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|t| DateTime::from_naive_utc_and_offset(t, Utc))
+            .unwrap_or(this_start);
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND read_at IS NULL AND created_at >= $2 AND created_at < $3",
+        )
+        .bind(wallet_id)
+        .bind(prev_start)
+        .bind(this_start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Alerts created in current calendar month (for trend).
+    pub async fn count_alerts_created_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let start = month_start_utc(Utc::now());
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND created_at >= $2",
+        )
+        .bind(wallet_id)
+        .bind(start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Alerts created in previous calendar month (for trend).
+    pub async fn count_alerts_created_previous_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let now = Utc::now();
+        let this_start = month_start_utc(now);
+        let (prev_year, prev_month) = if now.month() == 1 {
+            (now.year() - 1, 12u32)
+        } else {
+            (now.year(), now.month() - 1)
+        };
+        let prev_start = NaiveDate::from_ymd_opt(prev_year as i32, prev_month, 1)
+            .and_then(|d| d.and_hms_opt(0, 0, 0))
+            .map(|t| DateTime::from_naive_utc_and_offset(t, Utc))
+            .unwrap_or(this_start);
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND created_at >= $2 AND created_at < $3",
+        )
+        .bind(wallet_id)
+        .bind(prev_start)
+        .bind(this_start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Unread alerts by severity for one wallet: (high, medium, low).
+    pub async fn alerts_count_by_severity(pool: &DbPool, wallet_id: Uuid) -> Result<(i64, i64, i64), Error> {
+        let high: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND read_at IS NULL AND severity = 'high'",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        let medium: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND read_at IS NULL AND severity = 'medium'",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        let low: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND read_at IS NULL AND severity = 'low'",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((high.0, medium.0, low.0))
+    }
+
+    /// Activity feed items for one wallet since given time.
+    pub async fn activity_count_since(pool: &DbPool, wallet_id: Uuid, since: DateTime<Utc>) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM activity_feed WHERE wallet_id = $1 AND created_at >= $2",
+        )
+        .bind(wallet_id)
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Suspicious or blocked activity count since given time.
+    pub async fn activity_suspicious_count_since(pool: &DbPool, wallet_id: Uuid, since: DateTime<Utc>) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM activity_feed WHERE wallet_id = $1 AND created_at >= $2 AND activity_type IN ('suspicious_approval', 'blocked_interaction')",
+        )
+        .bind(wallet_id)
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    // ---- Dashboard overview (aggregate across all active wallets) ----
+
+    /// Minimum security score among active wallets (for overview status).
+    pub async fn min_security_score_active_wallets(pool: &DbPool) -> Result<Option<i32>, Error> {
+        let row: (Option<i32>,) = sqlx::query_as(
+            "SELECT MIN(COALESCE(wm.security_score, 100)) FROM wallet_monitoring wm JOIN wallets w ON w.id = wm.wallet_id WHERE w.is_active = true",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Latest scan time across all wallets (from wallet_monitoring.last_scan_at or security_scans).
+    pub async fn global_last_scan_at(pool: &DbPool) -> Result<Option<DateTime<Utc>>, Error> {
+        let row: (Option<DateTime<Utc>>,) = sqlx::query_as(
+            "SELECT MAX(last_scan_at) FROM wallet_monitoring",
+        )
+        .fetch_one(pool)
+        .await?;
+        if row.0.is_some() {
+            return Ok(row.0);
+        }
+        let row2: (Option<DateTime<Utc>>,) = sqlx::query_as(
+            "SELECT MAX(scanned_at) FROM security_scans",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(row2.0)
+    }
+
+    /// Unread alerts by severity across all wallets: (high, medium, low).
+    pub async fn alerts_count_by_severity_global(pool: &DbPool) -> Result<(i64, i64, i64), Error> {
+        let high: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE read_at IS NULL AND severity = 'high'",
+        )
+        .fetch_one(pool)
+        .await?;
+        let medium: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE read_at IS NULL AND severity = 'medium'",
+        )
+        .fetch_one(pool)
+        .await?;
+        let low: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE read_at IS NULL AND severity = 'low'",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok((high.0, medium.0, low.0))
+    }
+
+    /// Activity feed across all active wallets, most recent first.
+    pub async fn list_activity_across_wallets(pool: &DbPool, limit: i64) -> Result<Vec<ActivityFeedItemWithAddress>, Error> {
+        sqlx::query_as(
+            r#"
+            SELECT af.id, af.wallet_id, w.address AS wallet_address, af.activity_type, af.title, af.description, af.metadata, af.created_at
+            FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true
+            ORDER BY af.created_at DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Total activity count in the last 24h across all active wallets.
+    pub async fn activity_count_since_global(pool: &DbPool, since: DateTime<Utc>) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true AND af.created_at >= $1
+            "#,
+        )
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Suspicious/blocked activity count in the last 24h across all wallets.
+    pub async fn activity_suspicious_count_since_global(pool: &DbPool, since: DateTime<Utc>) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true AND af.created_at >= $1 AND af.activity_type IN ('suspicious_approval', 'blocked_interaction')
+            "#,
+        )
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Transaction monitoring totals across all wallets: (total_rows, high_risk_count).
+    pub async fn transaction_monitoring_global_totals(pool: &DbPool) -> Result<(i64, i64), Error> {
+        let total: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM transaction_monitoring tm JOIN wallets w ON w.id = tm.wallet_id WHERE w.is_active = true",
+        )
+        .fetch_one(pool)
+        .await?;
+        let high: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM transaction_monitoring tm JOIN wallets w ON w.id = tm.wallet_id WHERE w.is_active = true AND tm.risk_level = 'high'",
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok((total.0, high.0))
     }
 
     pub async fn list_scans(
@@ -448,6 +713,20 @@ impl SenseiguardRepository {
             .bind(scan_id)
             .fetch_optional(pool)
             .await
+    }
+
+    /// Latest trust score for a contract (most recent scan). None if never scanned.
+    pub async fn get_latest_trust_score(
+        pool: &DbPool,
+        contract_address: &str,
+    ) -> Result<Option<i32>, Error> {
+        let row: Option<(i32,)> = sqlx::query_as(
+            "SELECT trust_score FROM contract_scans WHERE contract_address = $1 ORDER BY scanned_at DESC LIMIT 1",
+        )
+        .bind(contract_address)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(|r| r.0))
     }
 
     /// Trend for a contract: scans in last 24h, distinct wallets, risk_trend hint.
@@ -799,6 +1078,20 @@ impl SenseiguardRepository {
     }
 
     // ---- Wallet approval alerts ----
+    pub async fn list_approval_alerts(
+        pool: &DbPool,
+        wallet_address: &str,
+        limit: i64,
+    ) -> Result<Vec<WalletApprovalAlert>, Error> {
+        sqlx::query_as(
+            "SELECT id, wallet_address, token_address, spender_address, amount_raw, risk_score, created_at FROM wallet_approval_alerts WHERE wallet_address = $1 ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(wallet_address)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn create_approval_alert(
         pool: &DbPool,
         wallet_address: &str,
@@ -906,5 +1199,33 @@ impl SenseiguardRepository {
             .execute(pool)
             .await?;
         Ok(r.rows_affected())
+    }
+
+    /// Distinct addresses relevant to this wallet: from approval alerts (spender, token), watchlist, blocked.
+    pub async fn list_relevant_addresses_for_wallet(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<Vec<String>, Error> {
+        #[derive(sqlx::FromRow)]
+        struct AddrRow {
+            addr: String,
+        }
+        let rows = sqlx::query_as::<_, AddrRow>(
+            r#"
+            SELECT DISTINCT addr FROM (
+                SELECT spender_address AS addr FROM wallet_approval_alerts WHERE wallet_address = $1
+                UNION
+                SELECT token_address AS addr FROM wallet_approval_alerts WHERE wallet_address = $1 AND token_address IS NOT NULL
+                UNION
+                SELECT contract_address AS addr FROM user_contract_watchlist WHERE wallet_address = $1
+                UNION
+                SELECT contract_address AS addr FROM user_blocked_contracts WHERE wallet_address = $1
+            ) t WHERE addr IS NOT NULL AND trim(addr) != ''
+            "#,
+        )
+        .bind(wallet_address)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.addr).collect())
     }
 }
