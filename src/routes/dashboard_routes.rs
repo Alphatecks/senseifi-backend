@@ -129,10 +129,11 @@ async fn dashboard_overview(
             let _ = WalletRepository::update_wallet_user_id(&pool, addr, &user_id).await;
         }
     }
-    // Fallback: when both user_id and wallet_address are missing, if env allows and exactly one active wallet exists, use it.
+    // Fallback: when both user_id and wallet_address are missing, if exactly one active wallet exists, use it so "1 connected" shows correctly.
+    // Set OVERVIEW_SINGLE_WALLET_FALLBACK=false to disable (e.g. multi-tenant where one wallet must not be shown to all).
     let single_wallet_fallback = std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK")
-        .map(|s| s == "true")
-        .unwrap_or(false);
+        .map(|s| s != "false")
+        .unwrap_or(true);
     let user_id = if user_id.is_empty() && single_wallet_fallback
     {
         match WalletRepository::get_all_active_wallets(&pool).await {

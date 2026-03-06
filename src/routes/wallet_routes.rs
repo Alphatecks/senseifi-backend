@@ -15,6 +15,7 @@ use crate::models::wallet::{
     ConnectWalletRequest, ALLOWED_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN, is_valid_eth_address,
 };
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
+use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
 use crate::services::senseiguard_service::SenseiguardService;
 use crate::services::wallet_service::WalletService;
@@ -96,6 +97,10 @@ async fn connect_wallet(
 
     match WalletService::connect_wallet(&pool, req).await {
         Ok(wallet) => {
+            // Ensure wallet row has user_id so overview "active wallets" count includes this wallet.
+            if let Some(ref du) = dashboard_user {
+                let _ = WalletRepository::update_wallet_user_id(&pool, &wallet.address, &du.user_id).await;
+            }
             let mut body = json!({
                 "success": true,
                 "data": wallet

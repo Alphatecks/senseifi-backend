@@ -133,7 +133,7 @@ Dashboard endpoints return **only real data** from your database (and, where con
 
 | Endpoint | Data source | Notes |
 |----------|-------------|--------|
-| `GET /api/dashboard/overview` | DB only | Accepts **`user_id`** or **`wallet_address`** (optional). When provided, wallet status (active count, last scan, status), alerts, activity timeline, recent activity, and connected risk are **scoped to that user's connected wallets only**. When **both** are omitted, the overview uses no user (0 active wallets) unless **`OVERVIEW_SINGLE_WALLET_FALLBACK`** is set (see below). |
+| `GET /api/dashboard/overview` | DB only | Accepts **`user_id`** or **`wallet_address`** (optional). When provided, wallet status (active count, last scan, status), alerts, activity timeline, recent activity, and connected risk are **scoped to that user's connected wallets only**. When **both** are omitted, the single-wallet fallback runs by default: if there is exactly one active wallet, that user is used so "1 active wallet" shows (set **`OVERVIEW_SINGLE_WALLET_FALLBACK=false`** to disable). |
 | `GET /api/dashboard/{address}/summary` | DB only | Per-wallet summary; trend % are computed from previous period (no hardcoded -2.3 / 2.3). |
 | `GET /api/dashboard/{address}/metrics` | DB only | Threat counts by type and security score. |
 | `GET /api/dashboard/{address}/threats` | DB only | Stored threats. |
@@ -149,8 +149,8 @@ Dashboard endpoints return **only real data** from your database (and, where con
 **User-scoped dashboard**
 
 - **`user_id`** — When connecting a wallet (`POST /api/wallets/connect`), send `user_id` in the body (e.g. your auth provider's user/sub id). That links the wallet to the user. `GET /api/dashboard/overview?user_id=<id>` then shows only that user's wallets and their alerts/activity/risk. Wallets connected without `user_id` (legacy) are not included in any user's overview.
-- **Overview identity** — Overview accepts either **`user_id`** or **`wallet_address`** as query params. If you send **`wallet_address`**, the backend resolves the linked `user_id` (or creates a dashboard user for that wallet) and returns data for that user. If you send neither, the overview shows 0 active wallets unless the single-wallet fallback is enabled.
-- **`OVERVIEW_SINGLE_WALLET_FALLBACK`** — Optional env var (default: not set). When set to **`true`**, if the overview is called with **no `user_id` and no `wallet_address`** and there is **exactly one active wallet** in the DB, the backend uses that wallet's user for the overview so the dashboard shows "1 active wallet" without requiring the frontend to send identity. **Multi-tenant:** leave unset (or `false`) when multiple users share the same backend; set to `true` only for single-user/single-tenant deployments (e.g. set in Render env for a single-dashboard app).
+- **Overview identity** — Overview accepts either **`user_id`** or **`wallet_address`** as query params. If you send **`wallet_address`**, the backend resolves the linked `user_id` (or creates a dashboard user for that wallet) and returns data for that user. If you send neither, the overview uses the **single-wallet fallback** (on by default): if there is exactly one active wallet, that wallet's user is used so the dashboard shows "1 active wallet".
+- **`OVERVIEW_SINGLE_WALLET_FALLBACK`** — Optional env var. **Default: enabled** (fallback runs when there is exactly one active wallet). Set to **`false`** to disable: then overview with no `user_id`/`wallet_address` shows 0 active wallets. Disable for **multi-tenant** deployments so one user's wallet is not shown to everyone.
 
 **Dashboard identity (no external auth)**
 
