@@ -51,6 +51,34 @@ pub async fn fetch_bytecode(address: &str, request_chain_id: Option<u64>) -> Res
     hex::decode(hex_str).map_err(|e| e.to_string())
 }
 
+/// Native balance in wei (hex with 0x). request_chain_id: chain for RPC (1 = Ethereum, etc.).
+pub async fn fetch_balance_wei(
+    address: &str,
+    request_chain_id: Option<u64>,
+) -> Result<String, String> {
+    let url = rpc_url_for_chain(request_chain_id)
+        .ok_or_else(|| "No RPC URL set for this chain".to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_getBalance",
+        "params": [address, "latest"]
+    });
+    let res = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let out: RpcResponse = res.json().await.map_err(|e| e.to_string())?;
+    Ok(out.result)
+}
+
 #[derive(Debug, Deserialize)]
 struct RpcResponse {
     result: String,

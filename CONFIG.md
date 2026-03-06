@@ -150,6 +150,12 @@ Dashboard endpoints return **only real data** from your database (and, where con
 
 - **`user_id`** — When connecting a wallet (`POST /api/wallets/connect`), send `user_id` in the body (e.g. your auth provider's user/sub id). That links the wallet to the user. `GET /api/dashboard/overview?user_id=<id>` then shows only that user's wallets and their alerts/activity/risk. Wallets connected without `user_id` (legacy) are not included in any user's overview.
 
+**Dashboard identity (no external auth)**
+
+- If the frontend does **not** send `user_id` on connect, the backend creates or reuses a **dashboard user** for that wallet: a random `user_id` (e.g. `fetrtwgebejhssns`), a random **display name** (e.g. "Stealth bag", "Megatron", "Alpha"), and a **user number** (e.g. 2314 for "User 2314"). The connect response then includes `dashboard_user: { user_id, display_name, user_number, user_label }`. Use `user_id` for `GET /api/dashboard/overview?user_id=...`.
+- **`GET /api/wallets/{address}/dashboard-user`** — Returns the dashboard user for that wallet (404 if never connected).
+- **`GET /api/wallets/{address}/balance?chain_id=1`** — Fetches native balance from RPC (`eth_getBalance`). Requires `ETHEREUM_RPC_URL` (or chain-specific RPC). Response: `{ balance_wei, balance_eth, chain_id }`.
+
 **External APIs used by the backend (for reference)**
 
 - **Etherscan V2** — Contract scan (ABI, source, contract creation). See §1 above.

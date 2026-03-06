@@ -81,3 +81,18 @@ pub struct ConnectedWalletItem {
     pub currency: String,
     pub connected_at: DateTime<Utc>,
 }
+
+/// Dashboard identity for a connected wallet: random user_id (API), display name, "User N" number.
+#[derive(Debug, Clone, Serialize)]
+pub struct DashboardUser {
+    pub user_id: String,
+    pub display_name: String,
+    pub user_number: i32,
+}
+
+impl DashboardUser {
+    /// Label for UI e.g. "User 2314".
+    pub fn user_label(&self) -> String {
+        format!("User {}", self.user_number)
+    }
+}

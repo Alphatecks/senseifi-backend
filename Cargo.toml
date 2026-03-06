@@ -19,3 +19,4 @@ tower_governor = { version = "0.8", features = ["axum"] }
 http = "1.0"
 reqwest = { version = "0.12", features = ["json"] }
 hex = "0.4"
+rand = "0.8"

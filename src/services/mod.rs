@@ -1,5 +1,6 @@
 pub mod ai_insight_service;
 pub mod analyzer_service;
+pub mod dashboard_user_service;
 pub mod hello_service;
 pub mod protection_engine;
 pub mod reputation_service;
