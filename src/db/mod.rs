@@ -10,6 +10,7 @@ pub type DbPool = PgPool;
 pub async fn create_pool(database_url: &str) -> Result<DbPool, sqlx::Error> {
     let opts = PgConnectOptions::from_str(database_url)?
         .statement_cache_capacity(0);
+    tracing::info!("DB pool: statement cache disabled (avoids cached plan errors after migrations)");
     PgPoolOptions::new()
         .max_connections(10)
         .acquire_timeout(Duration::from_secs(30))
