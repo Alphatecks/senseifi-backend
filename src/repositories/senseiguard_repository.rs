@@ -16,6 +16,20 @@ fn month_start_utc(dt: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or_else(|| dt)
 }
 
+/// Row for Live activity feed: activity_feed + wallet address and wallet_type.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ActivityFeedRowLive {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub wallet_address: String,
+    pub wallet_type: String,
+    pub activity_type: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
 pub struct SenseiguardRepository;
 
 impl SenseiguardRepository {
@@ -622,6 +636,79 @@ impl SenseiguardRepository {
         .bind(limit)
         .fetch_all(pool)
         .await
+    }
+
+    /// Paginated Live activity feed. Optional filter by user_id. Returns (rows, total).
+    pub async fn list_activity_feed_live(
+        pool: &DbPool,
+        user_id: Option<&str>,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<ActivityFeedRowLive>, i64), Error> {
+        let offset = (page.saturating_sub(1) as i64) * (per_page as i64);
+        let limit = per_page as i64;
+
+        let total: i64 = if let Some(uid) = user_id {
+            let row: (i64,) = sqlx::query_as(
+                r#"
+                SELECT COUNT(*)::bigint FROM activity_feed af
+                JOIN wallets w ON w.id = af.wallet_id
+                WHERE w.is_active = true AND w.user_id = $1
+                "#,
+            )
+            .bind(uid)
+            .fetch_one(pool)
+            .await?;
+            row.0
+        } else {
+            let row: (i64,) = sqlx::query_as(
+                r#"
+                SELECT COUNT(*)::bigint FROM activity_feed af
+                JOIN wallets w ON w.id = af.wallet_id
+                WHERE w.is_active = true
+                "#,
+            )
+            .fetch_one(pool)
+            .await?;
+            row.0
+        };
+
+        let rows: Vec<ActivityFeedRowLive> = if let Some(uid) = user_id {
+            sqlx::query_as(
+                r#"
+                SELECT af.id, af.wallet_id, w.address AS wallet_address, w.wallet_type,
+                       af.activity_type, af.title, af.description, af.metadata, af.created_at
+                FROM activity_feed af
+                JOIN wallets w ON w.id = af.wallet_id
+                WHERE w.is_active = true AND w.user_id = $1
+                ORDER BY af.created_at DESC
+                LIMIT $2 OFFSET $3
+                "#,
+            )
+            .bind(uid)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+        } else {
+            sqlx::query_as(
+                r#"
+                SELECT af.id, af.wallet_id, w.address AS wallet_address, w.wallet_type,
+                       af.activity_type, af.title, af.description, af.metadata, af.created_at
+                FROM activity_feed af
+                JOIN wallets w ON w.id = af.wallet_id
+                WHERE w.is_active = true
+                ORDER BY af.created_at DESC
+                LIMIT $1 OFFSET $2
+                "#,
+            )
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(pool)
+            .await?
+        };
+
+        Ok((rows, total))
     }
 
     /// Count of active approvals for this wallet (for Security tab "Active Approval").

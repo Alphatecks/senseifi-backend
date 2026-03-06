@@ -4,11 +4,11 @@ use crate::models::senseiguard::{
     threat_types, ActiveAlertsOverview, ActivityFeedItem, Alert, ConnectedRiskOverview,
     ConnectedWalletModalBalance, ConnectedWalletModalDetails, ConnectedWalletModalResponse,
     ConnectedWalletModalSecurity, DashboardMetricsResponse, DashboardOverviewResponse,
-    DashboardSummaryResponse, FullScanReportResponse, IngestActivityRequest, MetricCard,
-    MonitoredTransaction, RecentActivityOverview, ScanObservation, SecurityStatusResponse,
+    DashboardSummaryResponse, FullScanReportResponse, IngestActivityRequest, LiveActivityFeedItem,
+    MetricCard, MonitoredTransaction, RecentActivityOverview, ScanObservation, SecurityStatusResponse,
     SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
 };
-use crate::repositories::senseiguard_repository::SenseiguardRepository;
+use crate::repositories::senseiguard_repository::{SenseiguardRepository, ActivityFeedRowLive};
 use crate::repositories::wallet_repository::WalletRepository;
 use chrono::{Datelike, Duration, DateTime, NaiveDate, Utc};
 use sqlx::Error;
@@ -298,6 +298,22 @@ impl SenseiguardService {
     ) -> Result<Vec<ActivityFeedItem>, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
         SenseiguardRepository::list_activity(pool, wallet_id, limit).await
+    }
+
+    /// Live activity feed for the UI table. Paginated, optional user_id. Real data from activity_feed + metadata (asset, amount, counterparty, risk_level, status).
+    pub async fn get_live_activity_feed(
+        pool: &DbPool,
+        user_id: Option<&str>,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<LiveActivityFeedItem>, i64), Error> {
+        let (rows, total) =
+            SenseiguardRepository::list_activity_feed_live(pool, user_id, page, per_page).await?;
+        let items = rows
+            .into_iter()
+            .map(|r| row_to_live_feed_item(r))
+            .collect();
+        Ok((items, total))
     }
 
     /// List approvals for Approval & Permission UI. period = "this_month" filters to current calendar month.
@@ -622,6 +638,72 @@ fn chain_id_to_network(chain_id: i64) -> String {
         5 => "Goerli".to_string(),
         11155111 => "Sepolia".to_string(),
         _ => format!("Chain {}", chain_id),
+    }
+}
+
+fn row_to_live_feed_item(r: ActivityFeedRowLive) -> LiveActivityFeedItem {
+    let wallet = wallet_type_to_display(&r.wallet_type);
+    let type_display = activity_type_to_display(&r.activity_type);
+    let (asset, amount, counterparty, risk_level, status) = r.metadata.as_ref().map_or(
+        (None, None, None, None, None),
+        |m| {
+            (
+                m.get("asset").and_then(|v| v.as_str()).map(String::from),
+                m.get("amount").and_then(|v| v.as_str()).map(String::from),
+                m.get("counterparty").and_then(|v| v.as_str()).map(String::from),
+                m.get("risk_level").and_then(|v| v.as_str()).map(String::from),
+                m.get("status").and_then(|v| v.as_str()).map(String::from),
+            )
+        },
+    );
+    LiveActivityFeedItem {
+        id: r.id,
+        created_at: r.created_at,
+        wallet,
+        wallet_address: r.wallet_address,
+        type_display,
+        asset,
+        amount,
+        counterparty,
+        risk_level,
+        status,
+        title: r.title,
+        description: r.description,
+    }
+}
+
+fn wallet_type_to_display(wt: &str) -> String {
+    match wt.to_lowercase().as_str() {
+        "metamask" => "MetaMask".to_string(),
+        "coinbase" => "Coinbase".to_string(),
+        "binance" => "Binance".to_string(),
+        "walletconnect" => "WalletConnect".to_string(),
+        "kraken" => "Kraken".to_string(),
+        "trust wallet" | "trust" => "Trust Wallet".to_string(),
+        "gemini" => "Gemini".to_string(),
+        _ => {
+            let mut s = wt.to_string();
+            if let Some(r) = s.get_mut(0..1) {
+                r.make_ascii_uppercase();
+            }
+            s
+        }
+    }
+}
+
+fn activity_type_to_display(at: &str) -> String {
+    match at.to_lowercase().as_str() {
+        "incoming_tx" | "incoming" => "Incoming".to_string(),
+        "outgoing_tx" | "outgoing" => "Outgoing".to_string(),
+        "contract_call" | "contract" => "Contract".to_string(),
+        "approval" | "suspicious_approval" => "Approval".to_string(),
+        _ => {
+            let mut s = at.to_string();
+            if let Some(r) = s.get_mut(0..1) {
+                r.make_ascii_uppercase();
+            }
+            s.replace('_', " ")
+        }
     }
 }
 

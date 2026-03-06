@@ -22,6 +22,22 @@ fn default_per_wallet() -> i64 {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct LiveActivityFeedQuery {
+    /// Scope to this user's wallets when set.
+    user_id: Option<String>,
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page_10")]
+    per_page: u32,
+}
+fn default_page() -> u32 {
+    1
+}
+fn default_per_page_10() -> u32 {
+    10
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct OverviewQuery {
     /// Required: current user id (e.g. from auth). Dashboard shows only this user's connected wallets.
     user_id: Option<String>,
@@ -36,6 +52,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
         .route("/activity/recent", get(recent_activity_all_wallets))
+        .route("/activity/feed", get(live_activity_feed))
         .route("/{address}/metrics", get(dashboard_metrics))
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
@@ -365,6 +382,33 @@ async fn recent_activity_all_wallets(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to load recent activity" })),
+            ))
+        }
+    }
+}
+
+async fn live_activity_feed(
+    State(pool): State<DbPool>,
+    Query(q): Query<LiveActivityFeedQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let page = q.page.max(1);
+    let per_page = q.per_page.clamp(1, 50);
+    let user_id = q.user_id.as_deref().filter(|s| !s.trim().is_empty());
+    match SenseiguardService::get_live_activity_feed(&pool, user_id, page, per_page).await {
+        Ok((items, total)) => Ok(Json(json!({
+            "success": true,
+            "data": items,
+            "pagination": {
+                "page": page,
+                "per_page": per_page,
+                "total": total
+            }
+        }))),
+        Err(e) => {
+            eprintln!("live_activity_feed: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load activity feed" })),
             ))
         }
     }

@@ -131,6 +131,25 @@ pub struct ActivityFeedItemWithAddress {
     pub created_at: DateTime<Utc>,
 }
 
+/// One row for the Live activity feed API (Time, Wallet, Type, Asset & Amount, Counterparty/dApp, Risk, Status).
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveActivityFeedItem {
+    pub id: Uuid,
+    #[serde(rename = "time")]
+    pub created_at: DateTime<Utc>,
+    pub wallet: String,
+    pub wallet_address: String,
+    #[serde(rename = "type")]
+    pub type_display: String,
+    pub asset: Option<String>,
+    pub amount: Option<String>,
+    pub counterparty: Option<String>,
+    pub risk_level: Option<String>,
+    pub status: Option<String>,
+    pub title: String,
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct WalletAsset {
     pub id: Uuid,
