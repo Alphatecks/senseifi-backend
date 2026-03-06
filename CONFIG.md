@@ -155,3 +155,13 @@ Dashboard endpoints return **only real data** from your database (and, where con
 - **Etherscan V2** — Contract scan (ABI, source, contract creation). See §1 above.
 - **Ethereum/chain RPC** — Bytecode, and when the RPC URL is Alchemy, **simulation** (`alchemy_simulateAssetChanges`) for scan results. See §2 and §5.
 - **Dashboard overview/summary** — No external API; all from your DB. If you later add Alchemy (or another provider) for transaction/history, that would be documented here.
+
+---
+
+## 7. Deployments and migrations
+
+To avoid **`Migrate(VersionMissing(N))`** on deploy (e.g. on Render):
+
+- **Include the full `migrations/` directory in every build.** The backend embeds migrations at compile time (`sqlx::migrate!("./migrations")`). The commit/branch used for the build must contain all migration files (`001_*` through the latest). If the binary is built without a migration that the database expects, the app will panic at startup with `VersionMissing(N)`.
+- **Do not remove or renumber** existing migration files after they have been applied. Do not change the contents of applied migrations (checksum changes cause version mismatch).
+- If you see `VersionMissing(N)` again: redeploy from a commit that includes `migrations/NNN_*.sql` and ensure your build step does not exclude the `migrations/` folder (e.g. no `.dockerignore` or similar that drops it).

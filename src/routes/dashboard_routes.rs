@@ -63,18 +63,14 @@ async fn dashboard_overview(
     State(pool): State<DbPool>,
     Query(q): Query<OverviewQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let user_id = match &q.user_id {
-        Some(id) if !id.trim().is_empty() => id.trim(),
-        _ => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "success": false,
-                    "error": "user_id is required. Pass the current user's id (e.g. from auth) so the dashboard shows only that user's connected wallets."
-                })),
-            ));
-        }
-    };
+    // When user_id is missing or empty, return 200 with empty overview so the dashboard page
+    // loads (e.g. before login). Frontend should send user_id from auth when available.
+    let user_id = q
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("");
     let limit = q.timeline_limit.clamp(1, 100);
     match SenseiguardService::get_dashboard_overview(&pool, user_id, limit).await {
         Ok(overview) => Ok(Json(json!({
