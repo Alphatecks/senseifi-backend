@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use crate::db::DbPool;
 use crate::models::senseiguard::IngestActivityRequest;
 use crate::models::wallet::is_valid_eth_address;
+use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
 use crate::services::senseiguard_service::SenseiguardService;
@@ -52,12 +53,33 @@ fn default_timeline_limit() -> i64 {
     20
 }
 
-/// One entry in the threat intelligence catalog (for the "Threat Intelligence" modal).
+#[derive(Debug, serde::Deserialize)]
+struct ActivityMonitorQuery {
+    user_id: Option<String>,
+    wallet_address: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ThreatIntelligenceQuery {
+    /// Scope to this user's wallets when set.
+    user_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+/// One actual threat detection for the "Threat Intelligence" modal (from threats table).
 #[derive(Debug, serde::Serialize)]
 struct ThreatIntelligenceItem {
+    id: String,
     title: String,
     description: String,
     severity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    threat_type: Option<String>,
+    detected_at: String,
+    wallet_address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_contract: Option<String>,
 }
 
 pub fn dashboard_routes() -> Router<DbPool> {
@@ -66,6 +88,8 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/activity/feed", get(live_activity_feed))
         .route("/threat-intelligence", get(threat_intelligence_catalog))
+        .route("/activity-monitor/wallets", get(activity_monitor_wallets))
+        .route("/activity-monitor/dapps", get(activity_monitor_dapps))
         .route("/{address}/metrics", get(dashboard_metrics))
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
@@ -202,45 +226,145 @@ async fn dashboard_overview(
     }
 }
 
-/// Threat intelligence catalog for the "View threat" / Threat Intelligence modal.
-/// Returns known threat types with title, description, and severity (no wallet required).
-async fn threat_intelligence_catalog() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let catalog: Vec<ThreatIntelligenceItem> = vec![
-        ThreatIntelligenceItem {
-            title: "Phishing DApp".to_string(),
-            description: "Fake Uniswap interface prompting wallet connect".to_string(),
-            severity: "High".to_string(),
-        },
-        ThreatIntelligenceItem {
-            title: "Crypto Scam Website".to_string(),
-            description: "Imitation of a popular exchange to steal credentials".to_string(),
-            severity: "Critical".to_string(),
-        },
-        ThreatIntelligenceItem {
-            title: "Malicious Transaction".to_string(),
-            description: "Transaction that drains funds or grants unlimited approvals".to_string(),
-            severity: "High".to_string(),
-        },
-        ThreatIntelligenceItem {
-            title: "Risky Token".to_string(),
-            description: "Token with hidden mint, blacklist, or drainer logic".to_string(),
-            severity: "Medium".to_string(),
-        },
-        ThreatIntelligenceItem {
-            title: "Unlimited Approval".to_string(),
-            description: "Token approval that allows unlimited spend without user consent".to_string(),
-            severity: "High".to_string(),
-        },
-        ThreatIntelligenceItem {
-            title: "Signature Phishing".to_string(),
-            description: "Request for a signature that could authorize asset transfer or permissions".to_string(),
-            severity: "Critical".to_string(),
-        },
-    ];
-    Ok(Json(json!({
-        "success": true,
-        "data": catalog
-    })))
+/// Activity Monitor "Connected wallet" tab: list wallets with security level and last activity.
+async fn activity_monitor_wallets(
+    State(pool): State<DbPool>,
+    Query(q): Query<ActivityMonitorQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = q
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let user_id = match user_id {
+        Some(id) => id,
+        None => {
+            let addr = q.wallet_address.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            match addr.filter(|a| is_valid_eth_address(a)) {
+                Some(address) => {
+                    match WalletRepository::get_wallet_by_address(&pool, address).await {
+                        Ok(Some(w)) => w.user_id.unwrap_or_default(),
+                        _ => String::new(),
+                    }
+                }
+                None => String::new(),
+            }
+        }
+    };
+    let user_id = if user_id.is_empty()
+        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK").map(|s| s != "false").unwrap_or(true)
+    {
+        match WalletRepository::get_all_active_wallets(&pool).await {
+            Ok(wallets) if !wallets.is_empty() => wallets[0].user_id.clone().unwrap_or_default(),
+            _ => user_id,
+        }
+    } else {
+        user_id
+    };
+    let user_id_opt = if user_id.is_empty() {
+        None
+    } else {
+        Some(user_id.as_str())
+    };
+    match SenseiguardService::get_activity_monitor_wallets(&pool, user_id_opt).await {
+        Ok(list) => Ok(Json(json!({ "success": true, "data": list }))),
+        Err(e) => {
+            eprintln!("activity_monitor_wallets: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load activity monitor wallets" })),
+            ))
+        }
+    }
+}
+
+/// Activity Monitor "Connected dApps" tab: list dApps connected to the user's wallets.
+async fn activity_monitor_dapps(
+    State(pool): State<DbPool>,
+    Query(q): Query<ActivityMonitorQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = q
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let user_id = match user_id {
+        Some(id) => id,
+        None => {
+            let addr = q.wallet_address.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            match addr.filter(|a| is_valid_eth_address(a)) {
+                Some(address) => {
+                    match WalletRepository::get_wallet_by_address(&pool, address).await {
+                        Ok(Some(w)) => w.user_id.unwrap_or_default(),
+                        _ => String::new(),
+                    }
+                }
+                None => String::new(),
+            }
+        }
+    };
+    let user_id = if user_id.is_empty()
+        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK").map(|s| s != "false").unwrap_or(true)
+    {
+        match WalletRepository::get_all_active_wallets(&pool).await {
+            Ok(wallets) if !wallets.is_empty() => wallets[0].user_id.clone().unwrap_or_default(),
+            _ => user_id,
+        }
+    } else {
+        user_id
+    };
+    let user_id_opt = if user_id.is_empty() {
+        None
+    } else {
+        Some(user_id.as_str())
+    };
+    match SenseiguardService::get_activity_monitor_dapps(&pool, user_id_opt).await {
+        Ok(list) => Ok(Json(json!({ "success": true, "data": list }))),
+        Err(e) => {
+            eprintln!("activity_monitor_dapps: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load activity monitor dApps" })),
+            ))
+        }
+    }
+}
+
+/// Threat intelligence: actual threat detections from the threats table (no catalog stub).
+/// Optional user_id scopes to that user's wallets; otherwise returns recent detections across all active wallets.
+async fn threat_intelligence_catalog(
+    State(pool): State<DbPool>,
+    Query(q): Query<ThreatIntelligenceQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = q.user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    match SenseiguardRepository::list_threats_for_dashboard(&pool, user_id, limit).await {
+        Ok(rows) => {
+            let data: Vec<ThreatIntelligenceItem> = rows
+                .into_iter()
+                .map(|r| ThreatIntelligenceItem {
+                    id: r.id.to_string(),
+                    title: r.title.clone(),
+                    description: r.explanation.clone().unwrap_or(r.title),
+                    severity: r.severity,
+                    threat_type: r.threat_type,
+                    detected_at: r.detected_at.to_rfc3339(),
+                    wallet_address: r.wallet_address,
+                    source_contract: r.source_contract,
+                })
+                .collect();
+            Ok(Json(json!({ "success": true, "data": data })))
+        }
+        Err(e) => {
+            eprintln!("threat_intelligence_catalog: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load threat intelligence" })),
+            ))
+        }
+    }
 }
 
 async fn dashboard_metrics(

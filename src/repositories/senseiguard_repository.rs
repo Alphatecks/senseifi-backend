@@ -16,6 +16,53 @@ fn month_start_utc(dt: DateTime<Utc>) -> DateTime<Utc> {
         .unwrap_or_else(|| dt)
 }
 
+/// Row for Activity Monitor "Connected dApps" list.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DappConnectionRow {
+    pub wallet_address: String,
+    pub domain: String,
+    pub dapp_name: String,
+    pub description: Option<String>,
+    pub tokens: Option<String>,
+    pub connected_at: DateTime<Utc>,
+    pub last_activity_at: DateTime<Utc>,
+}
+
+/// Row from threat_intelligence_catalog table (View threat modal).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ThreatIntelligenceCatalogRow {
+    pub threat_type: String,
+    pub title: String,
+    pub description: String,
+    pub severity: String,
+}
+
+/// Actual threat detection for dashboard threat-intelligence (from threats table + wallet address).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ThreatDetectionRow {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub threat_type: Option<String>,
+    pub title: String,
+    pub severity: String,
+    pub explanation: Option<String>,
+    pub detected_at: DateTime<Utc>,
+    pub source_contract: Option<String>,
+}
+
+/// Row for Activity Monitor "Connected wallet" list: wallet + security_score + last_scan_at.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ActivityMonitorWalletRow {
+    pub address: String,
+    pub chain_id: i64,
+    pub wallet_type: String,
+    pub connected_at: DateTime<Utc>,
+    pub is_active: bool,
+    pub user_id: Option<String>,
+    pub security_score: Option<i32>,
+    pub last_scan_at: Option<DateTime<Utc>>,
+}
+
 /// Row for Live activity feed: activity_feed + wallet address and wallet_type.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ActivityFeedRowLive {
@@ -153,6 +200,60 @@ impl SenseiguardRepository {
         .bind(limit)
         .fetch_all(pool)
         .await
+    }
+
+    pub async fn list_threat_intelligence_catalog(
+        pool: &DbPool,
+    ) -> Result<Vec<ThreatIntelligenceCatalogRow>, Error> {
+        sqlx::query_as(
+            "SELECT threat_type, title, description, severity FROM threat_intelligence_catalog ORDER BY display_order ASC, threat_type",
+        )
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Recent threat detections for dashboard threat-intelligence. Optional user_id scopes to that user's wallets.
+    pub async fn list_threats_for_dashboard(
+        pool: &DbPool,
+        user_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ThreatDetectionRow>, Error> {
+        let limit = limit.clamp(1, 200);
+        match user_id {
+            Some(uid) if !uid.trim().is_empty() => {
+                sqlx::query_as(
+                    r#"
+                    SELECT t.id, w.address AS wallet_address, t.threat_type, t.title, t.severity,
+                           t.explanation, t.detected_at, t.source_contract
+                    FROM threats t
+                    JOIN wallets w ON w.id = t.wallet_id
+                    WHERE w.is_active = true AND w.user_id = $1
+                    ORDER BY t.detected_at DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(uid)
+                .bind(limit)
+                .fetch_all(pool)
+                .await
+            }
+            _ => {
+                sqlx::query_as(
+                    r#"
+                    SELECT t.id, w.address AS wallet_address, t.threat_type, t.title, t.severity,
+                           t.explanation, t.detected_at, t.source_contract
+                    FROM threats t
+                    JOIN wallets w ON w.id = t.wallet_id
+                    WHERE w.is_active = true
+                    ORDER BY t.detected_at DESC
+                    LIMIT $1
+                    "#,
+                )
+                .bind(limit)
+                .fetch_all(pool)
+                .await
+            }
+        }
     }
 
     pub async fn count_scans_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
@@ -384,6 +485,42 @@ impl SenseiguardRepository {
         .fetch_one(pool)
         .await?;
         Ok(row2.0)
+    }
+
+    /// Wallets for Activity Monitor "Connected wallet" tab: wallet + security_score + last_scan_at. When user_id is None, returns all active wallets (fallback).
+    pub async fn list_activity_monitor_wallets(
+        pool: &DbPool,
+        user_id: Option<&str>,
+    ) -> Result<Vec<ActivityMonitorWalletRow>, Error> {
+        let rows = if let Some(uid) = user_id {
+            sqlx::query_as::<_, ActivityMonitorWalletRow>(
+                r#"
+                SELECT w.address, w.chain_id, w.wallet_type, w.connected_at, w.is_active, w.user_id,
+                       wm.security_score, wm.last_scan_at
+                FROM wallets w
+                LEFT JOIN wallet_monitoring wm ON wm.wallet_id = w.id
+                WHERE w.is_active = true AND w.user_id = $1
+                ORDER BY w.connected_at DESC
+                "#,
+            )
+            .bind(uid)
+            .fetch_all(pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, ActivityMonitorWalletRow>(
+                r#"
+                SELECT w.address, w.chain_id, w.wallet_type, w.connected_at, w.is_active, w.user_id,
+                       wm.security_score, wm.last_scan_at
+                FROM wallets w
+                LEFT JOIN wallet_monitoring wm ON wm.wallet_id = w.id
+                WHERE w.is_active = true
+                ORDER BY w.connected_at DESC
+                "#,
+            )
+            .fetch_all(pool)
+            .await?
+        };
+        Ok(rows)
     }
 
     /// Unread alerts by severity across all wallets: (high, medium, low).
@@ -1477,6 +1614,36 @@ impl SenseiguardRepository {
             .execute(pool)
             .await?;
         Ok(r.rows_affected())
+    }
+
+    // ---- Activity Monitor: dApp connections ----
+    /// List dApp connections for a user's wallets (for Activity Monitor "Connected dApps" tab).
+    pub async fn list_dapp_connections_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<Vec<DappConnectionRow>, Error> {
+        sqlx::query_as::<_, DappConnectionRow>(
+            r#"
+            SELECT dc.wallet_address, dc.domain, dc.dapp_name, dc.description, dc.tokens,
+                   dc.connected_at, dc.last_activity_at
+            FROM dapp_connections dc
+            JOIN wallets w ON w.address = dc.wallet_address AND w.is_active = true
+            WHERE w.user_id = $1
+            ORDER BY dc.last_activity_at DESC
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// List all dApp connections (when no user_id; fallback for activity monitor).
+    pub async fn list_dapp_connections_all(pool: &DbPool) -> Result<Vec<DappConnectionRow>, Error> {
+        sqlx::query_as::<_, DappConnectionRow>(
+            "SELECT wallet_address, domain, dapp_name, description, tokens, connected_at, last_activity_at FROM dapp_connections ORDER BY last_activity_at DESC",
+        )
+        .fetch_all(pool)
+        .await
     }
 
     /// Distinct addresses relevant to this wallet: from approval alerts (spender, token), watchlist, blocked.

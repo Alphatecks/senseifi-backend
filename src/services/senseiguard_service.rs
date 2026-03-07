@@ -1,12 +1,13 @@
 use crate::clients::rpc;
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    threat_types, ActiveAlertsOverview, ActivityFeedItem, Alert, ConnectedRiskOverview,
-    ConnectedWalletModalBalance, ConnectedWalletModalDetails, ConnectedWalletModalResponse,
-    ConnectedWalletModalSecurity, DashboardMetricsResponse, DashboardOverviewResponse,
-    DashboardSummaryResponse, FullScanReportResponse, IngestActivityRequest, LiveActivityFeedItem,
-    MetricCard, MonitoredTransaction, RecentActivityOverview, ScanObservation, SecurityStatusResponse,
-    SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
+    threat_types, ActiveAlertsOverview, ActivityFeedItem, ActivityMonitorDappResponse,
+    ActivityMonitorWalletResponse, Alert, ConnectedRiskOverview, ConnectedWalletModalBalance,
+    ConnectedWalletModalDetails, ConnectedWalletModalResponse, ConnectedWalletModalSecurity,
+    DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse, FullScanReportResponse,
+    IngestActivityRequest, LiveActivityFeedItem, MetricCard, MonitoredTransaction, RecentActivityOverview,
+    ScanObservation, SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard, WalletApproval,
+    WalletAsset, WalletStatusOverview,
 };
 use crate::repositories::senseiguard_repository::{SenseiguardRepository, ActivityFeedRowLive};
 use crate::repositories::wallet_repository::WalletRepository;
@@ -548,6 +549,91 @@ fn score_to_level(score: i32) -> String {
         _ => "Low".to_string(),
     }
 }
+
+    /// Activity Monitor "Connected wallet" tab: wallets with security level and last activity.
+    pub async fn get_activity_monitor_wallets(
+        pool: &DbPool,
+        user_id: Option<&str>,
+    ) -> Result<Vec<ActivityMonitorWalletResponse>, Error> {
+        let rows = SenseiguardRepository::list_activity_monitor_wallets(pool, user_id).await?;
+        let out: Vec<ActivityMonitorWalletResponse> = rows
+            .into_iter()
+            .map(|r| {
+                let score = r.security_score.unwrap_or(100);
+                let last_dt = r.last_scan_at.unwrap_or(r.connected_at);
+                ActivityMonitorWalletResponse {
+                    address: r.address,
+                    wallet_type_display: wallet_type_to_display(&r.wallet_type),
+                    chain_id: r.chain_id,
+                    chain_name: Self::activity_monitor_chain_name(r.chain_id),
+                    status: if r.is_active { "Active" } else { "Inactive" }.to_string(),
+                    security_level: Self::security_level_from_score(score),
+                    last_activity: Self::format_relative_time(last_dt),
+                }
+            })
+            .collect();
+        Ok(out)
+    }
+
+    fn security_level_from_score(score: i32) -> String {
+        match score {
+            0..=33 => "High".to_string(),
+            34..=66 => "Moderate".to_string(),
+            _ => "Safe".to_string(),
+        }
+    }
+
+    fn format_relative_time(dt: DateTime<Utc>) -> String {
+        let now = Utc::now();
+        let d = now.signed_duration_since(dt);
+        if d.num_minutes() < 1 {
+            "Just now".to_string()
+        } else if d.num_minutes() < 60 {
+            format!("{} minutes ago", d.num_minutes())
+        } else if d.num_hours() < 24 {
+            format!("{} hour{} ago", d.num_hours(), if d.num_hours() == 1 { "" } else { "s" })
+        } else if d.num_days() < 7 {
+            format!("{} day{} ago", d.num_days(), if d.num_days() == 1 { "" } else { "s" })
+        } else {
+            format!("{} days ago", d.num_days())
+        }
+    }
+
+    fn activity_monitor_chain_name(chain_id: i64) -> String {
+        match chain_id {
+            1 => "Ethereum".to_string(),
+            56 => "Binance Smart Chain".to_string(),
+            137 => "Polygon".to_string(),
+            8453 => "Base".to_string(),
+            42161 => "Arbitrum".to_string(),
+            10 => "Optimism".to_string(),
+            _ => format!("Chain {}", chain_id),
+        }
+    }
+
+    /// Activity Monitor "Connected dApps" tab: dApps connected to the user's wallets.
+    pub async fn get_activity_monitor_dapps(
+        pool: &DbPool,
+        user_id: Option<&str>,
+    ) -> Result<Vec<ActivityMonitorDappResponse>, Error> {
+        let rows = if let Some(uid) = user_id {
+            SenseiguardRepository::list_dapp_connections_for_user(pool, uid).await?
+        } else {
+            SenseiguardRepository::list_dapp_connections_all(pool).await?
+        };
+        let out: Vec<ActivityMonitorDappResponse> = rows
+            .into_iter()
+            .map(|r| ActivityMonitorDappResponse {
+                dapp_name: r.dapp_name,
+                description: r.description.unwrap_or_default(),
+                tokens: r.tokens.unwrap_or_default(),
+                status: "Active".to_string(),
+                connected_wallet_address: r.wallet_address,
+                last_activity: Self::format_relative_time(r.last_activity_at),
+            })
+            .collect();
+        Ok(out)
+    }
 
     /// Real data for connected-wallet modal (Details, Balance, Security, Activity). No stubs.
     pub async fn get_connected_wallet_modal(

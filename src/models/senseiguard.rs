@@ -293,6 +293,29 @@ pub struct ConnectedRiskOverview {
     pub active_dapps: i64,
 }
 
+/// One wallet row for Activity Monitor "Connected wallet" tab.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActivityMonitorWalletResponse {
+    pub address: String,
+    pub wallet_type_display: String,
+    pub chain_id: i64,
+    pub chain_name: String,
+    pub status: String,
+    pub security_level: String,
+    pub last_activity: String,
+}
+
+/// One dApp row for Activity Monitor "Connected dApps" tab.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActivityMonitorDappResponse {
+    pub dapp_name: String,
+    pub description: String,
+    pub tokens: String,
+    pub status: String,
+    pub connected_wallet_address: String,
+    pub last_activity: String,
+}
+
 /// One metric card: value (count) + trend % (this month vs previous month).
 #[derive(Debug, Clone, Serialize)]
 pub struct MetricCard {
