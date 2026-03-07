@@ -291,6 +291,16 @@ impl SenseiguardService {
         SenseiguardRepository::list_alerts(pool, wallet_id, limit).await
     }
 
+    /// Unread alerts for the "Unread Alert" modal (read_at IS NULL).
+    pub async fn list_unread_alerts(
+        pool: &DbPool,
+        address: &str,
+        limit: i64,
+    ) -> Result<Vec<Alert>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::list_unread_alerts(pool, wallet_id, limit).await
+    }
+
     pub async fn list_activity(
         pool: &DbPool,
         address: &str,

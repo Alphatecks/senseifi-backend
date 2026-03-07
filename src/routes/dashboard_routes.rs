@@ -72,6 +72,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/{address}/scan", post(run_full_scan).get(get_latest_scan_report))
         .route("/{address}/threats", get(list_threats))
         .route("/{address}/scans", get(list_scans))
+        .route("/{address}/alerts/unread", get(list_unread_alerts))
         .route("/{address}/alerts", get(list_alerts))
         .route("/{address}/activity", get(list_activity).post(ingest_activity))
         .route("/{address}/approvals", get(list_approvals))
@@ -472,6 +473,52 @@ async fn list_scans(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list scans" })),
+            ))
+        }
+    }
+}
+
+async fn list_unread_alerts(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let limit = q.limit.clamp(1, 100);
+    match SenseiguardService::list_unread_alerts(&pool, &address, limit).await {
+        Ok(alerts) => {
+            let wallet_type = WalletRepository::get_wallet_by_address(&pool, &address)
+                .await
+                .ok()
+                .flatten()
+                .map(|w| match w.wallet_type.to_lowercase().as_str() {
+                    "metamask" => "MetaMask".to_string(),
+                    "coinbase" => "Coinbase".to_string(),
+                    "binance" => "Binance".to_string(),
+                    s if !s.is_empty() => s[..1].to_uppercase() + &s[1..],
+                    _ => "Wallet".to_string(),
+                })
+                .unwrap_or_else(|| "Wallet".to_string());
+            Ok(Json(json!({
+                "success": true,
+                "data": {
+                    "wallet_address": address,
+                    "wallet_type": wallet_type,
+                    "alerts": alerts
+                }
+            })))
+        }
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("list_unread_alerts: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to list unread alerts" })),
             ))
         }
     }

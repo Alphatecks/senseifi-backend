@@ -624,6 +624,21 @@ impl SenseiguardRepository {
         .await
     }
 
+    /// Unread alerts for the "Unread Alert" modal (read_at IS NULL).
+    pub async fn list_unread_alerts(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Alert>, Error> {
+        sqlx::query_as(
+            "SELECT * FROM alerts WHERE wallet_id = $1 AND read_at IS NULL ORDER BY created_at DESC LIMIT $2",
+        )
+        .bind(wallet_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn list_activity(
         pool: &DbPool,
         wallet_id: Uuid,
