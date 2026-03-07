@@ -23,11 +23,15 @@ impl AiInsightService {
         if simulation.hidden_internal_calls.unwrap_or(0) > 0 {
             parts.push("It uses hidden internal calls that can change your allowances or move funds.".to_string());
         }
-        if owner_privileges.mint == Some(true) || owner_privileges.withdraw_liquidity == Some(true) {
-            parts.push("The owner can mint tokens or withdraw liquidity, which can lead to a rug pull.".to_string());
-        }
         if reputation.reported_scam == Some(true) {
             parts.push("This contract has been reported as a scam by the community.".to_string());
+        }
+        // Only mention rug pull when there is concrete risk (drain or scam). Mint/withdraw alone are common in legitimate contracts.
+        let privileged = owner_privileges.mint == Some(true) || owner_privileges.withdraw_liquidity == Some(true);
+        if privileged && (simulation.drains_full_balance == Some(true) || reputation.reported_scam == Some(true)) {
+            parts.push("The owner can mint or withdraw liquidity; combined with the above, this raises rug pull risk.".to_string());
+        } else if privileged {
+            parts.push("The contract has owner functions (mint or liquidity withdrawal). Many legitimate projects use these; check audits and the project before trusting.".to_string());
         }
         if parts.is_empty() {
             return "No major risks identified from the current analysis. Always verify contract source and approvals.".to_string();

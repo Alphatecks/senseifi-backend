@@ -32,33 +32,32 @@ impl ScoringEngine {
         r.min(100)
     }
 
+    /// Owner privilege risk. Lower weights so legitimate contracts (DEXes, tokens with mint) don't get unfairly penalized.
     fn owner_risk(o: &OwnerPrivileges) -> u8 {
         let mut r = 0u8;
         if o.mint == Some(true) {
-            r += 25;
+            r += 12;
         }
         if o.withdraw_liquidity == Some(true) {
-            r += 25;
+            r += 12;
         }
         if o.upgradeable == Some(true) {
-            r += 25;
-        }
-        if o.pause == Some(true) {
             r += 15;
         }
+        if o.pause == Some(true) {
+            r += 8;
+        }
         if o.blacklist == Some(true) {
-            r += 10;
+            r += 5;
         }
         r.min(100)
     }
 
+    /// Reputation risk. Don't penalize "not verified" (many legitimate contracts aren't on Etherscan); only scam reports and community flags.
     fn reputation_risk(rep: &ReputationInfo) -> u8 {
         let mut r = 0u8;
         if rep.reported_scam == Some(true) {
             r += 80;
-        }
-        if rep.verified_source != Some(true) {
-            r = r.saturating_add(10);
         }
         let flags = rep.community_flags.unwrap_or(0);
         r = r.saturating_add((flags as u8).min(20));
