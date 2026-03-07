@@ -136,7 +136,8 @@ Dashboard endpoints return **only real data** from your database (and, where con
 | `GET /api/dashboard/overview` | DB only | Accepts **`user_id`** or **`wallet_address`** (optional). When provided, wallet status (active count, last scan, status), alerts, activity timeline, recent activity, and connected risk are **scoped to that user's connected wallets only**. When **both** are omitted, the single-wallet fallback runs by default: if there is exactly one active wallet, that user is used so "1 active wallet" shows (set **`OVERVIEW_SINGLE_WALLET_FALLBACK=false`** to disable). |
 | `GET /api/dashboard/{address}/summary` | DB only | Per-wallet summary; trend % are computed from previous period (no hardcoded -2.3 / 2.3). |
 | `GET /api/dashboard/{address}/metrics` | DB only | Threat counts by type and security score. |
-| `GET /api/dashboard/{address}/threats` | DB only | Stored threats. |
+| `GET /api/dashboard/threat-intelligence` | Static catalog | Threat intelligence catalog for the "View threat" modal: threat types with title, description, severity (Phishing DApp, Crypto Scam Website, Malicious Transaction, etc.). No wallet required. |
+| `GET /api/dashboard/{address}/threats` | DB only | Stored threats detected for that wallet. |
 | `GET /api/dashboard/{address}/alerts` | DB only | Stored alerts. |
 | `GET /api/dashboard/{address}/activity` | DB only | Activity feed (ingest via `POST .../activity` or workers). |
 | `GET /api/dashboard/{address}/transaction-monitoring` | DB only | Monitored transactions / risk items. |

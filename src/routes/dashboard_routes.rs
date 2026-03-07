@@ -52,11 +52,20 @@ fn default_timeline_limit() -> i64 {
     20
 }
 
+/// One entry in the threat intelligence catalog (for the "Threat Intelligence" modal).
+#[derive(Debug, serde::Serialize)]
+struct ThreatIntelligenceItem {
+    title: String,
+    description: String,
+    severity: String,
+}
+
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
         .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/activity/feed", get(live_activity_feed))
+        .route("/threat-intelligence", get(threat_intelligence_catalog))
         .route("/{address}/metrics", get(dashboard_metrics))
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
@@ -190,6 +199,47 @@ async fn dashboard_overview(
             ))
         }
     }
+}
+
+/// Threat intelligence catalog for the "View threat" / Threat Intelligence modal.
+/// Returns known threat types with title, description, and severity (no wallet required).
+async fn threat_intelligence_catalog() -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let catalog: Vec<ThreatIntelligenceItem> = vec![
+        ThreatIntelligenceItem {
+            title: "Phishing DApp".to_string(),
+            description: "Fake Uniswap interface prompting wallet connect".to_string(),
+            severity: "High".to_string(),
+        },
+        ThreatIntelligenceItem {
+            title: "Crypto Scam Website".to_string(),
+            description: "Imitation of a popular exchange to steal credentials".to_string(),
+            severity: "Critical".to_string(),
+        },
+        ThreatIntelligenceItem {
+            title: "Malicious Transaction".to_string(),
+            description: "Transaction that drains funds or grants unlimited approvals".to_string(),
+            severity: "High".to_string(),
+        },
+        ThreatIntelligenceItem {
+            title: "Risky Token".to_string(),
+            description: "Token with hidden mint, blacklist, or drainer logic".to_string(),
+            severity: "Medium".to_string(),
+        },
+        ThreatIntelligenceItem {
+            title: "Unlimited Approval".to_string(),
+            description: "Token approval that allows unlimited spend without user consent".to_string(),
+            severity: "High".to_string(),
+        },
+        ThreatIntelligenceItem {
+            title: "Signature Phishing".to_string(),
+            description: "Request for a signature that could authorize asset transfer or permissions".to_string(),
+            severity: "Critical".to_string(),
+        },
+    ];
+    Ok(Json(json!({
+        "success": true,
+        "data": catalog
+    })))
 }
 
 async fn dashboard_metrics(
