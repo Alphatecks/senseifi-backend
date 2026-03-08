@@ -483,6 +483,43 @@ pub struct ScanContractResponse {
     pub ai_summary: Option<String>,
 }
 
+// ---- Contract scanner: scam pattern, activity, liquidity, community (for UI) ----
+
+/// Scam pattern checklist + similarity to known scam patterns (0–100).
+#[derive(Debug, Serialize)]
+pub struct ScamPatternResponse {
+    pub honeypot: bool,
+    pub approval_drain: bool,
+    pub delayed_rug: bool,
+    pub fee_escalation: bool,
+    /// 0–100; higher = more similar to known scam patterns.
+    pub similarity_score_percent: u8,
+}
+
+/// Contract on-chain activity metrics (wire to indexer/RPC for real data).
+#[derive(Debug, Serialize)]
+pub struct ContractActivityResponse {
+    pub avg_tx_per_day: Option<u64>,
+    pub largest_tx_usd: Option<String>,
+    pub abnormal_activity: bool,
+}
+
+/// Liquidity metrics (wire to DEX/subgraph for real data).
+#[derive(Debug, Serialize)]
+pub struct ContractLiquidityResponse {
+    pub initial_lp_usd: Option<String>,
+    pub current_lp_usd: Option<String>,
+    pub sudden_pulls: Option<u32>,
+}
+
+/// Community / report signals for a contract.
+#[derive(Debug, Serialize)]
+pub struct CommunitySignalsResponse {
+    pub report_count: i64,
+    pub confirmed_exploits: i64,
+    pub users_flagged_count: i64,
+}
+
 // ---- Protection: block, watchlist, report ----
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

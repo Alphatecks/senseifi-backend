@@ -1207,6 +1207,47 @@ impl SenseiguardRepository {
         .await
     }
 
+    /// Latest scan for a contract (for scam-pattern and contract-scoped APIs).
+    pub async fn get_latest_contract_scan_by_address(
+        pool: &DbPool,
+        contract_address: &str,
+    ) -> Result<Option<ContractScan>, Error> {
+        sqlx::query_as(
+            "SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address FROM contract_scans WHERE contract_address = $1 ORDER BY scanned_at DESC LIMIT 1",
+        )
+        .bind(contract_address)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Count threats where source_contract matches (for community-signals confirmed_exploits).
+    pub async fn count_threats_for_contract(
+        pool: &DbPool,
+        contract_address: &str,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threats WHERE source_contract = $1",
+        )
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Count distinct reporters for a contract (scam_reports).
+    pub async fn count_distinct_reporters_for_contract(
+        pool: &DbPool,
+        contract_address: &str,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(DISTINCT COALESCE(reporter_wallet_address, id::text))::bigint FROM scam_reports WHERE contract_address = $1",
+        )
+        .bind(contract_address)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
     // ---- Contract fingerprints ----
     pub async fn get_fingerprint_by_contract(
         pool: &DbPool,

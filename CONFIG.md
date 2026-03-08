@@ -84,6 +84,15 @@ BSC_RPC_URL=https://bsc-dataseed.binance.org/
 
 Frontend: send `chain_id: 1` for Ethereum contracts, `chain_id: 56` for BSC.
 
+**Contract-scoped APIs** (for Contract Scanner UI):
+
+| Endpoint | Purpose |
+|----------|---------|
+| `GET /api/scan-contract/contract/{address}/scam-pattern` | Scam checklist: `honeypot`, `approval_drain`, `delayed_rug`, `fee_escalation` (bool), plus `similarity_score_percent` (0–100). Derived from latest contract scan; if no scan, returns all false and 0. |
+| `GET /api/scan-contract/contract/{address}/activity` | Activity: `avg_tx_per_day`, `largest_tx_usd`, `abnormal_activity`. Placeholder (null/false) until indexer/RPC is wired. |
+| `GET /api/scan-contract/contract/{address}/liquidity` | Liquidity: `initial_lp_usd`, `current_lp_usd`, `sudden_pulls`. Placeholder (null) until DEX/subgraph is wired. |
+| `GET /api/scan-contract/contract/{address}/community-signals` | Community: `report_count` (scam_reports), `confirmed_exploits` (threats with this source_contract), `users_flagged_count` (distinct reporters). Real data from DB. |
+
 ---
 
 ## 4. Behavior summary
