@@ -192,6 +192,14 @@ pub struct SecurityStatusResponse {
     pub status: String,
     pub message: String,
     pub last_scan_at: Option<DateTime<Utc>>,
+    /// Doc: security-score level (safe | moderate | dangerous).
+    pub level: String,
+    /// Doc: per-component breakdown when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_breakdown: Option<serde_json::Value>,
+    /// Doc: last_updated (same as last_scan_at or wallet_monitoring update).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_updated: Option<DateTime<Utc>>,
 }
 
 /// Response for GET /api/wallets/{address}/modal — real data for connected-wallet modal (Details, Balance, Security, Activity).
@@ -615,12 +623,22 @@ pub struct AnalyzeTxRequest {
     pub chain_id: Option<i64>,
 }
 
-/// Response: risk score, warning, recommended action; or skipped if toggle off.
+/// Response: risk score, band, threat_types, explanation, recommendation; or skipped if toggle off. Doc-aligned.
 #[derive(Debug, Serialize)]
 pub struct AnalyzeTxResponse {
     pub skipped: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub risk_score: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub band: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threat_types: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommendation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk_breakdown: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub warning: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -6,13 +6,28 @@ use crate::models::senseiguard::{
     AnalyzeTxResponse, DappConnectionCheckResponse, UserProtectionSettings,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
+use crate::repositories::wallet_repository::WalletRepository;
 
-/// Result of evaluating a transaction (pre-sign).
+/// Band for API response: Safe | Warning | Dangerous | Block (from risk_score).
+pub fn score_to_band(score: i32) -> &'static str {
+    match score {
+        0..=30 => "Safe",
+        31..=60 => "Warning",
+        61..=84 => "Dangerous",
+        _ => "Block",
+    }
+}
+
+/// Result of evaluating a transaction (pre-sign). Aligned with doc: band, threat_types, explanation, risk_breakdown.
 pub struct TxEvalResult {
     pub risk_score: i32,
     pub warning: Option<String>,
     pub recommended_action: String,
     pub blocked: bool,
+    pub band: String,
+    pub threat_types: Vec<String>,
+    pub explanation: Option<String>,
+    pub risk_breakdown: Option<serde_json::Value>,
 }
 
 /// Result of evaluating an approval event.
@@ -49,11 +64,16 @@ pub async fn evaluate_transaction(
         let to_normalized = to.map(|s| s.to_lowercase()).unwrap_or_default();
         let allowed = whitelist.iter().any(|a| a.to_lowercase() == to_normalized);
         if !allowed && !to_normalized.is_empty() {
+            let msg = "Emergency lock is on. Only whitelisted addresses are allowed.";
             return Ok(TxEvalResult {
                 risk_score: 100,
-                warning: Some("Emergency lock is on. Only whitelisted addresses are allowed.".to_string()),
+                warning: Some(msg.to_string()),
                 recommended_action: "Reject transaction".to_string(),
                 blocked: true,
+                band: "Block".to_string(),
+                threat_types: vec![],
+                explanation: Some(msg.to_string()),
+                risk_breakdown: Some(serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 })),
             });
         }
     }
@@ -64,6 +84,10 @@ pub async fn evaluate_transaction(
             warning: None,
             recommended_action: "Proceed".to_string(),
             blocked: false,
+            band: "Safe".to_string(),
+            threat_types: vec![],
+            explanation: None,
+            risk_breakdown: None,
         });
     }
 
@@ -71,65 +95,96 @@ pub async fn evaluate_transaction(
         .await
         .unwrap_or(false);
     if blocked {
+        let msg = "Contract is blocked by your protection settings.";
         return Ok(TxEvalResult {
             risk_score: 100,
-            warning: Some("Contract is blocked by your protection settings.".to_string()),
+            warning: Some(msg.to_string()),
             recommended_action: "Reject transaction".to_string(),
             blocked: true,
+            band: "Block".to_string(),
+            threat_types: vec![crate::models::senseiguard::threat_types::PHISHING_INDICATOR.to_string()],
+            explanation: Some(msg.to_string()),
+            risk_breakdown: Some(serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 })),
         });
     }
 
-    let (risk_score, warning, recommended_action) = threat_analyze_tx(to, value, data).await;
+    let (risk_score, warning, recommended_action, mut threat_types, risk_breakdown) =
+        threat_analyze_tx_sync(to, value, data);
     let rules_block = apply_security_rules_tx(pool, wallet_address, to, value, data).await;
     let blocked = rules_block.unwrap_or(false) || (settings.auto_block_high_risk && risk_score >= 70);
+    let recommended_action = if blocked {
+        "Reject transaction".to_string()
+    } else {
+        recommended_action
+    };
+    let warning = warning.or_else(|| {
+        if blocked {
+            Some("Blocked by rule or auto-block high risk.".to_string())
+        } else {
+            None
+        }
+    });
+    if blocked && risk_score >= 70 && threat_types.is_empty() {
+        threat_types.push(crate::models::senseiguard::threat_types::MALICIOUS_TRANSACTION.to_string());
+    }
+    let band = score_to_band(risk_score).to_string();
+    let explanation = warning.clone();
 
     Ok(TxEvalResult {
         risk_score,
-        warning: warning.or_else(|| {
-            if blocked {
-                Some("Blocked by rule or auto-block high risk.".to_string())
-            } else {
-                None
-            }
-        }),
-        recommended_action: if blocked {
-            "Reject transaction".to_string()
-        } else {
-            recommended_action
-        },
+        warning,
+        recommended_action,
         blocked,
+        band,
+        threat_types,
+        explanation,
+        risk_breakdown: Some(risk_breakdown),
     })
 }
 
-async fn threat_analyze_tx(
+/// Returns (score, warning, recommended_action, threat_types, risk_breakdown).
+fn threat_analyze_tx_sync(
     to: Option<&str>,
     value: Option<&str>,
     data: Option<&str>,
-) -> (i32, Option<String>, String) {
+) -> (i32, Option<String>, String, Vec<String>, serde_json::Value) {
     let mut score = 0i32;
+    let mut approval_risk = 0i32;
     let mut warning = None;
+    let mut threat_types: Vec<String> = Vec::new();
     let data = data.unwrap_or("");
     if data.starts_with("0x") && data.len() >= 10 {
         let sig = &data[2..10].to_lowercase();
         if sig == "095ea7b3" || sig == "a22cb465" {
             score = score.max(75);
+            approval_risk = 75;
             warning = Some("Unlimited or high-value approval detected.".to_string());
+            threat_types.push(crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string());
         }
         if data.len() > 138 && (sig == "095ea7b3" || sig == "a22cb465") {
             let amount_hex = data.get(74..138).unwrap_or("");
             if amount_hex == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" {
                 score = 90;
+                approval_risk = 90;
                 warning = Some("Unlimited approval detected.".to_string());
+                if !threat_types.contains(&crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string()) {
+                    threat_types.push(crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string());
+                }
             }
         }
     }
-    if score >= 70 {
-        (score, warning, "Reject transaction".to_string())
+    let recommended_action = if score >= 70 {
+        "Reject transaction".to_string()
     } else if score >= 40 {
-        (score, warning, "Review before signing".to_string())
+        "Review before signing".to_string()
     } else {
-        (score, warning, "Proceed".to_string())
-    }
+        "Proceed".to_string()
+    };
+    let risk_breakdown = serde_json::json!({
+        "approval_risk": approval_risk,
+        "simulation_drain": 0
+    });
+    (score, warning, recommended_action, threat_types, risk_breakdown)
 }
 
 async fn apply_security_rules_tx(
@@ -294,6 +349,11 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
         return AnalyzeTxResponse {
             skipped: true,
             risk_score: None,
+            band: None,
+            threat_types: None,
+            explanation: None,
+            recommendation: None,
+            risk_breakdown: None,
             warning: None,
             recommended_action: None,
             reason: Some("High-risk transaction warnings are disabled.".to_string()),
@@ -303,16 +363,27 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
         return AnalyzeTxResponse {
             skipped: false,
             risk_score: Some(0),
+            band: Some("Safe".to_string()),
+            threat_types: Some(vec![]),
+            explanation: None,
+            recommendation: Some("Proceed".to_string()),
+            risk_breakdown: None,
             warning: None,
             recommended_action: Some("Proceed".to_string()),
             reason: None,
         };
     };
+    let recommendation = r.recommended_action.clone();
     AnalyzeTxResponse {
         skipped: false,
         risk_score: Some(r.risk_score),
+        band: Some(r.band),
+        threat_types: Some(r.threat_types),
+        explanation: r.explanation,
+        recommendation: Some(recommendation.clone()),
+        risk_breakdown: r.risk_breakdown,
         warning: r.warning,
-        recommended_action: Some(r.recommended_action),
+        recommended_action: Some(recommendation),
         reason: None,
     }
 }
@@ -340,4 +411,63 @@ pub fn build_dapp_check_response(skipped: bool, result: Option<DappEvalResult>) 
         phishing_risk: Some(r.phishing_risk),
         reason: None,
     }
+}
+
+/// Full analyze-tx flow: settings check, evaluate, persist threat/alert when needed, return response.
+/// Used by both POST /api/protection/transaction/analyze and POST /api/dashboard/{address}/analyze-tx.
+pub async fn analyze_tx_and_respond(
+    pool: &DbPool,
+    wallet_address: &str,
+    to: Option<&str>,
+    value: Option<&str>,
+    data: Option<&str>,
+) -> Result<AnalyzeTxResponse, String> {
+    let settings = match SenseiguardRepository::get_protection_settings(pool, wallet_address).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return Ok(build_analyze_tx_response(true, None));
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    if !settings.high_risk_tx_warnings {
+        return Ok(build_analyze_tx_response(true, None));
+    }
+    let r = evaluate_transaction(pool, wallet_address, to, value, data).await?;
+    if (r.risk_score >= 60 || !r.threat_types.is_empty()) && r.risk_score > 0 {
+        if let Ok(Some(wallet)) = WalletRepository::get_wallet_by_address(pool, wallet_address).await {
+            let severity = match r.band.as_str() {
+                "Block" | "Dangerous" => "high",
+                "Warning" => "medium",
+                _ => "low",
+            };
+            let title = r
+                .explanation
+                .as_deref()
+                .unwrap_or("Pre-sign transaction risk detected");
+            let threat_type = r.threat_types.first().map(String::as_str);
+            let _ = SenseiguardRepository::create_threat_with_surface(
+                pool,
+                wallet.id,
+                severity,
+                title,
+                to,
+                threat_type,
+                Some("tx_intent"),
+                r.explanation.as_deref(),
+            )
+            .await;
+            if r.risk_score >= 85 {
+                let _ = SenseiguardRepository::create_alert(
+                    pool,
+                    wallet.id,
+                    None,
+                    severity,
+                    title,
+                    r.explanation.as_deref(),
+                )
+                .await;
+            }
+        }
+    }
+    Ok(build_analyze_tx_response(false, Some(r)))
 }

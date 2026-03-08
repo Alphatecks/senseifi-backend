@@ -63,6 +63,18 @@ pub struct ActivityMonitorWalletRow {
     pub last_scan_at: Option<DateTime<Utc>>,
 }
 
+/// Row from wallet_scan_history (GET /api/protection/scan-history).
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct WalletScanHistoryRow {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub scan_type: String,
+    pub risk_score: i32,
+    pub issues_found: i32,
+    pub details: Option<serde_json::Value>,
+    pub scanned_at: DateTime<Utc>,
+}
+
 /// Row for Live activity feed: activity_feed + wallet address and wallet_type.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ActivityFeedRowLive {
@@ -1180,6 +1192,21 @@ impl SenseiguardRepository {
         Ok(count)
     }
 
+    /// Recent contract scans for this wallet (for risk-profile cached contract risks).
+    pub async fn list_contract_scans_for_wallet(
+        pool: &DbPool,
+        wallet_address: &str,
+        limit: i64,
+    ) -> Result<Vec<ContractScan>, Error> {
+        sqlx::query_as(
+            "SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address FROM contract_scans WHERE scanned_for_address = $1 ORDER BY scanned_at DESC LIMIT $2",
+        )
+        .bind(wallet_address)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
     // ---- Contract fingerprints ----
     pub async fn get_fingerprint_by_contract(
         pool: &DbPool,
@@ -1490,6 +1517,46 @@ impl SenseiguardRepository {
         .execute(pool)
         .await?;
         Ok(r.rows_affected())
+    }
+
+    // ---- Wallet scan history ----
+    pub async fn create_wallet_scan_history(
+        pool: &DbPool,
+        wallet_address: &str,
+        scan_type: &str,
+        risk_score: i32,
+        issues_found: i32,
+        details: &serde_json::Value,
+    ) -> Result<WalletScanHistoryRow, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO wallet_scan_history (wallet_address, scan_type, risk_score, issues_found, details, scanned_at)
+            VALUES ($1, $2, $3, $4, $5, NOW())
+            RETURNING id, wallet_address, scan_type, risk_score, issues_found, details, scanned_at
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(scan_type)
+        .bind(risk_score)
+        .bind(issues_found)
+        .bind(details)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn list_wallet_scan_history(
+        pool: &DbPool,
+        wallet_address: &str,
+        limit: i64,
+    ) -> Result<Vec<WalletScanHistoryRow>, Error> {
+        let limit = limit.clamp(1, 100);
+        sqlx::query_as(
+            "SELECT id, wallet_address, scan_type, risk_score, issues_found, details, scanned_at FROM wallet_scan_history WHERE wallet_address = $1 ORDER BY scanned_at DESC LIMIT $2",
+        )
+        .bind(wallet_address)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
     }
 
     // ---- Wallet approval alerts ----

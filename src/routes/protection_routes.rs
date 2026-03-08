@@ -20,8 +20,8 @@ use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::protection_engine::{
-    build_analyze_tx_response, build_dapp_check_response, evaluate_approval, evaluate_dapp_connection,
-    evaluate_transaction, run_monitor_cycle,
+    analyze_tx_and_respond, build_dapp_check_response, evaluate_approval, evaluate_dapp_connection,
+    run_monitor_cycle,
 };
 use axum::extract::Path;
 use uuid::Uuid;
@@ -29,6 +29,19 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 struct WalletQuery {
     wallet_address: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ScanHistoryQuery {
+    wallet_address: String,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EmergencyFreezeRequest {
+    wallet_address: String,
+    freeze: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,6 +71,7 @@ pub fn protection_routes() -> Router<DbPool> {
         .route("/rules", get(list_rules).post(create_rule))
         .route("/rules/{rule_id}", put(update_rule).delete(delete_rule))
         .route("/emergency-lock", post(emergency_lock))
+        .route("/emergency-freeze", post(emergency_freeze))
         .route("/approvals/ingest", post(approvals_ingest))
         .route("/security-alerts", get(security_alerts))
         .route("/address-safety", get(address_safety))
@@ -68,6 +82,7 @@ pub fn protection_routes() -> Router<DbPool> {
         .route("/watchlist", post(add_watchlist).delete(remove_from_watchlist).get(list_watchlist))
         .route("/report", post(report_scam))
         .route("/revoke-approval", post(revoke_approval))
+        .route("/scan-history", get(scan_history))
 }
 
 async fn get_settings(
@@ -200,24 +215,7 @@ async fn transaction_analyze(
     if !is_valid_eth_address(&req.wallet_address) {
         return Err(bad_address());
     }
-    let settings = match SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            let out = build_analyze_tx_response(true, None);
-            return Ok(Json(serde_json::to_value(&out).unwrap_or(json!({ "skipped": true }))));
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": e.to_string() })),
-            ));
-        }
-    };
-    if !settings.high_risk_tx_warnings {
-        let out = build_analyze_tx_response(true, None);
-        return Ok(Json(serde_json::to_value(&out).unwrap_or(json!({ "skipped": true }))));
-    }
-    match evaluate_transaction(
+    match analyze_tx_and_respond(
         &pool,
         &req.wallet_address,
         req.to.as_deref(),
@@ -226,10 +224,7 @@ async fn transaction_analyze(
     )
     .await
     {
-        Ok(r) => {
-            let out = build_analyze_tx_response(false, Some(r));
-            Ok(Json(serde_json::to_value(&out).unwrap_or(json!({}))))
-        }
+        Ok(out) => Ok(Json(serde_json::to_value(&out).unwrap_or(json!({})))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e })),
@@ -417,6 +412,39 @@ async fn security_alerts(
     let data: Vec<serde_json::Value> = data.into_iter().take(limit as usize).collect();
 
     Ok(Json(json!({ "success": true, "data": data })))
+}
+
+async fn scan_history(
+    State(pool): State<DbPool>,
+    Query(q): Query<ScanHistoryQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !is_valid_eth_address(&q.wallet_address) {
+        return Err(bad_address());
+    }
+    let limit = q.limit.unwrap_or(20).min(100) as i64;
+    match SenseiguardRepository::list_wallet_scan_history(&pool, &q.wallet_address, limit).await {
+        Ok(rows) => {
+            let data: Vec<serde_json::Value> = rows
+                .into_iter()
+                .map(|r| {
+                    json!({
+                        "id": r.id,
+                        "wallet_address": r.wallet_address,
+                        "scan_type": r.scan_type,
+                        "risk_score": r.risk_score,
+                        "issues_found": r.issues_found,
+                        "details": r.details,
+                        "scanned_at": r.scanned_at
+                    })
+                })
+                .collect();
+            Ok(Json(json!({ "success": true, "data": data })))
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": e.to_string() })),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -621,6 +649,65 @@ async fn emergency_lock(
                 "wallet_address": s.wallet_address,
                 "emergency_lock": s.emergency_lock,
                 "whitelisted_addresses": s.whitelisted_addresses
+            }
+        }))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": e.to_string() })),
+        )),
+    }
+}
+
+async fn emergency_freeze(
+    State(pool): State<DbPool>,
+    axum::Json(req): axum::Json<EmergencyFreezeRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    if !is_valid_eth_address(&req.wallet_address) {
+        return Err(bad_address());
+    }
+    let existing = SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": e.to_string() })),
+            )
+        })?;
+    let (auto, high_risk, approval, dapp, _) = match &existing {
+        Some(s) => (
+            s.auto_security_scan,
+            s.high_risk_tx_warnings,
+            s.new_approval_alerts,
+            s.new_dapp_connection_alerts,
+            s.auto_block_high_risk,
+        ),
+        None => (true, true, true, true, false),
+    };
+    let auto_block = req.freeze || existing.as_ref().map(|s| s.auto_block_high_risk).unwrap_or(false);
+    let whitelist = existing
+        .as_ref()
+        .and_then(|s| s.whitelisted_addresses.clone())
+        .unwrap_or(serde_json::json!([]));
+    match SenseiguardRepository::upsert_protection_settings_full(
+        &pool,
+        &req.wallet_address,
+        auto,
+        high_risk,
+        approval,
+        dapp,
+        auto_block,
+        Some(req.freeze),
+        Some(whitelist),
+    )
+    .await
+    {
+        Ok(s) => Ok(Json(json!({
+            "success": true,
+            "data": {
+                "wallet_address": s.wallet_address,
+                "freeze": s.emergency_lock,
+                "emergency_lock": s.emergency_lock,
+                "auto_block_high_risk": auto_block
             }
         }))),
         Err(e) => Err((

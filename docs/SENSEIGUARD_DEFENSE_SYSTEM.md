@@ -42,13 +42,61 @@ This modular layout keeps collectors, processors, and scoring separate so you ca
 
 ---
 
-## 2. What Is Missing (and How to Add It)
+## 2. Five-Layer Architecture (Industry Model)
+
+Modern threat detection systems follow a **5-layer** flow from raw data to response. SenseiGuard aligns as follows.
+
+| Layer | Name | Goal | SenseiGuard mapping |
+|-------|------|------|---------------------|
+| **1** | **Sensing / Data acquisition** | Collect raw signals at volume | Wallet state (approvals, history), transaction (to, value, data), contract (bytecode, creation), domain/URL; plus future reputation/fingerprint feeds. |
+| **2** | **Data ingestion & preprocessing** | Clean, normalize, parse, extract features, sync time | Calldata decode (function selector, args); address normalization; log/event parsing; feature extraction (e.g. approval amount, spender, contract age). |
+| **3** | **Detection & analytics engine** | Detect threats via multiple methods | Signature + anomaly + behavioral + correlation (see below). |
+| **4** | **Threat intelligence & risk scoring** | Severity, classification, context | Risk Engine: weighted components → risk_score 0–100, risk_breakdown, threat_type, severity; “Is this known?” (reputation/fingerprint), “How critical?” (asset/context). |
+| **5** | **Alerting, visualization & response** | Deliver results to humans or automation | API (score, band, threat_types, explanation, recommendation); alerts table; dashboard (overview, metrics, threat intelligence, timelines). |
+
+**End-to-end flow:**
+
+```
+Layer 1: Sensors (wallet, tx, contract, domain)
+        ↓
+Layer 2: Ingestion (decode, normalize, feature extraction)
+        ↓
+Layer 3: Detection (signature + anomaly + behavioral + correlation)
+        ↓
+Layer 4: Risk scoring & threat classification
+        ↓
+Layer 5: Alerts / dashboard / API response
+```
+
+### 2a. Layer 3 — Four detection methods
+
+The **detection engine** should use all four methods; gaps leave blind spots.
+
+| Method | Description | SenseiGuard use |
+|--------|-------------|-----------------|
+| **A. Signature detection** | Match known attack patterns. | Dangerous function list (approve max, setApprovalForAll, delegatecall, …), drain patterns (multicall, full balance), contract fingerprint families (e.g. wallet_drainer_v2). |
+| **B. Anomaly detection** | Flag behavior that deviates from normal. | `behavioral_anomaly`: deviation from wallet baseline (unusual value, new dApp, first-time contract); contract age &lt; 24–48h; login/activity from unexpected context. |
+| **C. Behavioral analysis** | Analyze sequences of actions. | Simulation: approval → drain; permit → malicious spender; multicall with hidden secondary calls. Sequence “connect → approve unlimited → tx to new contract” as a flow. |
+| **D. Correlation** | Combine events from multiple sources into one verdict. | e.g. Approval to contract **and** contract on phishing list **and** domain typosquat → correlated threat. Firewall alert + unusual approval + same contract in drainer list → escalate. |
+
+**Correlation example (target state):**
+
+- Wallet state: “Unlimited approval to 0xABC…”
+- Contract: “0xABC deployed &lt; 24h, same deployer as 2 known drainers.”
+- Domain: “Site similar to uniswap.org.”
+- **Correlated:** risk_score high, threat_types = [unlimited_approval, phishing_indicator], explanation = “Unlimited approval to a contract deployed by a known drainer deployer, from a typosquat domain.”
+
+Making Layer 2 (ingestion) and Layer 3 (four methods) explicit ensures we don’t skip preprocessing or rely on signature-only detection.
+
+---
+
+## 3. What Is Missing (and How to Add It)
 
 Your current system is strong on **rules and simulation**. Three major layers are still absent; adding them moves the system toward **threat intelligence network** quality.
 
 ---
 
-### 2.1 Reputation Intelligence Layer
+### 3.1 Reputation Intelligence Layer
 
 **Problem:** Today the system is mostly rule-based. Attackers reuse:
 
@@ -80,7 +128,7 @@ Without reputation, a slightly modified or redeployed contract can bypass rules.
 
 ---
 
-### 2.2 Contract Fingerprinting
+### 3.2 Contract Fingerprinting
 
 **Problem:** Malicious contracts often share **structural** similarities (not just behavior). Rule-only analysis can miss new variants.
 
@@ -116,7 +164,7 @@ This enables **zero-day-style** detection when new contracts share structure wit
 
 ---
 
-### 2.3 Network-Level Attack Detection
+### 3.3 Network-Level Attack Detection
 
 **Problem:** Detection is currently **single-wallet / single-transaction** focused. Many attacks are **campaigns**: one contract or one infrastructure drains many wallets in a short window.
 
@@ -143,7 +191,7 @@ This enables **zero-day-style** detection when new contracts share structure wit
 
 ---
 
-## 3. Explainable Scoring (Risk Breakdown)
+## 4. Explainable Scoring (Risk Breakdown)
 
 Scoring must be **explainable**. Return not only a single number but **why** the score is what it is.
 
@@ -177,7 +225,7 @@ Scoring must be **explainable**. Return not only a single number but **why** the
 
 ---
 
-## 4. Threat Types (Extended)
+## 5. Threat Types (Extended)
 
 In addition to the types in the [main architecture](SENSEIGUARD_ARCHITECTURE.md), add these for common DeFi attack vectors:
 
@@ -193,7 +241,7 @@ These integrate into the same pipeline: **Signal Collectors** and **Behavior Ana
 
 ---
 
-## 5. From Detection to Prevention (Guardian Vision)
+## 6. From Detection to Prevention (Guardian Vision)
 
 The design today focuses on **detecting** threats. The most valuable Web3 security systems **prevent** them. SenseiGuard should evolve into a **guardian** that can act, not only warn.
 
@@ -216,7 +264,7 @@ When detection turns into prevention, the system becomes a real **guardian**—w
 
 ---
 
-## 6. Summary: Before vs After
+## 7. Summary: Before vs After
 
 | Dimension | Current (strong base) | After (defense system) |
 |-----------|------------------------|-------------------------|
@@ -230,9 +278,9 @@ When detection turns into prevention, the system becomes a real **guardian**—w
 
 ---
 
-## 7. References
+## 8. References
 
 - [SenseiGuard Architecture](SENSEIGUARD_ARCHITECTURE.md) — Four surfaces, threat types, scoring, API.
 - [Threat Detection Architecture](THREAT_DETECTION_ARCHITECTURE.md) — Flow from triggers to threats/alerts.
 
-*This document is the roadmap for the SenseiGuard defense system: reputation, fingerprinting, network awareness, modular engine, explainability, and prevention.*
+*This document is the roadmap for the SenseiGuard defense system: 5-layer architecture, four detection methods (signature, anomaly, behavioral, correlation), reputation, fingerprinting, network awareness, modular engine, explainability, and prevention.*

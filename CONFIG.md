@@ -134,8 +134,12 @@ Dashboard endpoints return **only real data** from your database (and, where con
 | Endpoint | Data source | Notes |
 |----------|-------------|--------|
 | `GET /api/dashboard/overview` | DB only | Accepts **`user_id`** or **`wallet_address`** (optional). When provided, wallet status (active count, last scan, status), alerts, activity timeline, recent activity, and connected risk are **scoped to that user's connected wallets only**. When **both** are omitted, the single-wallet fallback runs by default: if there is exactly one active wallet, that user is used so "1 active wallet" shows (set **`OVERVIEW_SINGLE_WALLET_FALLBACK=false`** to disable). |
+| `GET /api/dashboard/{address}/risk-profile` | DB only | Wallet state risk (score), approval summary (total count), cached contract risks (recent contract scans for this wallet), last score. |
 | `GET /api/dashboard/{address}/summary` | DB only | Per-wallet summary; trend % are computed from previous period (no hardcoded -2.3 / 2.3). |
+| `POST /api/dashboard/{address}/analyze-tx` | Engine | Pre-sign transaction analysis. Body: `{ to, value, data, gas?, chainId? }`. Returns `risk_score`, `band` (Safe \| Warning \| Dangerous \| Block), `threat_types[]`, `explanation`, `recommendation`, `risk_breakdown` (optional). Same logic as `POST /api/protection/transaction/analyze` (which requires `wallet_address` in body). |
 | `GET /api/dashboard/{address}/metrics` | DB only | Threat counts by type and security score. |
+| `GET /api/dashboard/{address}/security-status` | DB only | Score, status, message, last_scan_at, **level** (safe \| moderate \| dangerous), **risk_breakdown** (optional), **last_updated**. |
+| `GET /api/dashboard/{address}/security-score` | DB only | Same handler as security-status; doc alias for score + risk_breakdown + level. |
 | `GET /api/dashboard/threat-intelligence` | Actual detections | Recent threat detections from the `threats` table (title, description/explanation, severity, threat_type, detected_at, wallet_address, source_contract). Query: `user_id` (optional, scope to user's wallets), `limit` (optional, default 50, max 200). |
 | `GET /api/dashboard/activity-monitor/wallets` | DB only | Activity Monitor "Connected wallet" tab: list of wallets with `wallet_type_display` (e.g. MetaMask), `chain_name`, `status` (Active/Inactive), `security_level` (Safe/Moderate/High), `last_activity` (e.g. "2 minutes ago"). Query: `user_id` or `wallet_address` (optional; same resolution as overview). |
 | `GET /api/dashboard/activity-monitor/dapps` | DB only | Activity Monitor "Connected dApps" tab: list of dApp connections (`dapp_name`, `description`, `tokens`, `status`, `connected_wallet_address`, `last_activity`). Query: `user_id` or `wallet_address` (optional). Data from `dapp_connections` table (populate via extension/client ingest). |
@@ -164,11 +168,20 @@ Dashboard endpoints return **only real data** from your database (and, where con
 - **`GET /api/wallets/{address}/modal`** — **Real data only** for the connected-wallet modal (Details, Balance, Security, Activity). One response: `details` (provider, address, network, connected_at, security_status), `balance` (total_usd from DB assets, native_balance_eth from RPC, `assets[]` from `wallet_assets`), `security` (active_approvals, last_scan_at, last_scan_ago, threat_level, risk_exposure_percent from DB), `activity` (from `activity_feed`). No stubs; 2FA is `null` (not tracked).
 - **`GET /api/dashboard/activity/feed`** — **Live activity feed** for the table UI. Query: `user_id` (optional), `page` (default 1), `per_page` (default 10, max 50). Returns `data[]` with: `time` (created_at), `wallet` (display name from wallet_type), `wallet_address`, `type` (Incoming/Outgoing/Contract/Approval from activity_type), `asset`, `amount`, `counterparty`, `risk_level`, `status`, `title`, `description`. Asset/amount/counterparty/risk_level/status come from **metadata** when ingesting: `POST /api/dashboard/{address}/activity` with body `metadata: { "asset": "0.42 ETH", "amount": "0.42", "counterparty": "0x9f3...a21", "risk_level": "low", "status": "completed" }`. Real data from `activity_feed` + wallets join.
 
-**External APIs used by the backend (for reference)**
+**Pre-sign analyze-tx (protection)**
 
-- **Etherscan V2** — Contract scan (ABI, source, contract creation). See §1 above.
-- **Ethereum/chain RPC** — Bytecode, and when the RPC URL is Alchemy, **simulation** (`alchemy_simulateAssetChanges`) for scan results. See §2 and §5.
-- **Dashboard overview/summary** — No external API; all from your DB. If you later add Alchemy (or another provider) for transaction/history, that would be documented here.
+- **`POST /api/protection/transaction/analyze`** — Body: `{ wallet_address, to?, value?, data?, chain_id? }`. Returns same shape as dashboard analyze-tx: `risk_score`, `band`, `threat_types`, `explanation`, `recommendation`, `risk_breakdown`. When risk ≥ 60 or threat_types non-empty, a row is stored in `threats` and optionally an alert when score ≥ 85.
+- **`GET /api/protection/scan-history`** — Query: `wallet_address`, `limit` (optional, default 20, max 100). Returns list of recent scan runs from `wallet_scan_history` (scan_type, risk_score, issues_found, details, scanned_at).
+
+**External APIs used by the backend (third-party)**
+
+| Provider | Used in | Purpose | Env / config |
+|----------|---------|---------|--------------|
+| **Etherscan API V2** | `src/clients/etherscan.rs`, scan_service | ABI (getabi), source (getsourcecode), contract creation | `ETHERSCAN_API_KEY`, `ETHERSCAN_BASE_URL`, `ETHERSCAN_CHAIN_ID` |
+| **Chain RPC (JSON-RPC)** | `src/clients/rpc.rs`, wallet_routes | `eth_getCode` (bytecode), `eth_getBalance` (native balance) | `ETHEREUM_RPC_URL`, `BSC_RPC_URL`, `POLYGON_RPC_URL`, `BASE_RPC_URL`, `ARBITRUM_RPC_URL` |
+| **Alchemy** | `src/clients/alchemy_simulate.rs`, simulation_service | `alchemy_simulateAssetChanges` for scan simulation (when RPC URL is Alchemy) | Same RPC URL; only used when host is `alchemy.com` |
+
+**Not implemented (cited in architecture docs only)** — GoPlus Security, Honeypot.is, Chainabuse, ScamSniffer, Tenderly, Blocknative. These are listed as possible data sources in the architecture; the backend does not call them today.
 
 ---
 

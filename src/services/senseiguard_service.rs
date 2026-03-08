@@ -61,11 +61,21 @@ impl SenseiguardService {
             "weak" => "Your wallet needs attention. Run a full scan and fix critical issues.",
             _ => "Run a full scan to see your security status.",
         };
+        let level = match status.as_str() {
+            "strong" => "safe",
+            "moderate" => "moderate",
+            _ => "dangerous",
+        };
+        let last_updated = last_scan_at;
+        let risk_breakdown = None;
         Ok(SecurityStatusResponse {
             score,
             status,
             message: message.to_string(),
             last_scan_at,
+            level: level.to_string(),
+            risk_breakdown,
+            last_updated,
         })
     }
 

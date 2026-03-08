@@ -13,6 +13,7 @@ use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
+use crate::services::protection_engine::analyze_tx_and_respond;
 use crate::services::senseiguard_service::SenseiguardService;
 
 #[derive(Debug, serde::Deserialize)]
@@ -67,6 +68,21 @@ struct ThreatIntelligenceQuery {
     limit: Option<i64>,
 }
 
+/// Body for POST /api/dashboard/{address}/analyze-tx (doc: to, value, data, gas, chainId).
+#[derive(Debug, serde::Deserialize)]
+struct DashboardAnalyzeTxBody {
+    #[serde(default)]
+    pub to: Option<String>,
+    #[serde(default)]
+    pub value: Option<String>,
+    #[serde(default)]
+    pub data: Option<String>,
+    #[serde(default)]
+    pub gas: Option<String>,
+    #[serde(default, rename = "chainId")]
+    pub chain_id: Option<i64>,
+}
+
 /// One actual threat detection for the "Threat Intelligence" modal (from threats table).
 #[derive(Debug, serde::Serialize)]
 struct ThreatIntelligenceItem {
@@ -90,9 +106,12 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/threat-intelligence", get(threat_intelligence_catalog))
         .route("/activity-monitor/wallets", get(activity_monitor_wallets))
         .route("/activity-monitor/dapps", get(activity_monitor_dapps))
+        .route("/{address}/risk-profile", get(risk_profile))
+        .route("/{address}/analyze-tx", post(dashboard_analyze_tx))
         .route("/{address}/metrics", get(dashboard_metrics))
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
+        .route("/{address}/security-score", get(security_status))
         .route("/{address}/scan", post(run_full_scan).get(get_latest_scan_report))
         .route("/{address}/threats", get(list_threats))
         .route("/{address}/scans", get(list_scans))
@@ -442,6 +461,98 @@ async fn security_status(
                 Json(json!({ "success": false, "error": "Failed to get security status" })),
             ))
         }
+    }
+}
+
+async fn risk_profile(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let wallet = match WalletRepository::get_wallet_by_address(&pool, &address).await {
+        Ok(Some(w)) => w,
+        Ok(None) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({ "success": false, "error": "Wallet not found" })),
+            ));
+        }
+        Err(e) => {
+            eprintln!("risk_profile wallet: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load risk profile" })),
+            ));
+        }
+    };
+    let wallet_id = wallet.id;
+
+    let last_score = if let Ok(Some(s)) = SenseiguardRepository::get_latest_scan(&pool, wallet_id).await {
+        s.score
+    } else {
+        let row: Option<(i32,)> = sqlx::query_as(
+            "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten();
+        row.map(|r| r.0).unwrap_or(0)
+    };
+
+    let approval_count = SenseiguardRepository::count_approvals(&pool, wallet_id).await.unwrap_or(0);
+    let cached_contract_risks: Vec<serde_json::Value> = SenseiguardRepository::list_contract_scans_for_wallet(&pool, &address, 20)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| {
+            json!({
+                "contract_address": s.contract_address,
+                "trust_score": s.trust_score,
+                "critical_risk_flags": s.critical_risk_flags,
+                "scanned_at": s.scanned_at
+            })
+        })
+        .collect();
+
+    let wallet_state_risk = last_score;
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "wallet_state_risk": wallet_state_risk,
+            "approval_summary": { "total": approval_count },
+            "cached_contract_risks": cached_contract_risks,
+            "last_score": last_score
+        }
+    })))
+}
+
+async fn dashboard_analyze_tx(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Json(body): Json<DashboardAnalyzeTxBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match analyze_tx_and_respond(
+        &pool,
+        &address,
+        body.to.as_deref(),
+        body.value.as_deref(),
+        body.data.as_deref(),
+    )
+    .await
+    {
+        Ok(out) => Ok(Json(serde_json::to_value(&out).unwrap_or(json!({})))),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": e })),
+        )),
     }
 }
 
