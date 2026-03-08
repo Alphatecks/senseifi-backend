@@ -28,7 +28,11 @@ impl ScanService {
         let owner_privileges = analysis.owner_privileges;
         let dangerous_functions = analysis.dangerous_functions;
         let tokens_controlled = analysis.tokens_controlled.clone();
-        let token_controlled_str = tokens_controlled.join(", ");
+        let token_controlled_str = if tokens_controlled.is_empty() {
+            "Unknown".to_string()
+        } else {
+            tokens_controlled.join(", ")
+        };
         let abi_source = if analysis.abi_from_etherscan { "etherscan" } else { "stub" };
 
         // 2. Contract creation (for age risk and owner count)
@@ -134,6 +138,11 @@ impl ScanService {
         };
         let details_json = serde_json::to_value(&details).ok();
 
+        let effective_chain_id = chain_id.or_else(|| {
+            std::env::var("ETHERSCAN_CHAIN_ID").ok().and_then(|s| s.parse::<u64>().ok())
+        });
+        let chain_id_db = effective_chain_id.map(|c| c as i64);
+
         let row = SenseiguardRepository::create_contract_scan(
             pool,
             contract_address,
@@ -143,6 +152,7 @@ impl ScanService {
             owner_admin_count,
             details_json.as_ref(),
             for_address,
+            chain_id_db,
         )
         .await?;
 
@@ -154,9 +164,25 @@ impl ScanService {
             token_controlled: row.token_controlled,
             owner_admin_count: row.owner_admin_count,
             scanned_at: row.scanned_at,
+            chain_id: effective_chain_id,
+            network: effective_chain_id.map(Self::chain_id_to_network_name),
             details: row.details,
             ai_summary: Some(ai_summary),
         })
+    }
+
+    fn chain_id_to_network_name(chain_id: u64) -> String {
+        match chain_id {
+            1 => "Ethereum Mainnet".to_string(),
+            56 => "BNB Smart Chain".to_string(),
+            137 => "Polygon".to_string(),
+            8453 => "Base".to_string(),
+            42161 => "Arbitrum One".to_string(),
+            10 => "Optimism".to_string(),
+            5 => "Goerli".to_string(),
+            11155111 => "Sepolia".to_string(),
+            _ => format!("Chain {}", chain_id),
+        }
     }
 
     pub async fn get_scan_details(

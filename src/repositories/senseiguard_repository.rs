@@ -1113,11 +1113,12 @@ impl SenseiguardRepository {
         owner_admin_count: i32,
         details: Option<&serde_json::Value>,
         scanned_for_address: Option<&str>,
+        chain_id: Option<i64>,
     ) -> Result<ContractScan, Error> {
         sqlx::query_as(
             r#"
-            INSERT INTO contract_scans (contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, scanned_for_address)
-            VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7)
+            INSERT INTO contract_scans (contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, scanned_for_address, chain_id)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), $7, $8)
             RETURNING *
             "#,
         )
@@ -1128,6 +1129,7 @@ impl SenseiguardRepository {
         .bind(owner_admin_count)
         .bind(details)
         .bind(scanned_for_address)
+        .bind(chain_id)
         .fetch_one(pool)
         .await
     }
@@ -1136,7 +1138,7 @@ impl SenseiguardRepository {
         pool: &DbPool,
         scan_id: Uuid,
     ) -> Result<Option<ContractScan>, Error> {
-        sqlx::query_as("SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address FROM contract_scans WHERE id = $1")
+        sqlx::query_as("SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address, chain_id FROM contract_scans WHERE id = $1")
             .bind(scan_id)
             .fetch_optional(pool)
             .await
@@ -1199,7 +1201,7 @@ impl SenseiguardRepository {
         limit: i64,
     ) -> Result<Vec<ContractScan>, Error> {
         sqlx::query_as(
-            "SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address FROM contract_scans WHERE scanned_for_address = $1 ORDER BY scanned_at DESC LIMIT $2",
+            "SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address, chain_id FROM contract_scans WHERE scanned_for_address = $1 ORDER BY scanned_at DESC LIMIT $2",
         )
         .bind(wallet_address)
         .bind(limit)
@@ -1213,7 +1215,7 @@ impl SenseiguardRepository {
         contract_address: &str,
     ) -> Result<Option<ContractScan>, Error> {
         sqlx::query_as(
-            "SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address FROM contract_scans WHERE contract_address = $1 ORDER BY scanned_at DESC LIMIT 1",
+            "SELECT id, contract_address, trust_score, critical_risk_flags, token_controlled, owner_admin_count, details, scanned_at, created_at, scanned_for_address, chain_id FROM contract_scans WHERE contract_address = $1 ORDER BY scanned_at DESC LIMIT 1",
         )
         .bind(contract_address)
         .fetch_optional(pool)

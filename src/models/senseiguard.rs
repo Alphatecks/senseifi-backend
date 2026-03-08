@@ -455,6 +455,9 @@ pub struct ContractScan {
     pub created_at: DateTime<Utc>,
     #[serde(default)]
     pub scanned_for_address: Option<String>,
+    /// Chain ID used for this scan (1=ETH, 56=BSC, etc.). Null for scans created before migration.
+    #[serde(default)]
+    pub chain_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -477,6 +480,12 @@ pub struct ScanContractResponse {
     pub token_controlled: String,
     pub owner_admin_count: i32,
     pub scanned_at: DateTime<Utc>,
+    /// Chain ID used for this scan (1=ETH, 56=BSC, 137=Polygon, etc.). So the UI shows the correct network, not a default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<u64>,
+    /// Network name derived from chain_id (e.g. "BNB Smart Chain", "Ethereum Mainnet").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

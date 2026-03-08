@@ -70,21 +70,21 @@ impl AnalyzerService {
         let (abi, _verified) = match etherscan::fetch_abi_and_verified(contract_address, chain_id).await {
             Ok((a, v)) if !a.is_empty() => (a, v),
             Ok((_, _)) => {
-                tracing::info!("Analyzer: empty ABI for {} (contract not verified?); using stub", contract_address);
+                tracing::info!("Analyzer: empty ABI for {} (contract not verified?); using stub (no fake token list)", contract_address);
                 return AnalysisResult {
                     owner_privileges: Self::stub_owner_privileges(),
                     dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
                     abi_from_etherscan: false,
-                    tokens_controlled: vec!["ETH".into(), "USDC".into()],
+                    tokens_controlled: vec!["Unknown".into()],
                 };
             }
             Err(e) => {
-                tracing::warn!("Analyzer: Etherscan fetch failed for {}: {}; using stub", contract_address, e);
+                tracing::warn!("Analyzer: Etherscan fetch failed for {}: {}; using stub (no fake token list)", contract_address, e);
                 return AnalysisResult {
                     owner_privileges: Self::stub_owner_privileges(),
                     dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
                     abi_from_etherscan: false,
-                    tokens_controlled: vec!["ETH".into(), "USDC".into()],
+                    tokens_controlled: vec!["Unknown".into()],
                 };
             }
         };
