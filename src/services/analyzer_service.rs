@@ -61,21 +61,27 @@ pub struct AnalysisResult {
     pub abi_from_etherscan: bool,
     /// Tokens the contract can control (from ABI: ETH always, ERC20 if approve/transferFrom present).
     pub tokens_controlled: Vec<String>,
+    /// Contract name from Etherscan getsourcecode (verified contracts only). None when getabi used or unverified.
+    pub contract_name: Option<String>,
+    /// Detected standards from ABI: e.g. "ERC-20", "ERC-721", "ERC-1155".
+    pub detected_standards: Vec<String>,
 }
 
 impl AnalyzerService {
     /// Run analyzer with a single Etherscan fetch. Returns privileges, dangerous functions, and whether ABI was from Etherscan.
     /// chain_id: if Some, use for this scan (1=ETH, 56=BSC, etc.); else use ETHERSCAN_CHAIN_ID env or 1.
     pub async fn analyze_contract(contract_address: &str, chain_id: Option<u64>) -> AnalysisResult {
-        let (abi, _verified) = match etherscan::fetch_abi_and_verified(contract_address, chain_id).await {
-            Ok((a, v)) if !a.is_empty() => (a, v),
-            Ok((_, _)) => {
+        let (abi, _verified, contract_name) = match etherscan::fetch_abi_and_verified(contract_address, chain_id).await {
+            Ok((a, v, name)) if !a.is_empty() => (a, v, name),
+            Ok((_, _, _)) => {
                 tracing::info!("Analyzer: empty ABI for {} (contract not verified?); using stub (no fake token list)", contract_address);
                 return AnalysisResult {
                     owner_privileges: Self::stub_owner_privileges(),
                     dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
                     abi_from_etherscan: false,
                     tokens_controlled: vec!["Unknown".into()],
+                    contract_name: None,
+                    detected_standards: vec![],
                 };
             }
             Err(e) => {
@@ -85,6 +91,8 @@ impl AnalyzerService {
                     dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
                     abi_from_etherscan: false,
                     tokens_controlled: vec!["Unknown".into()],
+                    contract_name: None,
+                    detected_standards: vec![],
                 };
             }
         };
@@ -98,12 +106,40 @@ impl AnalyzerService {
         };
         let dangerous_functions = Self::dangerous_functions_from_abi_impl(abi.clone(), contract_address.to_string(), chain_id).await;
         let tokens_controlled = Self::tokens_controlled_from_abi(&abi);
+        let detected_standards = Self::detect_standards_from_abi(&abi);
         AnalysisResult {
             owner_privileges,
             dangerous_functions,
             abi_from_etherscan: true,
             tokens_controlled,
+            contract_name,
+            detected_standards,
         }
+    }
+
+    /// Detect ERC-20, ERC-721, ERC-1155 from ABI function signatures.
+    fn detect_standards_from_abi(abi: &str) -> Vec<String> {
+        let abi_lower = abi.to_lowercase();
+        let mut out = Vec::new();
+        // ERC-20: balanceOf(address), transfer, approve, transferFrom, totalSupply, allowance
+        if (abi_lower.contains("balanceof") && abi_lower.contains("\"address\""))
+            && (abi_lower.contains("transfer") && abi_lower.contains("approve"))
+            && abi_lower.contains("transferfrom")
+        {
+            out.push("ERC-20".to_string());
+        }
+        // ERC-721: balanceOf(address), ownerOf(uint256), safeTransferFrom (with tokenId)
+        if abi_lower.contains("ownerof") && abi_lower.contains("safetransferfrom") {
+            out.push("ERC-721".to_string());
+        }
+        // ERC-1155: balanceOf(address,uint256), balanceOfBatch, safeTransferFrom, safeBatchTransferFrom
+        if abi_lower.contains("balanceofbatch") || (abi_lower.contains("balanceof") && abi_lower.contains("uint256") && abi_lower.contains("safebatchtransferfrom")) {
+            out.push("ERC-1155".to_string());
+        }
+        if out.is_empty() && (abi_lower.contains("approve") || abi_lower.contains("transferfrom")) {
+            out.push("ERC-20 (Custom)".to_string());
+        }
+        out
     }
 
     /// From ABI: ETH always; ERC20 if approve/transferFrom present.

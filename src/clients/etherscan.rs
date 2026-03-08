@@ -64,9 +64,10 @@ fn source_code_non_empty(v: &serde_json::Value) -> bool {
     !s.is_empty() && s != "{{}" && !s.eq_ignore_ascii_case("Contract source code not verified")
 }
 
-/// Returns (abi_json_string, verified). Uses getabi if API key set; else tries getsourcecode for ABI.
+/// Returns (abi_json_string, verified, contract_name). Uses getabi if API key set; else tries getsourcecode for ABI.
+/// contract_name is only set when getsourcecode is used (verified contracts); getabi does not return name.
 /// request_chain_id: if Some, use for this request; else use ETHERSCAN_CHAIN_ID env or 1.
-pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>) -> Result<(String, bool), String> {
+pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>) -> Result<(String, bool, Option<String>), String> {
     let key = api_key();
     let url = base_url();
     if key.is_some() {
@@ -107,11 +108,11 @@ pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>
         let body: EtherscanAbiResponse = res.json().await.map_err(|e| e.to_string())?;
         if body.status == "1" && body.result.trim_start().starts_with('[') {
             tracing::info!("Etherscan getabi success: ABI received for {}", address);
-            return Ok((body.result, true)); // getabi only returns for verified
+            return Ok((body.result, true, None)); // getabi does not return contract name
         }
         if body.message == "NOTOK" && body.result.contains("Contract source code not verified") {
             tracing::info!("Etherscan: contract {} not verified; using empty ABI (stub data)", address);
-            return Ok((String::new(), false));
+            return Ok((String::new(), false, None));
         }
         // Log why getabi didn't succeed so we can debug NOTOK / wrong chain / rate limit
         let result_preview = body.result.chars().take(200).collect::<String>();
@@ -164,7 +165,12 @@ pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>
         .and_then(|i| i.get("SourceCode"))
         .map(source_code_non_empty)
         .unwrap_or(false);
-    Ok((abi, verified))
+    let contract_name = item
+        .and_then(|i| i.get("ContractName"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    Ok((abi, verified, contract_name))
 }
 
 /// Contract creation info from getcontractcreation (block, timestamp, creator).

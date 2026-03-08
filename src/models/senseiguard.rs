@@ -438,6 +438,12 @@ pub struct ScanDetailsPayload {
     /// "etherscan" when ABI was fetched from chain explorer; "stub" when contract unverified or fetch failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abi_source: Option<String>,
+    /// Contract name from Etherscan (verified contracts via getsourcecode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_name: Option<String>,
+    /// Detected standards from ABI: e.g. ["ERC-20"], ["ERC-721"], ["ERC-20", "ERC-1155"].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_standards: Option<Vec<String>>,
 }
 
 /// Smart Wallet Scanner: one scan result (trust score, risk flags, tokens, owner count).
@@ -486,6 +492,12 @@ pub struct ScanContractResponse {
     /// Network name derived from chain_id (e.g. "BNB Smart Chain", "Ethereum Mainnet").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    /// Contract name from Etherscan (verified contracts). Real when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_name: Option<String>,
+    /// Detected standard(s) from ABI, e.g. "ERC-20", "ERC-721", "ERC-1155" or "ERC-20 (Custom)".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_standard: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

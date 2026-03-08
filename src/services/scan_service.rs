@@ -125,6 +125,11 @@ impl ScanService {
             .count() as i32
             + owner_privileges.withdraw_liquidity.unwrap_or(false) as i32;
 
+        let detected_standard_display = if analysis.detected_standards.is_empty() {
+            None
+        } else {
+            Some(analysis.detected_standards.join(", "))
+        };
         let details = ScanDetailsPayload {
             simulation: Some(sim_with_fns),
             owner_privileges: Some(owner_privileges.clone()),
@@ -135,6 +140,8 @@ impl ScanService {
             ai_summary: Some(ai_summary.clone()),
             user_anomaly_score: Some(user_anomaly_score),
             rug_pull_probability: Some(rug_pull),
+            contract_name: analysis.contract_name.clone(),
+            detected_standards: Some(analysis.detected_standards.clone()),
         };
         let details_json = serde_json::to_value(&details).ok();
 
@@ -166,6 +173,8 @@ impl ScanService {
             scanned_at: row.scanned_at,
             chain_id: effective_chain_id,
             network: effective_chain_id.map(Self::chain_id_to_network_name),
+            contract_name: analysis.contract_name,
+            detected_standard: detected_standard_display,
             details: row.details,
             ai_summary: Some(ai_summary),
         })
@@ -174,12 +183,15 @@ impl ScanService {
     fn chain_id_to_network_name(chain_id: u64) -> String {
         match chain_id {
             1 => "Ethereum Mainnet".to_string(),
-            56 => "BNB Smart Chain".to_string(),
-            137 => "Polygon".to_string(),
-            8453 => "Base".to_string(),
-            42161 => "Arbitrum One".to_string(),
-            10 => "Optimism".to_string(),
             5 => "Goerli".to_string(),
+            10 => "Optimism".to_string(),
+            56 => "BNB Smart Chain".to_string(),
+            74 => "IDChain Mainnet".to_string(),
+            137 => "Polygon".to_string(),
+            250 => "Fantom Opera".to_string(),
+            42161 => "Arbitrum One".to_string(),
+            43114 => "Avalanche C-Chain".to_string(),
+            8453 => "Base".to_string(),
             11155111 => "Sepolia".to_string(),
             _ => format!("Chain {}", chain_id),
         }
