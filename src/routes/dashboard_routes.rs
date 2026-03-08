@@ -114,6 +114,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/{address}/security-score", get(security_status))
         .route("/{address}/scan", post(run_full_scan).get(get_latest_scan_report))
         .route("/{address}/threats", get(list_threats))
+        .route("/{address}/risky-tokens", get(list_risky_tokens))
         .route("/{address}/scans", get(list_scans))
         .route("/{address}/alerts/unread", get(list_unread_alerts))
         .route("/{address}/alerts", get(list_alerts))
@@ -680,6 +681,34 @@ async fn list_threats(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list threats" })),
+            ))
+        }
+    }
+}
+
+async fn list_risky_tokens(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let limit = q.limit.clamp(1, 100);
+    match SenseiguardService::list_risky_tokens(&pool, &address, limit).await {
+        Ok(list) => Ok(Json(json!({
+            "success": true,
+            "data": list
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("list_risky_tokens: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to list risky tokens" })),
             ))
         }
     }

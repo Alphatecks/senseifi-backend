@@ -284,6 +284,22 @@ impl SenseiguardService {
         SenseiguardRepository::list_threats(pool, wallet_id, limit).await
     }
 
+    /// List risky-token threats for a wallet (threat_type = risky_token).
+    pub async fn list_risky_tokens(
+        pool: &DbPool,
+        address: &str,
+        limit: i64,
+    ) -> Result<Vec<Threat>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::list_threats_by_type(
+            pool,
+            wallet_id,
+            threat_types::RISKY_TOKEN,
+            limit,
+        )
+        .await
+    }
+
     pub async fn list_scans(
         pool: &DbPool,
         address: &str,

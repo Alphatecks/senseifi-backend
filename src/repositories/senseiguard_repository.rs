@@ -214,6 +214,23 @@ impl SenseiguardRepository {
         .await
     }
 
+    /// List threats for a wallet filtered by threat_type (e.g. risky_token).
+    pub async fn list_threats_by_type(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_type: &str,
+        limit: i64,
+    ) -> Result<Vec<Threat>, Error> {
+        sqlx::query_as(
+            "SELECT * FROM threats WHERE wallet_id = $1 AND threat_type = $2 ORDER BY detected_at DESC LIMIT $3",
+        )
+        .bind(wallet_id)
+        .bind(threat_type)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
     pub async fn list_threat_intelligence_catalog(
         pool: &DbPool,
     ) -> Result<Vec<ThreatIntelligenceCatalogRow>, Error> {
