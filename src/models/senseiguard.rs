@@ -417,6 +417,19 @@ pub struct LiveScamSignalItem {
     pub risk_level: String,
 }
 
+/// One row for GET /api/dashboard/community-reported-threats (table: Threat Type, Description, Network, Risk Level, Reports, Status, Last Seen).
+#[derive(Debug, Clone, Serialize)]
+pub struct CommunityReportedThreatItem {
+    pub threat_type: String,
+    pub title: String,
+    pub description: String,
+    pub network: String,
+    pub risk_level: String,
+    pub reports: i64,
+    pub status: String,
+    pub last_seen: String,
+}
+
 /// Response for GET /api/dashboard/{address}/metrics (four cards on frontend).
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardMetricsResponse {

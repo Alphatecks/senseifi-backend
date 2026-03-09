@@ -7,8 +7,11 @@ use axum::{
 };
 use serde_json::{json, Value};
 
+use chrono::{DateTime, Utc};
+use std::collections::HashMap;
+
 use crate::db::DbPool;
-use crate::models::senseiguard::IngestActivityRequest;
+use crate::models::senseiguard::{CommunityReportedThreatItem, IngestActivityRequest};
 use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -102,6 +105,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
         .route("/security-overview", get(security_overview))
+        .route("/community-reported-threats", get(community_reported_threats))
         .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/activity/feed", get(live_activity_feed))
         .route("/threat-intelligence", get(threat_intelligence_catalog))
@@ -254,6 +258,18 @@ struct SecurityOverviewQuery {
     wallet_address: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct CommunityReportedThreatsQuery {
+    #[serde(default)]
+    page: Option<u32>,
+    #[serde(default)]
+    per_page: Option<u32>,
+    #[serde(default)]
+    risk_level: Option<String>,
+    #[serde(default)]
+    search: Option<String>,
+}
+
 async fn security_overview(
     State(pool): State<DbPool>,
     Query(q): Query<SecurityOverviewQuery>,
@@ -271,6 +287,125 @@ async fn security_overview(
                 Json(json!({ "success": false, "error": "Failed to load security overview" })),
             ))
         }
+    }
+}
+
+/// GET /api/dashboard/community-reported-threats — table data: threat type, description, network, risk level, reports, status, last seen.
+async fn community_reported_threats(
+    State(pool): State<DbPool>,
+    Query(q): Query<CommunityReportedThreatsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let page = q.page.unwrap_or(1).max(1);
+    let per_page = q.per_page.unwrap_or(10).clamp(1, 100);
+    let offset = (page - 1) * per_page;
+    let risk_level = q.risk_level.as_deref().filter(|s| !s.trim().is_empty());
+    let search = q.search.as_deref().filter(|s| !s.trim().is_empty());
+
+    let rows = SenseiguardRepository::list_community_reported_threats(
+        &pool,
+        per_page as i64,
+        offset as i64,
+        risk_level,
+        search,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("community_reported_threats list: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": "Failed to load community-reported threats" })),
+        )
+    })?;
+
+    let total = SenseiguardRepository::count_community_reported_threats(&pool, risk_level, search)
+        .await
+        .unwrap_or(0);
+
+    let networks = SenseiguardRepository::list_threat_type_networks(&pool)
+        .await
+        .unwrap_or_default();
+    let mut by_type: HashMap<String, Vec<i64>> = HashMap::new();
+    for (tt, chain_id) in networks {
+        by_type.entry(tt).or_default().push(chain_id);
+    }
+
+    let items: Vec<CommunityReportedThreatItem> = rows
+        .into_iter()
+        .map(|r| {
+            let network = by_type
+                .get(&r.threat_type)
+                .map(|ids| {
+                    if ids.len() > 1 {
+                        "Multiple".to_string()
+                    } else {
+                        ids.first()
+                            .map(|&id| chain_id_to_network_name(id))
+                            .unwrap_or_else(|| "Unknown".to_string())
+                    }
+                })
+                .unwrap_or_else(|| "Unknown".to_string());
+            let last_seen = r
+                .last_seen
+                .map(|dt| format_relative_time(dt))
+                .unwrap_or_else(|| "Never".to_string());
+            CommunityReportedThreatItem {
+                threat_type: r.threat_type.clone(),
+                title: r.title.unwrap_or_else(|| r.threat_type.replace('_', " ")),
+                description: r
+                    .description
+                    .unwrap_or_else(|| "Community-reported threat.".to_string()),
+                network,
+                risk_level: r.risk_level,
+                reports: r.report_count,
+                status: if r.report_count > 0 {
+                    "Confirmed".to_string()
+                } else {
+                    "Pending".to_string()
+                },
+                last_seen,
+            }
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "success": true,
+        "data": items,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": (total as u32 + per_page - 1) / per_page
+        }
+    })))
+}
+
+fn chain_id_to_network_name(chain_id: i64) -> String {
+    match chain_id {
+        1 => "Ethereum".to_string(),
+        56 => "BNB Smart Chain".to_string(),
+        137 => "Polygon".to_string(),
+        8453 => "Base".to_string(),
+        42161 => "Arbitrum One".to_string(),
+        10 => "Optimism".to_string(),
+        43114 => "Avalanche".to_string(),
+        101 => "Solana".to_string(),
+        _ => format!("Chain {}", chain_id),
+    }
+}
+
+fn format_relative_time(dt: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let d = now.signed_duration_since(dt);
+    if d.num_minutes() < 1 {
+        "Just now".to_string()
+    } else if d.num_minutes() < 60 {
+        format!("{} mins ago", d.num_minutes())
+    } else if d.num_hours() < 24 {
+        format!("{} hours ago", d.num_hours())
+    } else if d.num_days() < 7 {
+        format!("{} days ago", d.num_days())
+    } else {
+        dt.format("%Y-%m-%d").to_string()
     }
 }
 

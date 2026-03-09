@@ -37,6 +37,17 @@ pub struct ThreatIntelligenceCatalogRow {
     pub severity: String,
 }
 
+/// Row for Community-Reported Threats list: threat type with aggregated report count and last seen.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct CommunityReportedThreatRow {
+    pub threat_type: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub risk_level: String,
+    pub report_count: i64,
+    pub last_seen: Option<DateTime<Utc>>,
+}
+
 /// Actual threat detection for dashboard threat-intelligence (from threats table + wallet address).
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ThreatDetectionRow {
@@ -239,6 +250,147 @@ impl SenseiguardRepository {
         )
         .fetch_all(pool)
         .await
+    }
+
+    /// Community-Reported Threats: threat types with report count, last seen, risk level. Joins catalog for title/description.
+    pub async fn list_community_reported_threats(
+        pool: &DbPool,
+        limit: i64,
+        offset: i64,
+        risk_level_filter: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<Vec<CommunityReportedThreatRow>, Error> {
+        let limit = limit.clamp(1, 200);
+        let offset = offset.max(0);
+        let mut q = String::from(
+            r#"
+            SELECT agg.threat_type, c.title, c.description,
+                   COALESCE(agg.risk_level, c.severity) AS risk_level,
+                   agg.report_count, agg.last_seen
+            FROM (
+                SELECT COALESCE(t.threat_type, 'unknown') AS threat_type,
+                       COUNT(*)::bigint AS report_count,
+                       MAX(t.detected_at) AS last_seen,
+                       MAX(t.severity) AS risk_level
+                FROM threats t
+                GROUP BY COALESCE(t.threat_type, 'unknown')
+            ) agg
+            LEFT JOIN threat_intelligence_catalog c ON c.threat_type = agg.threat_type
+            WHERE 1=1
+            "#,
+        );
+        if let Some(r) = risk_level_filter {
+            let r = r.trim().to_lowercase();
+            if !r.is_empty() {
+                q.push_str(" AND LOWER(COALESCE(agg.risk_level, c.severity)) = $1");
+            }
+        }
+        if let Some(s) = search {
+            let s = s.trim();
+            if !s.is_empty() {
+                let param = if risk_level_filter.as_ref().map(|r| !r.trim().is_empty()).unwrap_or(false) {
+                    "$2"
+                } else {
+                    "$1"
+                };
+                q.push_str(&format!(
+                    " AND (agg.threat_type ILIKE {} OR c.title ILIKE {} OR c.description ILIKE {})",
+                    param, param, param
+                ));
+            }
+        }
+        q.push_str(" ORDER BY agg.report_count DESC, agg.last_seen DESC NULLS LAST LIMIT ");
+        q.push_str(&limit.to_string());
+        q.push_str(" OFFSET ");
+        q.push_str(&offset.to_string());
+
+        let mut query = sqlx::query_as::<_, CommunityReportedThreatRow>(&q);
+        if let Some(r) = risk_level_filter {
+            let r = r.trim().to_lowercase();
+            if !r.is_empty() {
+                query = query.bind(r);
+            }
+        }
+        if let Some(s) = search {
+            let s = s.trim();
+            if !s.is_empty() {
+                let pat = format!("%{}%", s);
+                query = query.bind(pat);
+            }
+        }
+        query.fetch_all(pool).await
+    }
+
+    /// Total count of community-reported threat types (for pagination). Same filters as list_community_reported_threats.
+    pub async fn count_community_reported_threats(
+        pool: &DbPool,
+        risk_level_filter: Option<&str>,
+        search: Option<&str>,
+    ) -> Result<i64, Error> {
+        let mut q = String::from(
+            r#"
+            SELECT COUNT(*)::bigint FROM (
+                SELECT COALESCE(t.threat_type, 'unknown') AS threat_type,
+                       MAX(t.severity) AS risk_level
+                FROM threats t
+                GROUP BY COALESCE(t.threat_type, 'unknown')
+            ) agg
+            LEFT JOIN threat_intelligence_catalog c ON c.threat_type = agg.threat_type
+            WHERE 1=1
+            "#,
+        );
+        if let Some(r) = risk_level_filter {
+            let r = r.trim().to_lowercase();
+            if !r.is_empty() {
+                q.push_str(" AND LOWER(COALESCE(agg.risk_level, c.severity)) = $1");
+            }
+        }
+        if let Some(s) = search {
+            let s = s.trim();
+            if !s.is_empty() {
+                let param = if risk_level_filter.as_ref().map(|r| !r.trim().is_empty()).unwrap_or(false) {
+                    "$2"
+                } else {
+                    "$1"
+                };
+                q.push_str(&format!(
+                    " AND (agg.threat_type ILIKE {} OR c.title ILIKE {} OR c.description ILIKE {})",
+                    param, param, param
+                ));
+            }
+        }
+        let mut query = sqlx::query_scalar::<_, i64>(&q);
+        if let Some(r) = risk_level_filter {
+            let r = r.trim().to_lowercase();
+            if !r.is_empty() {
+                query = query.bind(r);
+            }
+        }
+        if let Some(s) = search {
+            let s = s.trim();
+            if !s.is_empty() {
+                let pat = format!("%{}%", s);
+                query = query.bind(pat);
+            }
+        }
+        query.fetch_one(pool).await
+    }
+
+    /// Distinct chain_id per threat_type (for network column). Returns (threat_type, chain_id).
+    pub async fn list_threat_type_networks(
+        pool: &DbPool,
+    ) -> Result<Vec<(String, i64)>, Error> {
+        let rows: Vec<(String, i64)> = sqlx::query_as(
+            r#"
+            SELECT COALESCE(t.threat_type, 'unknown') AS threat_type, w.chain_id
+            FROM threats t
+            JOIN wallets w ON w.id = t.wallet_id
+            GROUP BY COALESCE(t.threat_type, 'unknown'), w.chain_id
+            "#,
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
     }
 
     /// Recent threat detections for dashboard threat-intelligence. Optional user_id scopes to that user's wallets.
