@@ -347,6 +347,23 @@ pub struct SecurityOverviewResponse {
     pub scam_patterns: ScamPatternsCard,
     pub reported_threats: ReportedThreatsCard,
     pub live_scam_signals: Vec<LiveScamSignalItem>,
+    /// AI Threat Explanation card: description text, display risk level, and whether summary is available.
+    pub ai_threat_explanation: AiThreatExplanationCard,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AiThreatExplanationCard {
+    /// Contextual summary + reasons (generated from threat signals; not static).
+    pub description: String,
+    /// Display label for current risk, e.g. "Elevated", "Safe".
+    pub risk_level: String,
+    /// Whether a detailed summary can be shown (e.g. View Summary button).
+    pub view_summary_available: bool,
+    /// Bullet-point reasons derived from risk signals (for UI or LLM later).
+    pub reasons: Vec<String>,
+    /// Raw signal IDs that contributed (e.g. "active_threats", "multiple_scam_patterns").
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub signals: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

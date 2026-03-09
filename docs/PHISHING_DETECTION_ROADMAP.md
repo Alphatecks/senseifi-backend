@@ -253,6 +253,69 @@ Alert / block / explain
 
 ---
 
+## AI-powered upgrades (practical path)
+
+Three upgrades that make SenseiGuard genuinely AI-powered while staying practical (weeks, not months).
+
+### 1. AI-generated threat explanations (contextual) — **Implemented**
+
+**Before:** Fixed static string.  
+**After:** Explanations built from **actual risk signals** that triggered the risk.
+
+- **Signals** (from risk engine + dashboard aggregates): e.g. `active_threats`, `multiple_scam_patterns`, `elevated_risk_score`, `community_reports`, `critical_risk_score`.
+- **Template-based today:** each signal maps to a reason sentence; description is a short summary + optional bullet list. See `build_ai_threat_explanation` in `senseiguard_service` and `ai_threat_explanation.reasons` / `ai_threat_explanation.signals` in `GET /api/dashboard/security-overview`.
+- **Later:** Feed signals (and optionally reasons) into a lightweight LLM (OpenAI, Anthropic, or local) for one natural-language paragraph. Architecture: Risk engine → Threat signals → Explanation generator (templates + optional LLM) → AI Threat Explanation.
+
+Users trust **specific reasons** far more than generic copy.
+
+### 2. AI phishing domain detection (beyond typos) — **Planned**
+
+**Current:** Rule-based (Levenshtein, homograph, hardcoded typos).  
+**Target:** ML-based domain similarity so new phishing sites are caught without new rules.
+
+- **Features:** domain_length, character_entropy, brand_similarity, homograph patterns, subdomain structure, domain_age.
+- **Model:** Simple classifier (e.g. Logistic Regression, Random Forest, Gradient Boosted Trees). Training data: PhishTank, OpenPhish.
+- **Output:** `phishing_probability` (0–1); e.g. &gt; 0.7 → `phishing_risk = true`.
+- **Benefit:** Detects variants like `uniswap-airdrop.claim`, `metamask-auth.io`, `app-uniswap.org` automatically.
+
+### 3. Scam cluster detection (graph intelligence) — **Planned**
+
+Phishing wallets usually belong to **scam clusters**. Detecting one scam address can surface many more.
+
+- **Graph model:** Nodes = wallet, contract, domain, token. Edges = transfer, approval, contract interaction.
+- **Algorithm:** Connected components or community detection (e.g. NetworkX, Neo4j). Same approach as Chainalysis, TRM Labs.
+- **Example:** Address A = known scam; B sends funds to A; C shares contract deployer with A → A, B, C = scam cluster; engine flags all.
+- **Requires:** Indexed chain data (transfers, approvals, deployers) and/or external graph API.
+
+### Resulting system (after all three)
+
+```
+User action
+     │
+     ▼
+Domain AI detector (2)
+     │
+     ▼
+Transaction analyzer
+     │
+     ▼
+Graph scam detection (3)
+     │
+     ▼
+Risk scoring engine
+     │
+     ▼
+AI explanation generator (1)
+```
+
+| Capability           | Before        | After                    |
+|----------------------|---------------|--------------------------|
+| Phishing detection   | Manual rules  | ML classifier (2)        |
+| Threat explanations  | Static text   | Signal-based / LLM (1) ✓ |
+| Address detection    | Blocklist     | Scam cluster (3)        |
+
+---
+
 ## References
 
 - **MetaMask / Ethereum Phishing Detection** — blocklist, domain similarity, homograph, simulation.

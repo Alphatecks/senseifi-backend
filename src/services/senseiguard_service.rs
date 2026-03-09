@@ -2,13 +2,13 @@ use crate::clients::rpc;
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActiveAlertsOverview, ActivityFeedItem, ActivityMonitorDappResponse,
-    ActivityMonitorWalletResponse, Alert, ActiveThreatsCard, ConnectedRiskOverview, ConnectedWalletModalBalance,
-    ConnectedWalletModalDetails, ConnectedWalletModalResponse, ConnectedWalletModalSecurity,
-    DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse, FullScanReportResponse,
-    IngestActivityRequest, LiveActivityFeedItem, LiveScamSignalItem, MetricCard, MonitoredTransaction,
-    OverallRiskCard, RecentActivityOverview, ReportedThreatsCard, ScamFrequencyDay, ScamPatternInsightsCard,
-    ScamPatternsCard, ScanObservation, SecurityOverviewResponse, SecurityStatusResponse, SecurityScan,
-    Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
+    ActivityMonitorWalletResponse, Alert, ActiveThreatsCard, AiThreatExplanationCard, ConnectedRiskOverview,
+    ConnectedWalletModalBalance, ConnectedWalletModalDetails, ConnectedWalletModalResponse,
+    ConnectedWalletModalSecurity, DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse,
+    FullScanReportResponse, IngestActivityRequest, LiveActivityFeedItem, LiveScamSignalItem, MetricCard,
+    MonitoredTransaction, OverallRiskCard, RecentActivityOverview, ReportedThreatsCard, ScamFrequencyDay,
+    ScamPatternInsightsCard, ScamPatternsCard, ScanObservation, SecurityOverviewResponse, SecurityStatusResponse,
+    SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
 };
 use crate::repositories::senseiguard_repository::{SenseiguardRepository, ActivityFeedRowLive, ThreatDetectionRow};
 use crate::repositories::wallet_repository::WalletRepository;
@@ -600,6 +600,22 @@ impl SenseiguardService {
             .map(|r| Self::threat_row_to_live_signal(r))
             .collect();
 
+        let ai_risk_display = Self::risk_level_to_ai_display(&risk_level);
+        let (signals, reasons, description) = Self::build_ai_threat_explanation(
+            risk_score,
+            threat_count,
+            distinct_patterns,
+            verified,
+            &ai_risk_display,
+        );
+        let ai_threat_explanation = AiThreatExplanationCard {
+            description,
+            risk_level: ai_risk_display,
+            view_summary_available: threat_count > 0 || distinct_patterns > 0,
+            reasons,
+            signals,
+        };
+
         Ok(SecurityOverviewResponse {
             overall_risk: OverallRiskCard {
                 risk_score,
@@ -622,7 +638,68 @@ impl SenseiguardService {
                 detected: threat_count,
             },
             live_scam_signals,
+            ai_threat_explanation,
         })
+    }
+
+    /// Map band (Safe/Warning/Dangerous/Block) to display label for AI Threat Explanation card.
+    fn risk_level_to_ai_display(band: &str) -> String {
+        match band {
+            "Block" => "Critical".to_string(),
+            "Dangerous" => "Elevated".to_string(),
+            "Warning" => "Moderate".to_string(),
+            _ => "Safe".to_string(),
+        }
+    }
+
+    /// Build AI threat explanation from risk signals (contextual, not static).
+    /// Returns (signals, reasons, description) for the card. Template-based today; can add LLM summarization later.
+    fn build_ai_threat_explanation(
+        risk_score: i32,
+        threat_count: i64,
+        distinct_patterns: i64,
+        verified_reports: i64,
+        risk_level_display: &str,
+    ) -> (Vec<String>, Vec<String>, String) {
+        let mut signals: Vec<String> = Vec::new();
+        let mut reasons: Vec<String> = Vec::new();
+
+        if threat_count > 0 {
+            signals.push("active_threats".to_string());
+            reasons.push("Threats have been detected on your wallets in the last 30 days.".to_string());
+        }
+        if distinct_patterns >= 3 {
+            signals.push("high_scam_pattern_count".to_string());
+            reasons.push("Several distinct threat types (e.g. phishing, malicious contracts, risky approvals) have been identified.".to_string());
+        } else if distinct_patterns >= 1 {
+            signals.push("multiple_scam_patterns".to_string());
+            reasons.push("Scam patterns have been detected in recent activity.".to_string());
+        }
+        if risk_score >= 80 {
+            signals.push("critical_risk_score".to_string());
+            reasons.push("Your overall risk score is in the critical range. Review blocked or high-risk items.".to_string());
+        } else if risk_score >= 50 {
+            signals.push("elevated_risk_score".to_string());
+            reasons.push("Your overall risk score is elevated based on wallet and activity signals.".to_string());
+        } else if risk_score >= 30 {
+            signals.push("moderate_risk_score".to_string());
+            reasons.push("Some risk signals are present; consider reviewing connected contracts and approvals.".to_string());
+        }
+        if verified_reports > 0 {
+            signals.push("community_reports".to_string());
+            reasons.push("Community reports indicate verified scam or abuse activity in the ecosystem.".to_string());
+        }
+
+        let description = if reasons.is_empty() {
+            "SenseiGuard analyzes transaction patterns, contract behavior, and community reports to identify potential threats. No significant risk signals are currently present.".to_string()
+        } else {
+            format!(
+                "SenseiGuard detected risk signals. Risk level: {}. Review the reasons below and consider taking action.",
+                risk_level_display
+            )
+        };
+
+        (signals, reasons, description)
     }
 
     fn threat_row_to_live_signal(r: ThreatDetectionRow) -> LiveScamSignalItem {
