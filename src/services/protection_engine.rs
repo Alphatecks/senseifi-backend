@@ -2,19 +2,31 @@
 //! dApp connections, and wallet activity (monitor cycle). Emergency lock and custom rules enforced here.
 
 use crate::db::DbPool;
+use strsim::levenshtein;
 use crate::models::senseiguard::{
     AnalyzeTxResponse, DappConnectionCheckResponse, UserProtectionSettings,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 
+// --- Production risk bands (aligned with PHISHING_DETECTION_ROADMAP) ---
+// Score >= 80 → Block; 50–79 → Dangerous (high warning); 30–49 → Warning (medium); < 30 → Safe.
+const BLOCK_THRESHOLD: i32 = 80;
+const HIGH_WARNING_THRESHOLD: i32 = 50;
+const MEDIUM_WARNING_THRESHOLD: i32 = 30;
+
+/// Signal weights for additive risk (doc: domain typosquat +25, homograph +25, unlimited approval +35, etc.)
+const WEIGHT_DOMAIN_TYPOSQUAT: i32 = 25;
+const WEIGHT_DOMAIN_HOMOGRAPH: i32 = 25;
+const WEIGHT_UNLIMITED_APPROVAL: i32 = 35;
+
 /// Band for API response: Safe | Warning | Dangerous | Block (from risk_score).
 pub fn score_to_band(score: i32) -> &'static str {
     match score {
-        0..=30 => "Safe",
-        31..=60 => "Warning",
-        61..=84 => "Dangerous",
-        _ => "Block",
+        _ if score >= BLOCK_THRESHOLD => "Block",
+        _ if score >= HIGH_WARNING_THRESHOLD => "Dangerous",
+        _ if score >= MEDIUM_WARNING_THRESHOLD => "Warning",
+        _ => "Safe",
     }
 }
 
@@ -111,7 +123,7 @@ pub async fn evaluate_transaction(
     let (risk_score, warning, recommended_action, mut threat_types, risk_breakdown) =
         threat_analyze_tx_sync(to, value, data);
     let rules_block = apply_security_rules_tx(pool, wallet_address, to, value, data).await;
-    let blocked = rules_block.unwrap_or(false) || (settings.auto_block_high_risk && risk_score >= 70);
+    let blocked = rules_block.unwrap_or(false) || (settings.auto_block_high_risk && risk_score >= BLOCK_THRESHOLD);
     let recommended_action = if blocked {
         "Reject transaction".to_string()
     } else {
@@ -142,10 +154,10 @@ pub async fn evaluate_transaction(
     })
 }
 
-/// Returns (score, warning, recommended_action, threat_types, risk_breakdown).
+/// Returns (score, warning, recommended_action, threat_types, risk_breakdown). Uses additive signal weights.
 fn threat_analyze_tx_sync(
-    to: Option<&str>,
-    value: Option<&str>,
+    _to: Option<&str>,
+    _value: Option<&str>,
     data: Option<&str>,
 ) -> (i32, Option<String>, String, Vec<String>, serde_json::Value) {
     let mut score = 0i32;
@@ -156,26 +168,29 @@ fn threat_analyze_tx_sync(
     if data.starts_with("0x") && data.len() >= 10 {
         let sig = &data[2..10].to_lowercase();
         if sig == "095ea7b3" || sig == "a22cb465" {
-            score = score.max(75);
-            approval_risk = 75;
+            score += WEIGHT_UNLIMITED_APPROVAL;
+            approval_risk = WEIGHT_UNLIMITED_APPROVAL;
             warning = Some("Unlimited or high-value approval detected.".to_string());
             threat_types.push(crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string());
         }
         if data.len() > 138 && (sig == "095ea7b3" || sig == "a22cb465") {
             let amount_hex = data.get(74..138).unwrap_or("");
             if amount_hex == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" {
-                score = 90;
-                approval_risk = 90;
-                warning = Some("Unlimited approval detected.".to_string());
-                if !threat_types.contains(&crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string()) {
+                if score < WEIGHT_UNLIMITED_APPROVAL {
+                    score += WEIGHT_UNLIMITED_APPROVAL;
+                    approval_risk = WEIGHT_UNLIMITED_APPROVAL;
+                    warning = Some("Unlimited approval detected.".to_string());
                     threat_types.push(crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string());
                 }
             }
         }
     }
-    let recommended_action = if score >= 70 {
+    score = score.min(100);
+    let recommended_action = if score >= BLOCK_THRESHOLD {
         "Reject transaction".to_string()
-    } else if score >= 40 {
+    } else if score >= HIGH_WARNING_THRESHOLD {
+        "Review before signing".to_string()
+    } else if score >= MEDIUM_WARNING_THRESHOLD {
         "Review before signing".to_string()
     } else {
         "Proceed".to_string()
@@ -287,6 +302,59 @@ pub async fn evaluate_approval(
     })
 }
 
+// --- Domain phishing: Levenshtein + homograph (Phase 1.1) ---
+
+/// Known brand names (lowercase) and their single canonical domain. If domain is similar to brand but not canonical, flag.
+const BRAND_CANONICAL: &[(&str, &str)] = &[
+    ("uniswap", "uniswap.org"),
+    ("metamask", "metamask.io"),
+    ("opensea", "opensea.io"),
+    ("pancakeswap", "pancakeswap.finance"),
+    ("etherscan", "etherscan.io"),
+    ("phantom", "phantom.app"),
+    ("rabby", "rabby.io"),
+    ("coinbase", "coinbase.com"),
+    ("trustwallet", "trustwallet.com"),
+];
+
+/// Max Levenshtein distance to consider domain "similar" to a brand (typosquat).
+const LEVENSHTEIN_THRESHOLD: usize = 2;
+
+/// Returns true if the domain label is suspiciously similar to a known brand but not the canonical domain.
+fn domain_similarity_phishing(domain_lower: &str) -> bool {
+    let host = domain_lower
+        .split('/')
+        .next()
+        .unwrap_or(domain_lower)
+        .split(':')
+        .next()
+        .unwrap_or(domain_lower);
+    let labels: Vec<&str> = host.split('.').collect();
+    for (brand, canonical) in BRAND_CANONICAL {
+        let canonical_lower = canonical.to_lowercase();
+        for label in &labels {
+            if label.is_empty() {
+                continue;
+            }
+            let d = levenshtein(label, brand);
+            if d <= LEVENSHTEIN_THRESHOLD && d < label.len() {
+                let is_canonical = host == canonical_lower
+                    || host == format!("www.{}", canonical_lower)
+                    || host.ends_with(&format!(".{}", canonical_lower));
+                if !is_canonical {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Returns true if domain contains non-ASCII (e.g. homograph: Cyrillic 'а' instead of Latin 'a').
+fn is_homograph_domain(domain: &str) -> bool {
+    domain.chars().any(|c| c as u32 > 127)
+}
+
 /// When new_dapp_connection_alerts is ON we check domain; when OFF skip.
 pub async fn evaluate_dapp_connection(
     pool: &DbPool,
@@ -299,11 +367,21 @@ pub async fn evaluate_dapp_connection(
         .unwrap_or(default_settings());
 
     let domain_lower = domain.to_lowercase();
-    let typo_risk = domain_lower.contains("unlswap")
+    let legacy_typo = domain_lower.contains("unlswap")
         || domain_lower.contains("unisvvap")
-        || (domain_lower.contains("metamask") && domain != "metamask.io");
-    let risk_score = if typo_risk { 76 } else { 20 };
-    let phishing_risk = typo_risk;
+        || (domain_lower.contains("metamask") && domain_lower != "metamask.io");
+    let similarity_phishing = domain_similarity_phishing(&domain_lower);
+    let homograph = is_homograph_domain(domain);
+
+    let mut risk_score = 0i32;
+    if legacy_typo || similarity_phishing {
+        risk_score += WEIGHT_DOMAIN_TYPOSQUAT;
+    }
+    if homograph {
+        risk_score += WEIGHT_DOMAIN_HOMOGRAPH;
+    }
+    risk_score = risk_score.min(100);
+    let phishing_risk = risk_score >= MEDIUM_WARNING_THRESHOLD;
 
     Ok(DappEvalResult {
         risk_score,

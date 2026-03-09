@@ -338,6 +338,68 @@ pub struct ThreatLevelCard {
     pub change_percent: f64,
 }
 
+/// Response for GET /api/dashboard/security-overview — real data for security dashboard cards.
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityOverviewResponse {
+    pub overall_risk: OverallRiskCard,
+    pub active_threats: ActiveThreatsCard,
+    pub scam_pattern_insights: ScamPatternInsightsCard,
+    pub scam_patterns: ScamPatternsCard,
+    pub reported_threats: ReportedThreatsCard,
+    pub live_scam_signals: Vec<LiveScamSignalItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OverallRiskCard {
+    /// 0–100; higher = worse.
+    pub risk_score: i32,
+    /// Safe | Warning | Dangerous | Block (from production bands).
+    pub risk_level: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveThreatsCard {
+    pub networks_affected: i64,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScamPatternInsightsCard {
+    pub period: String,
+    /// Daily counts for chart: day (YYYY-MM-DD), count.
+    pub daily: Vec<ScamFrequencyDay>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScamFrequencyDay {
+    pub day: String,
+    pub count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ScamPatternsCard {
+    /// "Low" | "Medium" | "High" from detected_count.
+    pub status: String,
+    pub detected_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReportedThreatsCard {
+    /// Community scam reports (verified count).
+    pub verified: i64,
+    /// Threats detected (last 30 days for user).
+    pub detected: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LiveScamSignalItem {
+    /// Short address (e.g. 0xA34...92F) or wallet address.
+    pub address: String,
+    pub threat_type: String,
+    pub detected_at: String,
+    pub risk_level: String,
+}
+
 /// Response for GET /api/dashboard/{address}/metrics (four cards on frontend).
 #[derive(Debug, Clone, Serialize)]
 pub struct DashboardMetricsResponse {

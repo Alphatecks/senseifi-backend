@@ -285,6 +285,99 @@ impl SenseiguardRepository {
         }
     }
 
+    /// Total threat count for user's active wallets (last 30 days).
+    pub async fn count_threats_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<i64, Error> {
+        let start = Utc::now() - chrono::Duration::days(30);
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint FROM threats t
+            JOIN wallets w ON w.id = t.wallet_id
+            WHERE w.is_active = true AND w.user_id = $1 AND t.detected_at >= $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Distinct chain_id count (networks affected) for user's wallets that have at least one threat in last 30 days.
+    pub async fn count_networks_affected_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<i64, Error> {
+        let start = Utc::now() - chrono::Duration::days(30);
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(DISTINCT w.chain_id)::bigint FROM threats t
+            JOIN wallets w ON w.id = t.wallet_id
+            WHERE w.is_active = true AND w.user_id = $1 AND t.detected_at >= $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Threat counts per day for last N days (for scam frequency chart). Returns (date_iso, count).
+    pub async fn threats_per_day_for_user(
+        pool: &DbPool,
+        user_id: &str,
+        days: i64,
+    ) -> Result<Vec<(chrono::NaiveDate, i64)>, Error> {
+        let start = Utc::now() - chrono::Duration::days(days);
+        let rows: Vec<(chrono::NaiveDate, i64)> = sqlx::query_as(
+            r#"
+            SELECT (t.detected_at AT TIME ZONE 'UTC')::date AS day, COUNT(*)::bigint
+            FROM threats t
+            JOIN wallets w ON w.id = t.wallet_id
+            WHERE w.is_active = true AND w.user_id = $1 AND t.detected_at >= $2
+            GROUP BY (t.detected_at AT TIME ZONE 'UTC')::date
+            ORDER BY day ASC
+            "#,
+        )
+        .bind(user_id)
+        .bind(start)
+        .fetch_all(pool)
+        .await?;
+        Ok(rows)
+    }
+
+    /// Count distinct threat_type values for user's threats (last 30 days) — "detected patterns".
+    pub async fn count_distinct_threat_types_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<i64, Error> {
+        let start = Utc::now() - chrono::Duration::days(30);
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(DISTINCT COALESCE(t.threat_type, 'unknown'))::bigint
+            FROM threats t
+            JOIN wallets w ON w.id = t.wallet_id
+            WHERE w.is_active = true AND w.user_id = $1 AND t.detected_at >= $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(start)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    /// Total number of scam reports (community reports) in the system.
+    pub async fn count_scam_reports_global(pool: &DbPool) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as("SELECT COUNT(*)::bigint FROM scam_reports")
+            .fetch_one(pool)
+            .await?;
+        Ok(row.0)
+    }
+
     pub async fn count_scans_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
         let start: DateTime<Utc> = Utc::now() - chrono::Duration::days(30);
         let row: (i64,) = sqlx::query_as(

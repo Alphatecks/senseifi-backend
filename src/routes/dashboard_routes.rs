@@ -101,6 +101,7 @@ struct ThreatIntelligenceItem {
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
+        .route("/security-overview", get(security_overview))
         .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/activity/feed", get(live_activity_feed))
         .route("/threat-intelligence", get(threat_intelligence_catalog))
@@ -244,6 +245,95 @@ async fn dashboard_overview(
             ))
         }
     }
+}
+
+/// GET /api/dashboard/security-overview — real data for security dashboard cards (overall risk, active threats, scam insights, live signals).
+#[derive(Debug, serde::Deserialize)]
+struct SecurityOverviewQuery {
+    user_id: Option<String>,
+    wallet_address: Option<String>,
+}
+
+async fn security_overview(
+    State(pool): State<DbPool>,
+    Query(q): Query<SecurityOverviewQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref()).await;
+    match SenseiguardService::get_security_overview(&pool, &user_id).await {
+        Ok(data) => Ok(Json(json!({
+            "success": true,
+            "data": data
+        }))),
+        Err(e) => {
+            eprintln!("security_overview: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load security overview" })),
+            ))
+        }
+    }
+}
+
+/// Resolve user_id from query (user_id, or wallet_address, or fallback to first active wallet). Used by overview and security-overview.
+async fn resolve_user_id_for_dashboard(
+    pool: &DbPool,
+    user_id: Option<&str>,
+    wallet_address: Option<&str>,
+) -> String {
+    let user_id = user_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+    let user_id = match user_id {
+        Some(id) => id,
+        None => {
+            let addr = wallet_address.map(str::trim).filter(|s| !s.is_empty());
+            match addr.filter(|a| is_valid_eth_address(a)) {
+                Some(address) => {
+                    match WalletRepository::get_wallet_by_address(pool, address).await {
+                        Ok(Some(w)) => {
+                            if let Some(uid) = w.user_id.filter(|s| !s.is_empty()) {
+                                uid
+                            } else {
+                                match dashboard_user_service::get_or_create_for_wallet(pool, address).await {
+                                    Ok(du) => du.user_id,
+                                    Err(_) => String::new(),
+                                }
+                            }
+                        }
+                        _ => String::new(),
+                    }
+                }
+                None => String::new(),
+            }
+        }
+    };
+    let user_id = if user_id.is_empty()
+        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK").map(|s| s != "false").unwrap_or(true)
+    {
+        match WalletRepository::get_all_active_wallets(pool).await {
+            Ok(wallets) if !wallets.is_empty() => {
+                let w = &wallets[0];
+                if let Some(uid) = w.user_id.as_ref().filter(|s| !s.is_empty()) {
+                    uid.clone()
+                } else {
+                    dashboard_user_service::get_or_create_for_wallet(pool, &w.address)
+                        .await
+                        .map(|du| du.user_id)
+                        .unwrap_or_default()
+                }
+            }
+            _ => user_id,
+        }
+    } else {
+        user_id
+    };
+    if !user_id.is_empty() {
+        if let Some(addr) = wallet_address.filter(|a| is_valid_eth_address(a)) {
+            let _ = WalletRepository::update_wallet_user_id(pool, addr, &user_id).await;
+        }
+    }
+    user_id
 }
 
 /// Activity Monitor "Connected wallet" tab: list wallets with security level and last activity.

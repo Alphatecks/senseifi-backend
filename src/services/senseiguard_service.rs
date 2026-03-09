@@ -2,15 +2,17 @@ use crate::clients::rpc;
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActiveAlertsOverview, ActivityFeedItem, ActivityMonitorDappResponse,
-    ActivityMonitorWalletResponse, Alert, ConnectedRiskOverview, ConnectedWalletModalBalance,
+    ActivityMonitorWalletResponse, Alert, ActiveThreatsCard, ConnectedRiskOverview, ConnectedWalletModalBalance,
     ConnectedWalletModalDetails, ConnectedWalletModalResponse, ConnectedWalletModalSecurity,
     DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse, FullScanReportResponse,
-    IngestActivityRequest, LiveActivityFeedItem, MetricCard, MonitoredTransaction, RecentActivityOverview,
-    ScanObservation, SecurityStatusResponse, SecurityScan, Threat, ThreatLevelCard, WalletApproval,
-    WalletAsset, WalletStatusOverview,
+    IngestActivityRequest, LiveActivityFeedItem, LiveScamSignalItem, MetricCard, MonitoredTransaction,
+    OverallRiskCard, RecentActivityOverview, ReportedThreatsCard, ScamFrequencyDay, ScamPatternInsightsCard,
+    ScamPatternsCard, ScanObservation, SecurityOverviewResponse, SecurityStatusResponse, SecurityScan,
+    Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
 };
-use crate::repositories::senseiguard_repository::{SenseiguardRepository, ActivityFeedRowLive};
+use crate::repositories::senseiguard_repository::{SenseiguardRepository, ActivityFeedRowLive, ThreatDetectionRow};
 use crate::repositories::wallet_repository::WalletRepository;
+use crate::services::protection_engine;
 use chrono::{Datelike, Duration, DateTime, NaiveDate, Utc};
 use sqlx::Error;
 use uuid::Uuid;
@@ -550,6 +552,119 @@ impl SenseiguardService {
                 active_dapps: 0, // no dApp table; use ingest or external API to populate
             },
         })
+    }
+
+    /// Security dashboard cards: overall risk, active threats, scam insights, reported threats, live signals. All real DB data.
+    pub async fn get_security_overview(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<SecurityOverviewResponse, Error> {
+        let min_score =
+            SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id).await?;
+        // security_score is 0–100 higher=better; risk_score is 0–100 higher=worse.
+        let risk_score = min_score.map(|s| 100 - s).unwrap_or(0);
+        let risk_level = protection_engine::score_to_band(risk_score).to_string();
+
+        let threat_count =
+            SenseiguardRepository::count_threats_for_user(pool, user_id).await.unwrap_or(0);
+        let networks_affected =
+            SenseiguardRepository::count_networks_affected_for_user(pool, user_id).await.unwrap_or(0);
+
+        let daily_rows =
+            SenseiguardRepository::threats_per_day_for_user(pool, user_id, 7).await.unwrap_or_default();
+        let daily: Vec<ScamFrequencyDay> = daily_rows
+            .into_iter()
+            .map(|(d, c)| ScamFrequencyDay {
+                day: d.format("%Y-%m-%d").to_string(),
+                count: c,
+            })
+            .collect();
+
+        let distinct_patterns =
+            SenseiguardRepository::count_distinct_threat_types_for_user(pool, user_id).await.unwrap_or(0);
+        let scam_pattern_status = if distinct_patterns >= 3 {
+            "High"
+        } else if distinct_patterns >= 1 {
+            "Medium"
+        } else {
+            "Low"
+        };
+
+        let verified =
+            SenseiguardRepository::count_scam_reports_global(pool).await.unwrap_or(0);
+
+        let live_rows =
+            SenseiguardRepository::list_threats_for_dashboard(pool, Some(user_id), 10).await?;
+        let live_scam_signals: Vec<LiveScamSignalItem> = live_rows
+            .into_iter()
+            .map(|r| Self::threat_row_to_live_signal(r))
+            .collect();
+
+        Ok(SecurityOverviewResponse {
+            overall_risk: OverallRiskCard {
+                risk_score,
+                risk_level,
+            },
+            active_threats: ActiveThreatsCard {
+                networks_affected,
+                count: threat_count,
+            },
+            scam_pattern_insights: ScamPatternInsightsCard {
+                period: "last_7_days".to_string(),
+                daily,
+            },
+            scam_patterns: ScamPatternsCard {
+                status: scam_pattern_status.to_string(),
+                detected_count: distinct_patterns,
+            },
+            reported_threats: ReportedThreatsCard {
+                verified,
+                detected: threat_count,
+            },
+            live_scam_signals,
+        })
+    }
+
+    fn threat_row_to_live_signal(r: ThreatDetectionRow) -> LiveScamSignalItem {
+        let address = r
+            .source_contract
+            .as_deref()
+            .unwrap_or(&r.wallet_address);
+        let short = if address.len() >= 10 {
+            format!("{}...{}", &address[..6], &address[address.len() - 4..])
+        } else {
+            address.to_string()
+        };
+        let risk_level = match r.severity.to_lowercase().as_str() {
+            "critical" => "Critical",
+            "high" => "High Risk",
+            "medium" => "Medium",
+            _ => "Low",
+        };
+        let threat_type: String = match r.threat_type.as_deref().unwrap_or("").to_lowercase().as_str() {
+            "phishing_indicator" | "frontend_phishing" => "Phishing".to_string(),
+            "malicious_transaction" => "Malware".to_string(),
+            "unlimited_approval" => "Approval".to_string(),
+            "risky_token" => "Risky Token".to_string(),
+            _ => r
+                .threat_type
+                .as_deref()
+                .unwrap_or(&r.title)
+                .replace('_', " ")
+                .split_whitespace()
+                .next()
+                .map(|s| {
+                    let mut c = s.chars();
+                    c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_else(|| s.to_string())
+                })
+                .unwrap_or_else(|| "Threat".to_string()),
+        };
+        LiveScamSignalItem {
+            address: short,
+            threat_type,
+            detected_at: r.detected_at.format("%H:%M").to_string(),
+            risk_level: risk_level.to_string(),
+        }
     }
 
 fn overview_status_from_score(score: i32) -> String {
