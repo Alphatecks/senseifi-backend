@@ -41,7 +41,7 @@ impl WalletRepository {
         address: &str,
     ) -> Result<Option<Wallet>, Error> {
         let wallet = sqlx::query_as::<_, Wallet>(
-            "SELECT * FROM wallets WHERE address = $1",
+            "SELECT * FROM wallets WHERE LOWER(address) = LOWER($1)",
         )
         .bind(address)
         .fetch_optional(pool)
@@ -56,7 +56,7 @@ impl WalletRepository {
         is_active: bool,
     ) -> Result<(), Error> {
         sqlx::query(
-            "UPDATE wallets SET is_active = $1, updated_at = NOW() WHERE address = $2",
+            "UPDATE wallets SET is_active = $1, updated_at = NOW() WHERE LOWER(address) = LOWER($2)",
         )
         .bind(is_active)
         .bind(address)
@@ -72,7 +72,9 @@ impl WalletRepository {
         address: &str,
         user_id: &str,
     ) -> Result<(), Error> {
-        sqlx::query("UPDATE wallets SET user_id = $1, updated_at = NOW() WHERE address = $2")
+        sqlx::query(
+            "UPDATE wallets SET user_id = $1, updated_at = NOW() WHERE LOWER(address) = LOWER($2)",
+        )
             .bind(user_id)
             .bind(address)
             .execute(pool)
@@ -137,7 +139,7 @@ impl WalletRepository {
         address: &str,
     ) -> Result<(Vec<Wallet>, i64), Error> {
         let wallet = sqlx::query_as::<_, Wallet>(
-            "SELECT * FROM wallets WHERE address = $1 AND is_active = true",
+            "SELECT * FROM wallets WHERE LOWER(address) = LOWER($1) AND is_active = true",
         )
         .bind(address)
         .fetch_optional(pool)

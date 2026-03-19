@@ -225,8 +225,18 @@ pub struct ConnectedWalletModalDetails {
 #[derive(Debug, Serialize)]
 pub struct ConnectedWalletModalBalance {
     pub total_usd: f64,
+    /// Sum of `wallet_assets.usd_value` only (before adding native USD).
+    pub wallet_assets_usd: f64,
     pub native_balance_eth: f64,
+    pub native_usd: f64,
     pub native_balance_wei: String,
+    /// "coingecko" | "coingecko_pro" | "coincap" when price succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_price_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_pricing_error: Option<String>,
     pub assets: Vec<WalletAsset>,
 }
 
@@ -252,6 +262,16 @@ pub struct DashboardSummaryResponse {
     pub scans_trend_percent: f64,
     pub total_asset_usd: String,
     pub total_asset_trend_percent: f64,
+    /// Sum of `wallet_assets.usd_value` (ERC-20 rows etc.); native is separate fields below.
+    pub wallet_assets_usd: f64,
+    pub native_balance_eth: f64,
+    pub native_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_price_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub native_pricing_error: Option<String>,
     pub unread_alerts: i64,
     pub high_risk_alerts: i64,
     pub alerts_trend_percent: f64,

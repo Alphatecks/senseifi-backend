@@ -19,6 +19,16 @@ use uuid::Uuid;
 
 pub struct SenseiguardService;
 
+#[derive(Debug, Default)]
+struct LiveNativeBalanceBreakdown {
+    native_balance_wei: String,
+    native_balance_eth: f64,
+    native_usd: f64,
+    price_source: Option<String>,
+    pricing_error: Option<String>,
+    rpc_error: Option<String>,
+}
+
 impl SenseiguardService {
     async fn wallet_id_by_address(pool: &DbPool, address: &str) -> Result<Uuid, Error> {
         let wallet = WalletRepository::get_wallet_by_address(pool, address)
@@ -27,16 +37,31 @@ impl SenseiguardService {
         Ok(wallet.id)
     }
 
-    /// On-chain native (gas) token balance × USD spot price (CoinGecko). ERC-20-only holdings stay in `wallet_assets` sum.
-    async fn live_native_balance_usd(address: &str, chain_id: i64) -> f64 {
-        let wei = rpc::fetch_balance_wei(address, Some(chain_id as u64))
-            .await
-            .unwrap_or_else(|_| "0x0".to_string());
-        let native_units = rpc::wei_hex_to_eth_f64(&wei);
-        let px = native_price::fetch_native_usd_per_unit(chain_id)
-            .await
-            .unwrap_or(0.0);
-        native_units * px
+    /// Live native balance + USD (RPC + price APIs). Surfaces rpc/pricing errors for API diagnostics.
+    async fn live_native_balance_breakdown(address: &str, chain_id: i64) -> LiveNativeBalanceBreakdown {
+        let mut out = LiveNativeBalanceBreakdown::default();
+        match rpc::fetch_balance_wei(address, Some(chain_id as u64)).await {
+            Ok(wei_hex) => {
+                out.native_balance_wei = wei_hex.clone();
+                out.native_balance_eth = rpc::wei_hex_to_eth_f64(&wei_hex);
+            }
+            Err(e) => {
+                tracing::warn!(chain_id, error = %e, "eth_getBalance failed");
+                out.rpc_error = Some(e);
+                out.native_balance_wei = "0x0".to_string();
+            }
+        }
+        match native_price::fetch_native_usd_detailed(chain_id).await {
+            Some(q) => {
+                out.price_source = Some(q.source.to_string());
+                out.native_usd = out.native_balance_eth * q.usd_per_unit;
+            }
+            None => {
+                out.pricing_error = Some("All USD price sources failed".to_string());
+                tracing::warn!(chain_id, "native token USD price unavailable");
+            }
+        }
+        out
     }
 
     pub async fn get_security_status(
@@ -227,8 +252,8 @@ impl SenseiguardService {
             SenseiguardRepository::count_scans_previous_period(pool, wallet_id).await?;
         // DB rows (e.g. ingested ERC-20) + live native balance × spot USD (wallet_assets alone is never auto-filled).
         let total_db_usd = SenseiguardRepository::total_asset_usd(pool, wallet_id).await?;
-        let native_usd = Self::live_native_balance_usd(address, wallet.chain_id).await;
-        let total_asset_usd = total_db_usd + native_usd;
+        let native = Self::live_native_balance_breakdown(address, wallet.chain_id).await;
+        let total_asset_usd = total_db_usd + native.native_usd;
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
         let high_risk_alerts =
             SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
@@ -247,6 +272,12 @@ impl SenseiguardService {
             scans_trend_percent: Self::change_percent(scans_this_month, scans_prev),
             total_asset_usd: format!("{:.2}", total_asset_usd),
             total_asset_trend_percent: 0.0, // no historical asset snapshots in DB
+            wallet_assets_usd: total_db_usd,
+            native_balance_eth: native.native_balance_eth,
+            native_usd: native.native_usd,
+            native_price_source: native.price_source,
+            rpc_error: native.rpc_error,
+            native_pricing_error: native.pricing_error,
             unread_alerts,
             high_risk_alerts,
             alerts_trend_percent: Self::change_percent(alerts_created_this, alerts_created_prev),
@@ -883,7 +914,8 @@ fn score_to_level(score: i32) -> String {
 
         let security = Self::get_security_status(pool, address).await?;
         let assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
-        let total_usd = SenseiguardRepository::total_asset_usd(pool, wallet.id).await.unwrap_or(0.0);
+        let wallet_assets_usd =
+            SenseiguardRepository::total_asset_usd(pool, wallet.id).await.unwrap_or(0.0);
         let approval_count = SenseiguardRepository::count_approvals(pool, wallet.id).await.unwrap_or(0);
         let (high_risk, total_monitored) =
             SenseiguardRepository::transaction_monitoring_risk_counts(pool, wallet.id)
@@ -895,15 +927,8 @@ fn score_to_level(score: i32) -> String {
             0.0
         };
 
-        let native_balance_wei = rpc::fetch_balance_wei(address, Some(wallet.chain_id as u64))
-            .await
-            .unwrap_or_else(|_| "0x0".to_string());
-        let native_balance_eth = rpc::wei_hex_to_eth_f64(&native_balance_wei);
-        let native_usd = native_balance_eth
-            * native_price::fetch_native_usd_per_unit(wallet.chain_id)
-                .await
-                .unwrap_or(0.0);
-        let total_usd = total_usd + native_usd;
+        let native = Self::live_native_balance_breakdown(address, wallet.chain_id).await;
+        let total_usd = wallet_assets_usd + native.native_usd;
 
         let activity =
             SenseiguardRepository::list_activity(pool, wallet.id, activity_limit).await?;
@@ -941,8 +966,13 @@ fn score_to_level(score: i32) -> String {
             },
             balance: ConnectedWalletModalBalance {
                 total_usd,
-                native_balance_eth,
-                native_balance_wei: native_balance_wei.clone(),
+                wallet_assets_usd,
+                native_balance_eth: native.native_balance_eth,
+                native_usd: native.native_usd,
+                native_balance_wei: native.native_balance_wei.clone(),
+                native_price_source: native.price_source,
+                rpc_error: native.rpc_error,
+                native_pricing_error: native.pricing_error,
                 assets,
             },
             security: ConnectedWalletModalSecurity {

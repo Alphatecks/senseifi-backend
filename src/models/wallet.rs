@@ -33,6 +33,15 @@ pub fn is_valid_eth_address(s: &str) -> bool {
         && s[2..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Canonical form for DB storage and lookups: `0x` + lowercase hex (avoids checksum vs all-lower mismatches).
+pub fn canonical_eth_address(address: &str) -> String {
+    if address.len() == 42 && address.starts_with("0x") {
+        format!("0x{}", address[2..].to_lowercase())
+    } else {
+        address.to_string()
+    }
+}
+
 /// Allowed wallet types (allowlist to prevent injection).
 pub const ALLOWED_WALLET_TYPES: &[&str] = &["metamask", "coinbase"];
 

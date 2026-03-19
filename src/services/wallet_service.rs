@@ -1,6 +1,7 @@
 use crate::db::DbPool;
 use crate::models::wallet::{
-    ConnectWalletRequest, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
+    canonical_eth_address, ConnectWalletRequest, ConnectedWalletItem, WalletResponse,
+    WalletStatusResponse,
 };
 use crate::repositories::wallet_repository::WalletRepository;
 use sqlx::Error;
@@ -17,10 +18,11 @@ impl WalletService {
             return Err(Error::RowNotFound);
         }
 
+        let addr = canonical_eth_address(&request.address);
         // Create or update wallet (user_id scopes dashboard to this user)
         let wallet = WalletRepository::create_wallet(
             pool,
-            &request.address,
+            &addr,
             request.chain_id,
             &request.wallet_type,
             request.user_id.as_deref(),

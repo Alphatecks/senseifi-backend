@@ -1,7 +1,7 @@
 //! Creates or returns dashboard identity (user_id, display_name, user_number) when user connects wallet.
 
 use crate::db::DbPool;
-use crate::models::wallet::DashboardUser;
+use crate::models::wallet::{canonical_eth_address, DashboardUser};
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use rand::Rng;
 use sqlx::Error;
@@ -45,12 +45,12 @@ pub async fn get_or_create_for_wallet(
     pool: &DbPool,
     wallet_address: &str,
 ) -> Result<DashboardUser, Error> {
-    if let Some(du) = DashboardUserRepository::get_by_wallet(pool, wallet_address).await? {
+    let addr = canonical_eth_address(wallet_address);
+    if let Some(du) = DashboardUserRepository::get_by_wallet(pool, &addr).await? {
         return Ok(du);
     }
     let user_id = random_user_id();
     let display_name = random_display_name().to_string();
     let user_number = random_user_number();
-    DashboardUserRepository::create(pool, wallet_address, &user_id, &display_name, user_number)
-        .await
+    DashboardUserRepository::create(pool, &addr, &user_id, &display_name, user_number).await
 }
