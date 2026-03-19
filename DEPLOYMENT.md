@@ -84,6 +84,15 @@ The backend calls `eth_getBalance` on the **same chain** as the wallet’s `chai
 
 If the URL for a chain is missing, balance calls for that chain fail (see `rpc_error` on `/api/dashboard/:address/summary`).
 
+### Multi-chain native total (dashboard)
+
+`GET /api/dashboard/:address/summary` sums **native** (gas token) balance × USD across several EVM chains for the **same address**, so a row with `chain_id = 1` can still pick up **BNB on BSC** if `BSC_RPC_URL` is set.
+
+- **`NATIVE_BALANCE_SCAN_CHAIN_IDS`** (optional): comma-separated chain IDs, e.g. `1,56,137,8453,42161,10`.  
+  If unset, defaults to: `1,56,137,8453,42161,10,324,59144,534352,43114,250` plus the wallet’s stored `chain_id` if missing from the list.
+
+Only chains with a configured RPC URL are queried. Response includes **`native_per_chain`** breakdown. **ERC-20 tokens** are still only counted via **`wallet_assets`** unless you add token sync.
+
 ### Native token USD price (optional)
 
 - Default: **CoinGecko** public API, then **CoinCap** if CoinGecko fails.

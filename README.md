@@ -49,9 +49,13 @@ All dashboard routes require a valid Ethereum address in the path (`0x` + 40 hex
 
 After running migrations, `wallet_monitoring` is extended with `security_score`, `last_scan_at`, `issues_this_month`. New tables: `security_scans`, `threats`, `alerts`, `activity_feed`, `wallet_assets`.
 
-**`total_asset_usd` (dashboard summary)** = `wallet_assets_usd` (DB) + `native_usd` (live). Native leg uses **`eth_getBalance` on the wallet’s `chain_id`** via the matching RPC env (see **DEPLOYMENT.md** — e.g. `OPTIMISM_RPC_URL` for chain `10`, not `ETHEREUM_RPC_URL`). USD spot: CoinGecko (optional `COINGECKO_API_KEY` for Pro), then CoinCap fallback.
+**`total_asset_usd` (dashboard summary)** = `wallet_assets_usd` (DB) + **`native_usd` summed across multiple EVM chains** (default scan list in **DEPLOYMENT.md**; override with **`NATIVE_BALANCE_SCAN_CHAIN_IDS`**). Each chain needs its RPC env set (e.g. **`BSC_RPC_URL`** for BNB on chain `56`). The wallet row’s **`chain_id`** is still used for “primary” legacy fields and UI network label, but **no longer limits** where native balance is read from.
 
-The JSON body includes **`wallet_assets_usd`**, **`native_balance_eth`**, **`native_usd`**, **`native_price_source`**, and on failure **`rpc_error`** / **`native_pricing_error`** so you can see why a total might be `0.00`.
+**`native_balance_eth`** = native balance on the **DB `chain_id` only** (e.g. 0 ETH when `chain_id` is 1). Use **`native_per_chain`** for the full breakdown.
+
+USD spot: CoinGecko (optional `COINGECKO_API_KEY` for Pro), then CoinCap fallback.
+
+The JSON body includes **`native_per_chain`**, **`wallet_assets_usd`**, **`native_usd`** (multi-chain total), **`native_price_source`**, and on failure **`rpc_error`** / **`native_pricing_error`**.
 
 Pure ERC-20 balances are not read from chain unless rows exist in `wallet_assets` (future sync/ingest).
 

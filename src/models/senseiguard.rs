@@ -222,6 +222,21 @@ pub struct ConnectedWalletModalDetails {
     pub security_status: String,
 }
 
+/// One chain’s native (gas) balance after a multi-chain scan (`NATIVE_BALANCE_SCAN_CHAIN_IDS`).
+#[derive(Debug, Clone, Serialize)]
+pub struct NativeChainBalance {
+    pub chain_id: i64,
+    pub symbol: String,
+    pub balance: f64,
+    pub usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub price_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpc_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pricing_error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ConnectedWalletModalBalance {
     pub total_usd: f64,
@@ -237,6 +252,8 @@ pub struct ConnectedWalletModalBalance {
     pub rpc_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_pricing_error: Option<String>,
+    /// Native gas token per chain (only chains with RPC configured in env).
+    pub native_per_chain: Vec<NativeChainBalance>,
     pub assets: Vec<WalletAsset>,
 }
 
@@ -272,6 +289,8 @@ pub struct DashboardSummaryResponse {
     pub rpc_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_pricing_error: Option<String>,
+    /// Native balances across scanned EVM chains (same address on each).
+    pub native_per_chain: Vec<NativeChainBalance>,
     pub unread_alerts: i64,
     pub high_risk_alerts: i64,
     pub alerts_trend_percent: f64,

@@ -5,6 +5,7 @@ use crate::models::senseiguard::{
     ActivityMonitorWalletResponse, Alert, ActiveThreatsCard, AiThreatExplanationCard, ConnectedRiskOverview,
     ConnectedWalletModalBalance, ConnectedWalletModalDetails, ConnectedWalletModalResponse,
     ConnectedWalletModalSecurity, DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse,
+    NativeChainBalance,
     FullScanReportResponse, IngestActivityRequest, LiveActivityFeedItem, LiveScamSignalItem, MetricCard,
     MonitoredTransaction, OverallRiskCard, RecentActivityOverview, ReportedThreatsCard, ScamFrequencyDay,
     ScamPatternInsightsCard, ScamPatternsCard, ScanObservation, SecurityOverviewResponse, SecurityStatusResponse,
@@ -27,6 +28,15 @@ struct LiveNativeBalanceBreakdown {
     price_source: Option<String>,
     pricing_error: Option<String>,
     rpc_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct MultiChainNativeAggregate {
+    /// Sum of `native_usd` across scanned chains.
+    total_usd: f64,
+    per_chain: Vec<NativeChainBalance>,
+    /// DB `chain_id` row (for legacy fields / modal wei).
+    primary: LiveNativeBalanceBreakdown,
 }
 
 impl SenseiguardService {
@@ -62,6 +72,126 @@ impl SenseiguardService {
             }
         }
         out
+    }
+
+    /// EVM chains to scan for `eth_getBalance` (same address on each). Env `NATIVE_BALANCE_SCAN_CHAIN_IDS=1,56,...`
+    fn default_native_scan_chain_ids() -> Vec<u64> {
+        if let Ok(s) = std::env::var("NATIVE_BALANCE_SCAN_CHAIN_IDS") {
+            let v: Vec<u64> = s
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .filter(|&id| id > 0)
+                .collect();
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        vec![
+            1, 56, 137, 8453, 42161, 10, 324, 59144, 534352, 43114, 250,
+        ]
+    }
+
+    fn merge_wallet_chain_id(mut ids: Vec<u64>, wallet_chain_id: i64) -> Vec<u64> {
+        if wallet_chain_id > 0 {
+            let w = wallet_chain_id as u64;
+            if !ids.contains(&w) {
+                ids.push(w);
+            }
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    fn native_token_symbol(chain_id: u64) -> &'static str {
+        match chain_id {
+            56 => "BNB",
+            137 => "MATIC",
+            43114 => "AVAX",
+            250 => "FTM",
+            _ => "ETH",
+        }
+    }
+
+    /// Sum native USD across all scan chains that have an RPC URL configured.
+    async fn multi_chain_native_aggregate(
+        address: &str,
+        wallet_chain_id: i64,
+    ) -> MultiChainNativeAggregate {
+        let ids = Self::merge_wallet_chain_id(Self::default_native_scan_chain_ids(), wallet_chain_id);
+        let mut per_chain = Vec::new();
+        let mut total_usd = 0.0_f64;
+        let mut primary = LiveNativeBalanceBreakdown::default();
+
+        for cid in ids {
+            if rpc::rpc_url_for_chain(Some(cid)).is_none() {
+                continue;
+            }
+            let b = Self::live_native_balance_breakdown(address, cid as i64).await;
+            if cid == wallet_chain_id as u64 {
+                primary = LiveNativeBalanceBreakdown {
+                    native_balance_wei: b.native_balance_wei.clone(),
+                    native_balance_eth: b.native_balance_eth,
+                    native_usd: b.native_usd,
+                    price_source: b.price_source.clone(),
+                    pricing_error: b.pricing_error.clone(),
+                    rpc_error: b.rpc_error.clone(),
+                };
+            }
+            let pricing_err = if b.native_balance_eth > 1e-12 && b.native_usd <= 1e-12 {
+                b.pricing_error.clone()
+            } else {
+                None
+            };
+            total_usd += b.native_usd;
+            per_chain.push(NativeChainBalance {
+                chain_id: cid as i64,
+                symbol: Self::native_token_symbol(cid).to_string(),
+                balance: b.native_balance_eth,
+                usd: b.native_usd,
+                price_source: b.price_source.clone(),
+                rpc_error: b.rpc_error.clone(),
+                pricing_error: pricing_err,
+            });
+        }
+
+        MultiChainNativeAggregate {
+            total_usd,
+            per_chain,
+            primary,
+        }
+    }
+
+    fn aggregate_summary_errors(
+        agg: &MultiChainNativeAggregate,
+    ) -> (Option<String>, Option<String>, Option<String>) {
+        let price_src = agg
+            .per_chain
+            .iter()
+            .find(|p| p.usd > 1e-12)
+            .and_then(|p| p.price_source.clone());
+
+        let rpc_err = if agg.total_usd <= 1e-12 {
+            agg.per_chain
+                .iter()
+                .find_map(|p| p.rpc_error.clone())
+        } else {
+            None
+        };
+
+        let pricing_err = if agg.total_usd <= 1e-12
+            && agg.per_chain.iter().any(|p| p.balance > 1e-12)
+        {
+            Some(
+                "USD pricing failed for one or more chains with non-zero native balance".to_string(),
+            )
+        } else if agg.total_usd <= 1e-12 {
+            agg.primary.pricing_error.clone()
+        } else {
+            None
+        };
+
+        (rpc_err, pricing_err, price_src)
     }
 
     pub async fn get_security_status(
@@ -250,10 +380,11 @@ impl SenseiguardService {
             SenseiguardRepository::count_scans_this_month(pool, wallet_id).await?;
         let scans_prev =
             SenseiguardRepository::count_scans_previous_period(pool, wallet_id).await?;
-        // DB rows (e.g. ingested ERC-20) + live native balance × spot USD (wallet_assets alone is never auto-filled).
+        // DB rows + native USD summed across NATIVE_BALANCE_SCAN_CHAIN_IDS (each chain must have RPC env set).
         let total_db_usd = SenseiguardRepository::total_asset_usd(pool, wallet_id).await?;
-        let native = Self::live_native_balance_breakdown(address, wallet.chain_id).await;
-        let total_asset_usd = total_db_usd + native.native_usd;
+        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+        let total_asset_usd = total_db_usd + agg.total_usd;
+        let (rpc_err, pricing_err, price_src) = Self::aggregate_summary_errors(&agg);
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
         let high_risk_alerts =
             SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
@@ -273,11 +404,14 @@ impl SenseiguardService {
             total_asset_usd: format!("{:.2}", total_asset_usd),
             total_asset_trend_percent: 0.0, // no historical asset snapshots in DB
             wallet_assets_usd: total_db_usd,
-            native_balance_eth: native.native_balance_eth,
-            native_usd: native.native_usd,
-            native_price_source: native.price_source,
-            rpc_error: native.rpc_error,
-            native_pricing_error: native.pricing_error,
+            // Legacy: native on DB `chain_id` only (e.g. Ethereum 0 while BNB lives on 56).
+            native_balance_eth: agg.primary.native_balance_eth,
+            // Total native USD across all scanned chains with RPC.
+            native_usd: agg.total_usd,
+            native_price_source: price_src,
+            rpc_error: rpc_err,
+            native_pricing_error: pricing_err,
+            native_per_chain: agg.per_chain,
             unread_alerts,
             high_risk_alerts,
             alerts_trend_percent: Self::change_percent(alerts_created_this, alerts_created_prev),
@@ -927,8 +1061,10 @@ fn score_to_level(score: i32) -> String {
             0.0
         };
 
-        let native = Self::live_native_balance_breakdown(address, wallet.chain_id).await;
-        let total_usd = wallet_assets_usd + native.native_usd;
+        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+        let (_, pricing_err, _) = Self::aggregate_summary_errors(&agg);
+        let total_usd = wallet_assets_usd + agg.total_usd;
+        let primary = &agg.primary;
 
         let activity =
             SenseiguardRepository::list_activity(pool, wallet.id, activity_limit).await?;
@@ -967,12 +1103,13 @@ fn score_to_level(score: i32) -> String {
             balance: ConnectedWalletModalBalance {
                 total_usd,
                 wallet_assets_usd,
-                native_balance_eth: native.native_balance_eth,
-                native_usd: native.native_usd,
-                native_balance_wei: native.native_balance_wei.clone(),
-                native_price_source: native.price_source,
-                rpc_error: native.rpc_error,
-                native_pricing_error: native.pricing_error,
+                native_balance_eth: primary.native_balance_eth,
+                native_usd: agg.total_usd,
+                native_balance_wei: primary.native_balance_wei.clone(),
+                native_price_source: primary.price_source.clone(),
+                rpc_error: primary.rpc_error.clone(),
+                native_pricing_error: pricing_err.or_else(|| primary.pricing_error.clone()),
+                native_per_chain: agg.per_chain,
                 assets,
             },
             security: ConnectedWalletModalSecurity {
