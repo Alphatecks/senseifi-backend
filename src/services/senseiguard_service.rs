@@ -1,4 +1,4 @@
-use crate::clients::rpc;
+use crate::clients::{native_price, rpc};
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActiveAlertsOverview, ActivityFeedItem, ActivityMonitorDappResponse,
@@ -25,6 +25,18 @@ impl SenseiguardService {
             .await?
             .ok_or(Error::RowNotFound)?;
         Ok(wallet.id)
+    }
+
+    /// On-chain native (gas) token balance × USD spot price (CoinGecko). ERC-20-only holdings stay in `wallet_assets` sum.
+    async fn live_native_balance_usd(address: &str, chain_id: i64) -> f64 {
+        let wei = rpc::fetch_balance_wei(address, Some(chain_id as u64))
+            .await
+            .unwrap_or_else(|_| "0x0".to_string());
+        let native_units = rpc::wei_hex_to_eth_f64(&wei);
+        let px = native_price::fetch_native_usd_per_unit(chain_id)
+            .await
+            .unwrap_or(0.0);
+        native_units * px
     }
 
     pub async fn get_security_status(
@@ -200,7 +212,10 @@ impl SenseiguardService {
         pool: &DbPool,
         address: &str,
     ) -> Result<DashboardSummaryResponse, Error> {
-        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let wallet = WalletRepository::get_wallet_by_address(pool, address)
+            .await?
+            .ok_or(Error::RowNotFound)?;
+        let wallet_id = wallet.id;
         let security_status = Self::get_security_status(pool, address).await?;
         let threats_this_month =
             SenseiguardRepository::count_threats_this_month(pool, wallet_id).await?;
@@ -210,7 +225,10 @@ impl SenseiguardService {
             SenseiguardRepository::count_scans_this_month(pool, wallet_id).await?;
         let scans_prev =
             SenseiguardRepository::count_scans_previous_period(pool, wallet_id).await?;
-        let total_asset_usd = SenseiguardRepository::total_asset_usd(pool, wallet_id).await?;
+        // DB rows (e.g. ingested ERC-20) + live native balance × spot USD (wallet_assets alone is never auto-filled).
+        let total_db_usd = SenseiguardRepository::total_asset_usd(pool, wallet_id).await?;
+        let native_usd = Self::live_native_balance_usd(address, wallet.chain_id).await;
+        let total_asset_usd = total_db_usd + native_usd;
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
         let high_risk_alerts =
             SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
@@ -880,8 +898,12 @@ fn score_to_level(score: i32) -> String {
         let native_balance_wei = rpc::fetch_balance_wei(address, Some(wallet.chain_id as u64))
             .await
             .unwrap_or_else(|_| "0x0".to_string());
-        let native_balance_eth =
-            parse_wei_hex(&native_balance_wei).map(|w| w as f64 / 1e18).unwrap_or(0.0);
+        let native_balance_eth = rpc::wei_hex_to_eth_f64(&native_balance_wei);
+        let native_usd = native_balance_eth
+            * native_price::fetch_native_usd_per_unit(wallet.chain_id)
+                .await
+                .unwrap_or(0.0);
+        let total_usd = total_usd + native_usd;
 
         let activity =
             SenseiguardRepository::list_activity(pool, wallet.id, activity_limit).await?;
@@ -934,11 +956,6 @@ fn score_to_level(score: i32) -> String {
             activity,
         })
     }
-}
-
-fn parse_wei_hex(s: &str) -> Option<u64> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    u64::from_str_radix(s, 16).ok()
 }
 
 fn chain_id_to_network(chain_id: i64) -> String {

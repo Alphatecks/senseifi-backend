@@ -79,6 +79,16 @@ pub async fn fetch_balance_wei(
     Ok(out.result)
 }
 
+/// Convert `eth_getBalance` hex wei to ETH (or native token) as f64. Uses `u128` so typical balances parse; overflow → 0.0.
+pub fn wei_hex_to_eth_f64(hex_wei: &str) -> f64 {
+    let s = hex_wei.strip_prefix("0x").unwrap_or(hex_wei);
+    if s.is_empty() {
+        return 0.0;
+    }
+    let wei = u128::from_str_radix(s, 16).unwrap_or(0);
+    wei as f64 / 1e18
+}
+
 #[derive(Debug, Deserialize)]
 struct RpcResponse {
     result: String,

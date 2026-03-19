@@ -48,3 +48,5 @@ All dashboard routes require a valid Ethereum address in the path (`0x` + 40 hex
 | GET | `/api/dashboard/:address/assets` | Connected wallet assets (symbol, balance, USD value, change %). |
 
 After running migrations, `wallet_monitoring` is extended with `security_score`, `last_scan_at`, `issues_this_month`. New tables: `security_scans`, `threats`, `alerts`, `activity_feed`, `wallet_assets`.
+
+**`total_asset_usd` (dashboard summary)** = sum of `wallet_assets.usd_value` **plus** live **native** (gas token) balance from your chain RPC × USD spot (CoinGecko). Set `ETHEREUM_RPC_URL` (or `BSC_RPC_URL`, `POLYGON_RPC_URL`, etc. for that chain). Pure ERC-20 balances are not read from chain unless rows exist in `wallet_assets` (e.g. future ingest/sync).

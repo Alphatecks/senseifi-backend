@@ -162,7 +162,7 @@ async fn get_wallet_balance(
     let chain_id_u = chain_id as u64;
     match rpc::fetch_balance_wei(&address, Some(chain_id_u)).await {
         Ok(hex_wei) => {
-            let balance_eth = parse_wei_hex(&hex_wei).map(|w| w as f64 / 1e18).unwrap_or(0.0);
+            let balance_eth = rpc::wei_hex_to_eth_f64(&hex_wei);
             Ok(Json(json!({
                 "success": true,
                 "data": {
@@ -183,12 +183,6 @@ async fn get_wallet_balance(
             ))
         }
     }
-}
-
-/// Parse hex wei to u64 (for ETH display). Large balances may exceed u64; then we return 0.0 ETH.
-fn parse_wei_hex(s: &str) -> Option<u64> {
-    let s = s.strip_prefix("0x").unwrap_or(s);
-    u64::from_str_radix(s, 16).ok()
 }
 
 async fn get_connected_wallet_modal(
