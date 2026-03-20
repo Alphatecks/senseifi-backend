@@ -1,13 +1,47 @@
-//! USD spot for native gas tokens: CoinGecko (optional Pro), CoinCap, then Binance public ticker.
+//! USD spot for native gas tokens: CoinGecko (optional Pro), CoinCap, Binance, Coinbase.
+//! In-memory cache by asset id (same as CoinGecko id) avoids rate limits when scanning many chains.
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct NativeUsdQuote {
     pub usd_per_unit: f64,
-    /// "coingecko" | "coingecko_pro" | "coincap" | "binance"
+    /// "coingecko" | "coingecko_pro" | "coincap" | "binance" | "coinbase"
     pub source: &'static str,
+}
+
+const PRICE_CACHE_TTL: Duration = Duration::from_secs(120);
+
+type PriceCacheMap = HashMap<String, (NativeUsdQuote, Instant)>;
+
+fn price_cache() -> &'static Mutex<PriceCacheMap> {
+    static CACHE: OnceLock<Mutex<PriceCacheMap>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn cache_key_for_chain(chain_id: i64) -> String {
+    coingecko_id_for_chain(chain_id).to_string()
+}
+
+fn cached_quote(chain_id: i64) -> Option<NativeUsdQuote> {
+    let key = cache_key_for_chain(chain_id);
+    let mut g = price_cache().lock().ok()?;
+    let (q, at) = g.get(&key)?;
+    if at.elapsed() < PRICE_CACHE_TTL {
+        return Some(q.clone());
+    }
+    g.remove(&key);
+    None
+}
+
+fn store_cached_quote(chain_id: i64, q: &NativeUsdQuote) {
+    let key = cache_key_for_chain(chain_id);
+    if let Ok(mut g) = price_cache().lock() {
+        g.insert(key, (q.clone(), Instant::now()));
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +148,52 @@ struct BinanceTickerPrice {
     price: String,
 }
 
+/// Coinbase public spot (no key). Pair must exist on Coinbase (e.g. BNB-USD).
+fn coinbase_spot_pair(chain_id: i64) -> &'static str {
+    match chain_id {
+        56 => "BNB-USD",
+        137 => "MATIC-USD",
+        43114 => "AVAX-USD",
+        250 => "FTM-USD",
+        _ => "ETH-USD",
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CoinbaseSpotAmt {
+    amount: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoinbaseSpotResp {
+    data: CoinbaseSpotAmt,
+}
+
+async fn fetch_coinbase_spot(chain_id: i64) -> Option<NativeUsdQuote> {
+    let pair = coinbase_spot_pair(chain_id);
+    let url = format!("https://api.coinbase.com/v2/prices/{}/spot", pair);
+    let client = http_client()?;
+    let res = client.get(&url).send().await.ok()?;
+    if !res.status().is_success() {
+        tracing::warn!(
+            status = %res.status(),
+            chain_id,
+            %pair,
+            "Coinbase spot HTTP non-success"
+        );
+        return None;
+    }
+    let body: CoinbaseSpotResp = res.json().await.ok()?;
+    let usd: f64 = body.data.amount.parse().ok()?;
+    if !usd.is_finite() || usd <= 0.0 {
+        return None;
+    }
+    Some(NativeUsdQuote {
+        usd_per_unit: usd,
+        source: "coinbase",
+    })
+}
+
 async fn fetch_binance_usdt(chain_id: i64) -> Option<NativeUsdQuote> {
     let symbol = binance_symbol_for_chain(chain_id);
     let url = format!(
@@ -160,21 +240,39 @@ async fn fetch_coincap(chain_id: i64) -> Option<NativeUsdQuote> {
     })
 }
 
-/// Best-effort USD per native unit: CoinGecko (Pro if set), CoinCap, Binance USDT ticker.
+/// Best-effort USD per native unit. Cached 120s per asset (CoinGecko id) to reduce rate limits.
 pub async fn fetch_native_usd_detailed(chain_id: i64) -> Option<NativeUsdQuote> {
-    if let Some(q) = fetch_coingecko(chain_id).await {
+    if let Some(q) = cached_quote(chain_id) {
         return Some(q);
     }
-    tracing::warn!(chain_id, "CoinGecko native USD failed; trying CoinCap");
-    if let Some(q) = fetch_coincap(chain_id).await {
-        return Some(q);
-    }
-    tracing::warn!(chain_id, "CoinCap failed; trying Binance USDT");
-    if let Some(q) = fetch_binance_usdt(chain_id).await {
-        return Some(q);
-    }
-    tracing::warn!(chain_id, "Native USD pricing failed (CoinGecko, CoinCap, Binance)");
-    None
+
+    let q = if let Some(q) = fetch_coingecko(chain_id).await {
+        q
+    } else {
+        tracing::warn!(chain_id, "CoinGecko native USD failed; trying CoinCap");
+        if let Some(q) = fetch_coincap(chain_id).await {
+            q
+        } else {
+            tracing::warn!(chain_id, "CoinCap failed; trying Binance USDT");
+            if let Some(q) = fetch_binance_usdt(chain_id).await {
+                q
+            } else {
+                tracing::warn!(chain_id, "Binance failed; trying Coinbase spot");
+                if let Some(q) = fetch_coinbase_spot(chain_id).await {
+                    q
+                } else {
+                    tracing::warn!(
+                        chain_id,
+                        "Native USD pricing failed (CoinGecko, CoinCap, Binance, Coinbase)"
+                    );
+                    return None;
+                }
+            }
+        }
+    };
+
+    store_cached_quote(chain_id, &q);
+    Some(q)
 }
 
 /// Spot USD for one unit of the chain native token. None if all sources fail.

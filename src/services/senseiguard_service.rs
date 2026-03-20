@@ -67,7 +67,10 @@ impl SenseiguardService {
                 out.native_usd = out.native_balance_eth * q.usd_per_unit;
             }
             None => {
-                out.pricing_error = Some("All USD price sources failed".to_string());
+                out.pricing_error = Some(
+                    "USD price unavailable (CoinGecko, CoinCap, Binance, Coinbase all failed or blocked)"
+                        .to_string(),
+                );
                 tracing::warn!(chain_id, "native token USD price unavailable");
             }
         }

@@ -95,7 +95,8 @@ Only chains with a configured RPC URL are queried. Response includes **`native_p
 
 ### Native token USD price (optional)
 
-- Order: **CoinGecko** public (or **Pro** if `COINGECKO_API_KEY`), then **CoinCap**, then **Binance** public `ticker/price` (USDT pair, e.g. `BNBUSDT` for BSC).
+- Order: **CoinGecko** public (or **Pro** if `COINGECKO_API_KEY`), then **CoinCap**, **Binance** `ticker/price` (USDT), **Coinbase** `v2/prices/{PAIR}/spot`.
+- Successful quotes are **cached 120s** per asset (e.g. one `ethereum` price reused for chains 1, 10, 8453…), which avoids **CoinGecko rate limits** when scanning many chains.
 - Optional: `COINGECKO_API_KEY` — uses CoinGecko Pro (`pro-api.coingecko.com`) with header `x-cg-pro-api-key`.
 
 ## Troubleshooting
