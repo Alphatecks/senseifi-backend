@@ -53,7 +53,7 @@ After running migrations, `wallet_monitoring` is extended with `security_score`,
 
 **`native_balance_eth`** = native balance on the **DB `chain_id` only** (e.g. 0 ETH when `chain_id` is 1). Use **`native_per_chain`** for the full breakdown.
 
-USD spot: CoinGecko (optional `COINGECKO_API_KEY` for Pro), then CoinCap fallback.
+USD spot: CoinGecko (optional `COINGECKO_API_KEY` for Pro), CoinCap, then Binance USDT ticker (e.g. BNBUSDT on BSC).
 
 The JSON body includes **`native_per_chain`**, **`wallet_assets_usd`**, **`native_usd`** (multi-chain total), **`native_price_source`**, and on failure **`rpc_error`** / **`native_pricing_error`**.
 

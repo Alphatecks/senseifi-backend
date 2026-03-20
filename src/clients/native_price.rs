@@ -1,4 +1,4 @@
-//! USD spot for native gas tokens: CoinGecko (optional Pro key) then CoinCap fallback.
+//! USD spot for native gas tokens: CoinGecko (optional Pro), CoinCap, then Binance public ticker.
 
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct NativeUsdQuote {
     pub usd_per_unit: f64,
-    /// "coingecko" | "coingecko_pro" | "coincap"
+    /// "coingecko" | "coingecko_pro" | "coincap" | "binance"
     pub source: &'static str,
 }
 
@@ -98,6 +98,50 @@ async fn fetch_coingecko(chain_id: i64) -> Option<NativeUsdQuote> {
     })
 }
 
+/// Binance spot USDT pair (public, no key). USDT ≈ USD for portfolio display.
+fn binance_symbol_for_chain(chain_id: i64) -> &'static str {
+    match chain_id {
+        56 => "BNBUSDT",
+        137 => "MATICUSDT",
+        43114 => "AVAXUSDT",
+        250 => "FTMUSDT",
+        _ => "ETHUSDT",
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BinanceTickerPrice {
+    price: String,
+}
+
+async fn fetch_binance_usdt(chain_id: i64) -> Option<NativeUsdQuote> {
+    let symbol = binance_symbol_for_chain(chain_id);
+    let url = format!(
+        "https://api.binance.com/api/v3/ticker/price?symbol={}",
+        symbol
+    );
+    let client = http_client()?;
+    let res = client.get(url).send().await.ok()?;
+    if !res.status().is_success() {
+        tracing::warn!(
+            status = %res.status(),
+            chain_id,
+            %symbol,
+            "Binance price HTTP non-success"
+        );
+        return None;
+    }
+    let body: BinanceTickerPrice = res.json().await.ok()?;
+    let usd: f64 = body.price.parse().ok()?;
+    if !usd.is_finite() || usd <= 0.0 {
+        return None;
+    }
+    Some(NativeUsdQuote {
+        usd_per_unit: usd,
+        source: "binance",
+    })
+}
+
 async fn fetch_coincap(chain_id: i64) -> Option<NativeUsdQuote> {
     let slug = coincap_id_for_chain(chain_id);
     let url = format!("https://api.coincap.io/v2/assets/{}", slug);
@@ -116,7 +160,7 @@ async fn fetch_coincap(chain_id: i64) -> Option<NativeUsdQuote> {
     })
 }
 
-/// Best-effort USD per native unit. Tries CoinGecko (Pro if `COINGECKO_API_KEY`), then CoinCap.
+/// Best-effort USD per native unit: CoinGecko (Pro if set), CoinCap, Binance USDT ticker.
 pub async fn fetch_native_usd_detailed(chain_id: i64) -> Option<NativeUsdQuote> {
     if let Some(q) = fetch_coingecko(chain_id).await {
         return Some(q);
@@ -125,7 +169,11 @@ pub async fn fetch_native_usd_detailed(chain_id: i64) -> Option<NativeUsdQuote> 
     if let Some(q) = fetch_coincap(chain_id).await {
         return Some(q);
     }
-    tracing::warn!(chain_id, "Native USD pricing failed (CoinGecko and CoinCap)");
+    tracing::warn!(chain_id, "CoinCap failed; trying Binance USDT");
+    if let Some(q) = fetch_binance_usdt(chain_id).await {
+        return Some(q);
+    }
+    tracing::warn!(chain_id, "Native USD pricing failed (CoinGecko, CoinCap, Binance)");
     None
 }
 

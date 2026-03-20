@@ -95,7 +95,7 @@ Only chains with a configured RPC URL are queried. Response includes **`native_p
 
 ### Native token USD price (optional)
 
-- Default: **CoinGecko** public API, then **CoinCap** if CoinGecko fails.
+- Order: **CoinGecko** public (or **Pro** if `COINGECKO_API_KEY`), then **CoinCap**, then **Binance** public `ticker/price` (USDT pair, e.g. `BNBUSDT` for BSC).
 - Optional: `COINGECKO_API_KEY` — uses CoinGecko Pro (`pro-api.coingecko.com`) with header `x-cg-pro-api-key`.
 
 ## Troubleshooting
