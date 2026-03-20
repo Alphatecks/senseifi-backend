@@ -561,8 +561,45 @@ impl SenseiguardService {
     }
 
     pub async fn list_assets(pool: &DbPool, address: &str) -> Result<Vec<WalletAsset>, Error> {
-        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
-        SenseiguardRepository::list_assets(pool, wallet_id).await
+        let wallet = WalletRepository::get_wallet_by_address(pool, address)
+            .await?
+            .ok_or(Error::RowNotFound)?;
+        let mut assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
+
+        // Add live native assets from scanned chains so /assets matches summary multi-chain behavior.
+        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+        let now = Utc::now();
+        for a in agg.per_chain.into_iter() {
+            if a.balance <= 0.0 {
+                continue;
+            }
+            let symbol = a.symbol.clone();
+            let name = format!("{} ({})", chain_id_to_network(a.chain_id), symbol);
+            let balance = format!("{:.18}", a.balance);
+            if let Some(existing) = assets.iter_mut().find(|x| x.symbol == symbol) {
+                existing.balance = balance;
+                existing.usd_value = existing.usd_value.max(a.usd);
+                existing.updated_at = now;
+            } else {
+                assets.push(WalletAsset {
+                    id: Uuid::new_v4(),
+                    wallet_id: wallet.id,
+                    symbol,
+                    name,
+                    balance,
+                    usd_value: a.usd,
+                    change_percent: 0.0,
+                    created_at: now,
+                    updated_at: now,
+                });
+            }
+        }
+        assets.sort_by(|a, b| {
+            b.usd_value
+                .partial_cmp(&a.usd_value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(assets)
     }
 
     /// Paginated list for Transaction monitoring UI: title + risk level per row.
