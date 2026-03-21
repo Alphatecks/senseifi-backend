@@ -633,12 +633,15 @@ impl SenseiguardService {
         let mut outcomes = Vec::with_capacity(ids.len());
 
         for cid in ids {
-            if moralis_wallet::moralis_chain_slug(cid).is_none() {
+            if moralis_wallet::moralis_chain_param(cid).is_none() {
                 outcomes.push(IndexedTokenSyncChainOutcome {
                     chain_id: cid,
                     status: "skipped".to_string(),
                     tokens_upserted: 0,
-                    detail: Some("chain_id not mapped for Moralis".to_string()),
+                    detail: Some(
+                        "chain not supported by Moralis wallet token API (e.g. zkSync 324, Scroll 534352)"
+                            .to_string(),
+                    ),
                 });
                 continue;
             }

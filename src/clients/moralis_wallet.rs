@@ -1,4 +1,8 @@
 //! Moralis Web3 Data API: wallet ERC-20 token balances (aggregated per chain).
+//!
+//! Moralis `GET /api/v2.2/wallets/{address}/tokens` returns **snake_case** JSON and accepts `chain`
+//! as a documented enum string or **hex** (e.g. `0x38` for BSC). zkSync (324) and Scroll (534352)
+//! are not in the wallet token balances chain list — we skip them.
 
 use num_bigint::BigUint;
 use num_traits::Num;
@@ -6,27 +10,31 @@ use serde::Deserialize;
 
 const DEFAULT_BASE: &str = "https://deep-index.moralis.io";
 
-/// Map EVM `chain_id` to Moralis `chain` query parameter.
-pub fn moralis_chain_slug(chain_id: u64) -> Option<&'static str> {
+/// Moralis-supported chains for wallet token balances (hex matches their enum).
+/// See: https://docs.moralis.com/data-api/evm/wallet/token-balances
+pub fn moralis_chain_param(chain_id: u64) -> Option<&'static str> {
     match chain_id {
-        1 => Some("eth"),
-        11155111 => Some("sepolia"),
-        56 => Some("bsc"),
-        137 => Some("polygon"),
-        8453 => Some("base"),
-        42161 => Some("arbitrum"),
-        10 => Some("optimism"),
-        324 => Some("zksync"),
-        59144 => Some("linea"),
-        534352 => Some("scroll"),
-        43114 => Some("avalanche"),
-        250 => Some("fantom"),
+        1 => Some("0x1"),
+        11155111 => Some("0xaa36a7"),
+        56 => Some("0x38"),
+        137 => Some("0x89"),
+        43114 => Some("0xa86a"),
+        250 => Some("0xfa"),
+        42161 => Some("0xa4b1"),
+        8453 => Some("0x2105"),
+        10 => Some("0xa"),
+        59144 => Some("0xe708"),
         _ => None,
     }
 }
 
+/// Backwards-compatible name for callers that checked slug mapping.
+#[inline]
+pub fn moralis_chain_slug(chain_id: u64) -> Option<&'static str> {
+    moralis_chain_param(chain_id)
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct MoralisErc20Item {
     #[serde(default)]
     pub token_address: Option<String>,
@@ -45,6 +53,14 @@ pub struct MoralisErc20Item {
     pub usd_value: Option<f64>,
     #[serde(default)]
     pub possible_spam: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MoralisTokenPage {
+    #[serde(default)]
+    result: Vec<MoralisErc20Item>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 /// Normalized row for DB upsert.
@@ -72,17 +88,15 @@ fn moralis_base_url() -> String {
         .unwrap_or_else(|| DEFAULT_BASE.to_string())
 }
 
-fn parse_moralis_token_list(body: &str) -> Result<Vec<MoralisErc20Item>, String> {
+fn parse_moralis_page(body: &str) -> Result<MoralisTokenPage, String> {
+    if let Ok(page) = serde_json::from_str::<MoralisTokenPage>(body) {
+        return Ok(page);
+    }
     if let Ok(v) = serde_json::from_str::<Vec<MoralisErc20Item>>(body) {
-        return Ok(v);
-    }
-    #[derive(Deserialize)]
-    struct Envelope {
-        #[serde(default)]
-        result: Vec<MoralisErc20Item>,
-    }
-    if let Ok(env) = serde_json::from_str::<Envelope>(body) {
-        return Ok(env.result);
+        return Ok(MoralisTokenPage {
+            result: v,
+            cursor: None,
+        });
     }
     #[derive(Deserialize)]
     struct DataWrap {
@@ -90,8 +104,18 @@ fn parse_moralis_token_list(body: &str) -> Result<Vec<MoralisErc20Item>, String>
         data: Vec<MoralisErc20Item>,
     }
     serde_json::from_str::<DataWrap>(body)
-        .map(|w| w.data)
+        .map(|w| MoralisTokenPage {
+            result: w.data,
+            cursor: None,
+        })
         .map_err(|e| format!("Moralis JSON parse error: {e}"))
+}
+
+fn moralis_exclude_spam() -> bool {
+    std::env::var("MORALIS_EXCLUDE_SPAM")
+        .ok()
+        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
 fn clamp_utf8(s: &str, max_chars: usize) -> String {
@@ -134,35 +158,64 @@ pub async fn fetch_wallet_tokens(
     chain_id: u64,
 ) -> Result<Vec<IndexedTokenBalance>, String> {
     let key = moralis_api_key().ok_or_else(|| "MORALIS_API_KEY is not set".to_string())?;
-    let slug = moralis_chain_slug(chain_id).ok_or_else(|| {
-        format!("chain_id {chain_id} is not mapped for Moralis token sync")
+    let chain = moralis_chain_param(chain_id).ok_or_else(|| {
+        format!(
+            "chain_id {chain_id} is not supported by Moralis wallet token API (e.g. zkSync 324 and Scroll 534352)"
+        )
     })?;
     let base = moralis_base_url();
     let addr = wallet_address.trim();
-    let url = format!(
-        "{base}/api/v2.2/wallets/{addr}/tokens?chain={slug}&exclude_spam=true&exclude_unverified_contracts=false"
-    );
+    let exclude_spam = moralis_exclude_spam();
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(45))
         .build()
         .map_err(|e| e.to_string())?;
 
-    let res = client
-        .get(&url)
-        .header("X-API-Key", key)
-        .header("Accept", "application/json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let status = res.status();
-    let body = res.text().await.map_err(|e| e.to_string())?;
-    if !status.is_success() {
-        return Err(format!("Moralis HTTP {status}: {}", body.chars().take(200).collect::<String>()));
+    let mut items: Vec<MoralisErc20Item> = Vec::new();
+    let mut cursor: Option<String> = None;
+    const MAX_PAGES: u32 = 50;
+    let mut pages: u32 = 0;
+    loop {
+        pages += 1;
+        if pages > MAX_PAGES {
+            break;
+        }
+        let mut req = client
+            .get(format!("{base}/api/v2.2/wallets/{addr}/tokens"))
+            .header("X-API-Key", &key)
+            .header("Accept", "application/json")
+            .query(&[
+                ("chain", chain),
+                ("exclude_unverified_contracts", "false"),
+                ("limit", "100"),
+            ])
+            .query(&[(
+                "exclude_spam",
+                if exclude_spam { "true" } else { "false" },
+            )]);
+        if let Some(ref c) = cursor {
+            if !c.is_empty() {
+                req = req.query(&[("cursor", c.as_str())]);
+            }
+        }
+        let res = req.send().await.map_err(|e| e.to_string())?;
+        let status = res.status();
+        let body = res.text().await.map_err(|e| e.to_string())?;
+        if !status.is_success() {
+            return Err(format!(
+                "Moralis HTTP {status}: {}",
+                body.chars().take(200).collect::<String>()
+            ));
+        }
+        let page = parse_moralis_page(&body)?;
+        items.extend(page.result);
+        let next = page.cursor.filter(|s| !s.is_empty());
+        if next.is_none() {
+            break;
+        }
+        cursor = next;
     }
-
-    let items = parse_moralis_token_list(&body)?;
 
     let mut out = Vec::new();
     for it in items {
