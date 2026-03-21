@@ -91,7 +91,17 @@ If the URL for a chain is missing, balance calls for that chain fail (see `rpc_e
 - **`NATIVE_BALANCE_SCAN_CHAIN_IDS`** (optional): comma-separated chain IDs, e.g. `1,56,137,8453,42161,10`.  
   If unset, defaults to: `1,56,137,8453,42161,10,324,59144,534352,43114,250` plus the wallet’s stored `chain_id` if missing from the list.
 
-Only chains with a configured RPC URL are queried. Response includes **`native_per_chain`** breakdown. **ERC-20 tokens** are still only counted via **`wallet_assets`** unless you add token sync.
+Only chains with a configured RPC URL are queried. Response includes **`native_per_chain`** breakdown.
+
+### ERC-20 / BEP-20 token balances (Moralis)
+
+Indexed token balances are stored in **`wallet_assets`** and included in **`GET /api/dashboard/:address/summary`** (`wallet_assets_usd`) and **`GET /api/dashboard/:address/assets`** (merged with live native balances).
+
+- **`MORALIS_API_KEY`** (required for sync): [Moralis](https://moralis.io/) Web3 Data API key. Without it, **`POST /api/dashboard/:address/assets/sync`** returns **503**.
+- **`MORALIS_API_BASE_URL`** (optional): default `https://deep-index.moralis.io`.
+- **`TOKEN_BALANCE_SCAN_CHAIN_IDS`** (optional): comma-separated chain IDs to sync (e.g. `1,56,137`). If unset, defaults to the same list as **`NATIVE_BALANCE_SCAN_CHAIN_IDS`** (or its built-in default). Chains not mapped to Moralis in the backend are reported as **`skipped`** in the sync response.
+
+**On-demand sync:** `POST /api/dashboard/:address/assets/sync` — for each scanned chain, deletes prior indexed rows for that wallet+chain, then upserts tokens returned by Moralis (`exclude_spam=true`). Respect Moralis rate limits on your plan; add a cron or debounce on the client if needed.
 
 ### Native token USD price (optional)
 

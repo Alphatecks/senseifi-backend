@@ -1206,10 +1206,62 @@ impl SenseiguardRepository {
 
     pub async fn list_assets(pool: &DbPool, wallet_id: Uuid) -> Result<Vec<WalletAsset>, Error> {
         sqlx::query_as(
-            "SELECT id, wallet_id, symbol, name, balance, usd_value::float8, change_percent::float8, created_at, updated_at FROM wallet_assets WHERE wallet_id = $1 ORDER BY usd_value DESC",
+            r#"SELECT id, wallet_id, symbol, name, balance, usd_value::float8, change_percent::float8,
+                      chain_id, contract_address, created_at, updated_at
+               FROM wallet_assets WHERE wallet_id = $1 ORDER BY usd_value DESC"#,
         )
         .bind(wallet_id)
         .fetch_all(pool)
+        .await
+    }
+
+    /// Remove Moralis-synced rows for one chain before re-inserting (avoids stale tokens).
+    pub async fn delete_indexed_assets_for_chain(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        chain_id: i32,
+    ) -> Result<u64, Error> {
+        let r = sqlx::query(
+            "DELETE FROM wallet_assets WHERE wallet_id = $1 AND chain_id = $2 AND contract_address IS NOT NULL",
+        )
+        .bind(wallet_id)
+        .bind(chain_id)
+        .execute(pool)
+        .await?;
+        Ok(r.rows_affected())
+    }
+
+    pub async fn upsert_indexed_token(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        chain_id: i32,
+        contract_address: &str,
+        symbol: &str,
+        name: &str,
+        balance: &str,
+        usd_value: f64,
+        change_percent: f64,
+    ) -> Result<WalletAsset, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO wallet_assets (wallet_id, symbol, name, balance, usd_value, change_percent, chain_id, contract_address, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            ON CONFLICT (wallet_id, chain_id, contract_address) WHERE contract_address IS NOT NULL AND chain_id IS NOT NULL
+            DO UPDATE SET symbol = EXCLUDED.symbol, name = EXCLUDED.name, balance = EXCLUDED.balance,
+                          usd_value = EXCLUDED.usd_value, change_percent = EXCLUDED.change_percent, updated_at = NOW()
+            RETURNING id, wallet_id, symbol, name, balance, usd_value::float8, change_percent::float8,
+                      chain_id, contract_address, created_at, updated_at
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(symbol)
+        .bind(name)
+        .bind(balance)
+        .bind(usd_value)
+        .bind(change_percent)
+        .bind(chain_id)
+        .bind(contract_address)
+        .fetch_one(pool)
         .await
     }
 
@@ -1257,18 +1309,20 @@ impl SenseiguardRepository {
         usd_value: f64,
         change_percent: f64,
     ) -> Result<WalletAsset, Error> {
+        let sym = symbol.to_lowercase();
         sqlx::query_as(
             r#"
-            INSERT INTO wallet_assets (wallet_id, symbol, name, balance, usd_value, change_percent, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, NOW())
-            ON CONFLICT (wallet_id, symbol)
-            DO UPDATE SET balance = EXCLUDED.balance, usd_value = EXCLUDED.usd_value,
-                           change_percent = EXCLUDED.change_percent, updated_at = NOW()
-            RETURNING *
+            INSERT INTO wallet_assets (wallet_id, symbol, name, balance, usd_value, change_percent, chain_id, contract_address, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, NULL, NULL, NOW())
+            ON CONFLICT (wallet_id, symbol) WHERE contract_address IS NULL
+            DO UPDATE SET name = EXCLUDED.name, balance = EXCLUDED.balance, usd_value = EXCLUDED.usd_value,
+                          change_percent = EXCLUDED.change_percent, updated_at = NOW()
+            RETURNING id, wallet_id, symbol, name, balance, usd_value::float8, change_percent::float8,
+                      chain_id, contract_address, created_at, updated_at
             "#,
         )
         .bind(wallet_id)
-        .bind(symbol)
+        .bind(&sym)
         .bind(name)
         .bind(balance)
         .bind(usd_value)

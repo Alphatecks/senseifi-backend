@@ -10,6 +10,7 @@ use serde_json::{json, Value};
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 
+use crate::clients::moralis_wallet;
 use crate::db::DbPool;
 use crate::models::senseiguard::{CommunityReportedThreatItem, IngestActivityRequest};
 use crate::models::wallet::is_valid_eth_address;
@@ -126,6 +127,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/{address}/activity", get(list_activity).post(ingest_activity))
         .route("/{address}/approvals", get(list_approvals))
         .route("/{address}/transaction-monitoring", get(list_transaction_monitoring))
+        .route("/{address}/assets/sync", post(sync_wallet_indexed_tokens))
         .route("/{address}/assets", get(list_assets))
 }
 
@@ -1245,6 +1247,41 @@ async fn list_assets(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list assets" })),
+            ))
+        }
+    }
+}
+
+async fn sync_wallet_indexed_tokens(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    if !moralis_wallet::has_moralis_config() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "success": false,
+                "error": "MORALIS_API_KEY is not configured"
+            })),
+        ));
+    }
+    match SenseiguardService::sync_wallet_indexed_tokens(&pool, &address).await {
+        Ok(chains) => Ok(Json(json!({
+            "success": true,
+            "data": { "chains": chains }
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("sync_wallet_indexed_tokens: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to sync token balances" })),
             ))
         }
     }

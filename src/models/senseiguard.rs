@@ -159,8 +159,23 @@ pub struct WalletAsset {
     pub balance: String,
     pub usd_value: f64,
     pub change_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain_id: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contract_address: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Per-chain result from Moralis → `wallet_assets` sync (`POST .../assets/sync`).
+#[derive(Debug, Serialize)]
+pub struct IndexedTokenSyncChainOutcome {
+    pub chain_id: u64,
+    /// `ok` | `skipped` | `error`
+    pub status: String,
+    pub tokens_upserted: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// One row for Approval & Permission UI: contract, type (unlimited/limited), risk, date.

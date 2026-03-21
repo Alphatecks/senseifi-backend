@@ -45,7 +45,8 @@ All dashboard routes require a valid Ethereum address in the path (`0x` + 40 hex
 | GET | `/api/dashboard/:address/scans?limit=20` | List recent security scans. |
 | GET | `/api/dashboard/:address/alerts?limit=20` | List alerts (unread and high-risk counts from summary). |
 | GET | `/api/dashboard/:address/activity?limit=20` | Live activity feed (e.g. outgoing tx, suspicious approval, blocked interaction). |
-| GET | `/api/dashboard/:address/assets` | Connected wallet assets (symbol, balance, USD value, change %). |
+| GET | `/api/dashboard/:address/assets` | Connected wallet assets: `wallet_assets` (DB) + live native per scanned chain. |
+| POST | `/api/dashboard/:address/assets/sync` | Moralis → refresh indexed ERC-20 rows in `wallet_assets` (needs `MORALIS_API_KEY`). |
 
 After running migrations, `wallet_monitoring` is extended with `security_score`, `last_scan_at`, `issues_this_month`. New tables: `security_scans`, `threats`, `alerts`, `activity_feed`, `wallet_assets`.
 
@@ -57,6 +58,6 @@ USD spot: CoinGecko (optional Pro key), CoinCap, Binance USDT, Coinbase spot; **
 
 The JSON body includes **`native_per_chain`**, **`wallet_assets_usd`**, **`native_usd`** (multi-chain total), **`native_price_source`**, and on failure **`rpc_error`** / **`native_pricing_error`**.
 
-Pure ERC-20 balances are not read from chain unless rows exist in `wallet_assets` (future sync/ingest).
+ERC-20/BEP-20 balances: call **`POST /api/dashboard/:address/assets/sync`** (Moralis) to populate **`wallet_assets`**; then **`GET .../assets`** and **`GET .../summary`** include them. Native gas tokens remain live from RPC.
 
 **Addresses** are stored and matched case-insensitively (canonical lowercase); migration `022_wallet_address_lowercase.sql` normalizes existing rows.

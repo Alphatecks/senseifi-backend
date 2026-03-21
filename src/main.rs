@@ -35,7 +35,13 @@ async fn main() {
     // Log scanner env so you can confirm keys are loaded (no values logged)
     let has_etherscan = std::env::var("ETHERSCAN_API_KEY").ok().filter(|s| !s.is_empty()).is_some();
     let has_rpc = std::env::var("ETHEREUM_RPC_URL").ok().filter(|s| !s.is_empty()).is_some();
-    tracing::info!("Contract scanner env: ETHERSCAN_API_KEY={}, ETHEREUM_RPC_URL={}", has_etherscan, has_rpc);
+    let has_moralis = std::env::var("MORALIS_API_KEY").ok().filter(|s| !s.is_empty()).is_some();
+    tracing::info!(
+        "Contract scanner env: ETHERSCAN_API_KEY={}, ETHEREUM_RPC_URL={}; token sync: MORALIS_API_KEY={}",
+        has_etherscan,
+        has_rpc,
+        has_moralis
+    );
 
     // CORS: allow frontend origins. Always include localhost so local dev works.
     // Set ALLOWED_ORIGINS (comma-separated) for production, e.g. https://your-app.vercel.app

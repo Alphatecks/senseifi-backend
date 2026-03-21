@@ -1,4 +1,4 @@
-use crate::clients::{native_price, rpc};
+use crate::clients::{moralis_wallet, native_price, rpc};
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActiveAlertsOverview, ActivityFeedItem, ActivityMonitorDappResponse,
@@ -6,7 +6,8 @@ use crate::models::senseiguard::{
     ConnectedWalletModalBalance, ConnectedWalletModalDetails, ConnectedWalletModalResponse,
     ConnectedWalletModalSecurity, DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse,
     NativeChainBalance,
-    FullScanReportResponse, IngestActivityRequest, LiveActivityFeedItem, LiveScamSignalItem, MetricCard,
+    FullScanReportResponse, IndexedTokenSyncChainOutcome, IngestActivityRequest, LiveActivityFeedItem,
+    LiveScamSignalItem, MetricCard,
     MonitoredTransaction, OverallRiskCard, RecentActivityOverview, ReportedThreatsCard, ScamFrequencyDay,
     ScamPatternInsightsCard, ScamPatternsCard, ScanObservation, SecurityOverviewResponse, SecurityStatusResponse,
     SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
@@ -104,6 +105,21 @@ impl SenseiguardService {
         ids.sort_unstable();
         ids.dedup();
         ids
+    }
+
+    /// Chains to pull ERC-20 balances from Moralis. Defaults to [`Self::default_native_scan_chain_ids`].
+    fn default_token_balance_scan_chain_ids() -> Vec<u64> {
+        if let Ok(s) = std::env::var("TOKEN_BALANCE_SCAN_CHAIN_IDS") {
+            let v: Vec<u64> = s
+                .split(',')
+                .filter_map(|x| x.trim().parse().ok())
+                .filter(|&id| id > 0)
+                .collect();
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        Self::default_native_scan_chain_ids()
     }
 
     fn native_token_symbol(chain_id: u64) -> &'static str {
@@ -589,6 +605,8 @@ impl SenseiguardService {
                     balance,
                     usd_value: a.usd,
                     change_percent: 0.0,
+                    chain_id: None,
+                    contract_address: None,
                     created_at: now,
                     updated_at: now,
                 });
@@ -600,6 +618,68 @@ impl SenseiguardService {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         Ok(assets)
+    }
+
+    /// Moralis aggregated token balances → `wallet_assets` (per chain: delete indexed rows, then upsert).
+    pub async fn sync_wallet_indexed_tokens(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<Vec<IndexedTokenSyncChainOutcome>, Error> {
+        let wallet = WalletRepository::get_wallet_by_address(pool, address)
+            .await?
+            .ok_or(Error::RowNotFound)?;
+        let wallet_id = wallet.id;
+        let ids = Self::merge_wallet_chain_id(Self::default_token_balance_scan_chain_ids(), wallet.chain_id);
+        let mut outcomes = Vec::with_capacity(ids.len());
+
+        for cid in ids {
+            if moralis_wallet::moralis_chain_slug(cid).is_none() {
+                outcomes.push(IndexedTokenSyncChainOutcome {
+                    chain_id: cid,
+                    status: "skipped".to_string(),
+                    tokens_upserted: 0,
+                    detail: Some("chain_id not mapped for Moralis".to_string()),
+                });
+                continue;
+            }
+            let fetch = moralis_wallet::fetch_wallet_tokens(address, cid).await;
+            let tokens = match fetch {
+                Ok(t) => t,
+                Err(e) => {
+                    outcomes.push(IndexedTokenSyncChainOutcome {
+                        chain_id: cid,
+                        status: "error".to_string(),
+                        tokens_upserted: 0,
+                        detail: Some(e),
+                    });
+                    continue;
+                }
+            };
+            SenseiguardRepository::delete_indexed_assets_for_chain(pool, wallet_id, cid as i32).await?;
+            let mut n: u32 = 0;
+            for t in tokens {
+                SenseiguardRepository::upsert_indexed_token(
+                    pool,
+                    wallet_id,
+                    cid as i32,
+                    &t.contract_address,
+                    &t.symbol,
+                    &t.name,
+                    &t.balance_display,
+                    t.usd_value,
+                    0.0,
+                )
+                .await?;
+                n = n.saturating_add(1);
+            }
+            outcomes.push(IndexedTokenSyncChainOutcome {
+                chain_id: cid,
+                status: "ok".to_string(),
+                tokens_upserted: n,
+                detail: None,
+            });
+        }
+        Ok(outcomes)
     }
 
     /// Paginated list for Transaction monitoring UI: title + risk level per row.
@@ -1087,7 +1167,7 @@ fn score_to_level(score: i32) -> String {
             .ok_or(Error::RowNotFound)?;
 
         let security = Self::get_security_status(pool, address).await?;
-        let assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
+        let assets = Self::list_assets(pool, address).await?;
         let wallet_assets_usd =
             SenseiguardRepository::total_asset_usd(pool, wallet.id).await.unwrap_or(0.0);
         let approval_count = SenseiguardRepository::count_approvals(pool, wallet.id).await.unwrap_or(0);
