@@ -582,9 +582,11 @@ impl SenseiguardService {
             .ok_or(Error::RowNotFound)?;
         let mut assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
 
-        // Add live native assets from scanned chains so /assets matches summary multi-chain behavior.
+        // Add live native assets per chain so /assets aligns with summary native_usd (sum of these USD values).
+        // Merge key: symbol + chain_id for contract-less rows so ETH on L1 vs Arbitrum are not collapsed.
         let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
         let now = Utc::now();
+        let primary = wallet.chain_id;
         for a in agg.per_chain.into_iter() {
             if a.balance <= 0.0 {
                 continue;
@@ -592,9 +594,16 @@ impl SenseiguardService {
             let symbol = a.symbol.clone();
             let name = format!("{} ({})", chain_id_to_network(a.chain_id), symbol);
             let balance = format!("{:.18}", a.balance);
-            if let Some(existing) = assets.iter_mut().find(|x| x.symbol == symbol) {
+            let cid = a.chain_id as i32;
+            if let Some(existing) = assets.iter_mut().find(|x| {
+                x.symbol == symbol
+                    && x.contract_address.is_none()
+                    && (x.chain_id == Some(cid)
+                        || (x.chain_id.is_none() && a.chain_id == primary))
+            }) {
                 existing.balance = balance;
                 existing.usd_value = existing.usd_value.max(a.usd);
+                existing.chain_id = Some(cid);
                 existing.updated_at = now;
             } else {
                 assets.push(WalletAsset {
@@ -605,7 +614,7 @@ impl SenseiguardService {
                     balance,
                     usd_value: a.usd,
                     change_percent: 0.0,
-                    chain_id: None,
+                    chain_id: Some(cid),
                     contract_address: None,
                     created_at: now,
                     updated_at: now,

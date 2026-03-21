@@ -53,6 +53,9 @@ pub struct MoralisErc20Item {
     pub usd_value: Option<f64>,
     #[serde(default)]
     pub possible_spam: Option<bool>,
+    /// When true, this row is the chain gas token — excluded; native USD comes from RPC in `multi_chain_native_aggregate`.
+    #[serde(default)]
+    pub native_token: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +191,7 @@ pub async fn fetch_wallet_tokens(
             .query(&[
                 ("chain", chain),
                 ("exclude_unverified_contracts", "false"),
+                ("exclude_native", "true"),
                 ("limit", "100"),
             ])
             .query(&[(
@@ -219,6 +223,9 @@ pub async fn fetch_wallet_tokens(
 
     let mut out = Vec::new();
     for it in items {
+        if it.native_token == Some(true) {
+            continue;
+        }
         if it.possible_spam == Some(true) {
             continue;
         }
