@@ -254,8 +254,9 @@ pub struct NativeChainBalance {
 
 #[derive(Debug, Serialize)]
 pub struct ConnectedWalletModalBalance {
+    /// Same deduped logic as `DashboardSummaryResponse.total_asset_usd` (wrapped gas token vs RPC native per chain).
     pub total_usd: f64,
-    /// Sum of `wallet_assets.usd_value` only (before adding native USD).
+    /// Raw DB sum of `wallet_assets.usd_value` (can overlap `native_usd` with wrapped gas tokens).
     pub wallet_assets_usd: f64,
     pub native_balance_eth: f64,
     pub native_usd: f64,
@@ -292,9 +293,10 @@ pub struct DashboardSummaryResponse {
     pub threats_trend_percent: f64,
     pub scans_this_month: i64,
     pub scans_trend_percent: f64,
+    /// Portfolio headline: tokens + native, with **wrapped native** (WETH/WBNB/…) deduped against RPC native per chain (closer to MetaMask-style totals).
     pub total_asset_usd: String,
     pub total_asset_trend_percent: f64,
-    /// Sum of `wallet_assets.usd_value` (ERC-20 rows etc.); native is separate fields below.
+    /// Raw `SUM(wallet_assets.usd_value)`; can **overlap** `native_usd` when the same chain’s gas token is both in DB (wrapped) and in `native_usd`. Prefer `total_asset_usd` for one number.
     pub wallet_assets_usd: f64,
     pub native_balance_eth: f64,
     pub native_usd: f64,

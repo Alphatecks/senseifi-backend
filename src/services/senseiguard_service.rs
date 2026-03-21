@@ -17,6 +17,7 @@ use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::protection_engine;
 use chrono::{Datelike, Duration, DateTime, NaiveDate, Utc};
 use sqlx::Error;
+use std::collections::HashMap;
 use uuid::Uuid;
 
 pub struct SenseiguardService;
@@ -130,6 +131,86 @@ impl SenseiguardService {
             250 => "FTM",
             _ => "ETH",
         }
+    }
+
+    /// Canonical wrapped gas-token contract per chain (lowercase). Used so we do not add RPC `native_usd`
+    /// and Moralis wrapped balance USD twice for the same chain (common ~$1 drift vs MetaMask).
+    fn wrapped_native_contract_lower(chain_id: i64) -> Option<&'static str> {
+        match chain_id {
+            1 => Some("0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"), // WETH
+            56 => Some("0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c"), // WBNB
+            137 => Some("0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"), // WMATIC
+            42161 => Some("0x82af49447d8a07e3bd95bd0d56f35241523fbab1"), // Arbitrum WETH
+            10 | 8453 => Some("0x4200000000000000000000000000000000000006"), // OP / Base WETH
+            59144 => Some("0xe5d7c2a44ffddf6b295a15c148167daa1f934cbf"), // Linea WETH
+            43114 => Some("0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"), // WAVAX
+            250 => Some("0x21be370d5312f443cb1a44b11e1e2fa7db6553f7"), // WFTM
+            534352 => Some("0x5300000000000000000000000000000000000004"), // Scroll WETH
+            _ => None,
+        }
+    }
+
+    /// When both RPC native and wrapped native token have USD on the same chain, count once (max),
+    /// matching how many wallet UIs avoid stacking the same economic position.
+    fn merge_wrapped_and_native_usd(native_usd: f64, wrapped_token_usd: f64) -> f64 {
+        const EPS: f64 = 1e-9;
+        let n = native_usd.max(0.0);
+        let w = wrapped_token_usd.max(0.0);
+        if n > EPS && w > EPS {
+            n.max(w)
+        } else {
+            n + w
+        }
+    }
+
+    /// Single portfolio USD number: all `wallet_assets` by chain, plus per-chain native, deduping wrapped gas token vs RPC native.
+    fn portfolio_total_usd_deduped(
+        db_rows: &[WalletAsset],
+        agg: &MultiChainNativeAggregate,
+        wallet_chain_id: i64,
+    ) -> f64 {
+        let mut by_chain: HashMap<i64, (f64, f64)> = HashMap::new();
+        for a in db_rows {
+            let cid = match a.chain_id {
+                Some(c) if c > 0 => c as i64,
+                _ => wallet_chain_id,
+            };
+            if cid <= 0 {
+                continue;
+            }
+            let usd = a.usd_value.max(0.0);
+            let addr_l = a
+                .contract_address
+                .as_deref()
+                .map(|s| s.to_lowercase());
+            let is_wrapped = addr_l
+                .as_deref()
+                .and_then(|addr| Self::wrapped_native_contract_lower(cid).map(|w| addr == w))
+                .unwrap_or(false);
+            let e = by_chain.entry(cid).or_insert((0.0, 0.0));
+            if is_wrapped {
+                e.1 += usd;
+            } else {
+                e.0 += usd;
+            }
+        }
+
+        let mut total = 0.0_f64;
+        for (&cid, &(non_wrapped, wrapped)) in &by_chain {
+            let n = agg
+                .per_chain
+                .iter()
+                .find(|p| p.chain_id == cid)
+                .map(|p| p.usd)
+                .unwrap_or(0.0);
+            total += non_wrapped + Self::merge_wrapped_and_native_usd(n, wrapped);
+        }
+        for p in &agg.per_chain {
+            if !by_chain.contains_key(&p.chain_id) {
+                total += p.usd;
+            }
+        }
+        total
     }
 
     /// Sum native USD across all scan chains that have an RPC URL configured.
@@ -399,10 +480,11 @@ impl SenseiguardService {
             SenseiguardRepository::count_scans_this_month(pool, wallet_id).await?;
         let scans_prev =
             SenseiguardRepository::count_scans_previous_period(pool, wallet_id).await?;
-        // DB rows + native USD summed across NATIVE_BALANCE_SCAN_CHAIN_IDS (each chain must have RPC env set).
         let total_db_usd = SenseiguardRepository::total_asset_usd(pool, wallet_id).await?;
+        let db_asset_rows = SenseiguardRepository::list_assets(pool, wallet_id).await?;
         let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
-        let total_asset_usd = total_db_usd + agg.total_usd;
+        let total_asset_usd =
+            Self::portfolio_total_usd_deduped(&db_asset_rows, &agg, wallet.chain_id);
         let (rpc_err, pricing_err, price_src) = Self::aggregate_summary_errors(&agg);
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
         let high_risk_alerts =
@@ -576,18 +658,15 @@ impl SenseiguardService {
         SenseiguardRepository::list_approvals(pool, wallet_id, since, limit).await
     }
 
-    pub async fn list_assets(pool: &DbPool, address: &str) -> Result<Vec<WalletAsset>, Error> {
-        let wallet = WalletRepository::get_wallet_by_address(pool, address)
-            .await?
-            .ok_or(Error::RowNotFound)?;
-        let mut assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
-
-        // Add live native assets per chain so /assets aligns with summary native_usd (sum of these USD values).
-        // Merge key: symbol + chain_id for contract-less rows so ETH on L1 vs Arbitrum are not collapsed.
-        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+    fn merge_live_native_into_assets(
+        assets: &mut Vec<WalletAsset>,
+        wallet_id: Uuid,
+        wallet_chain_id: i64,
+        agg: &MultiChainNativeAggregate,
+    ) {
         let now = Utc::now();
-        let primary = wallet.chain_id;
-        for a in agg.per_chain.into_iter() {
+        let primary = wallet_chain_id;
+        for a in &agg.per_chain {
             if a.balance <= 0.0 {
                 continue;
             }
@@ -608,7 +687,7 @@ impl SenseiguardService {
             } else {
                 assets.push(WalletAsset {
                     id: Uuid::new_v4(),
-                    wallet_id: wallet.id,
+                    wallet_id,
                     symbol,
                     name,
                     balance,
@@ -621,6 +700,15 @@ impl SenseiguardService {
                 });
             }
         }
+    }
+
+    pub async fn list_assets(pool: &DbPool, address: &str) -> Result<Vec<WalletAsset>, Error> {
+        let wallet = WalletRepository::get_wallet_by_address(pool, address)
+            .await?
+            .ok_or(Error::RowNotFound)?;
+        let mut assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
+        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+        Self::merge_live_native_into_assets(&mut assets, wallet.id, wallet.chain_id, &agg);
         assets.sort_by(|a, b| {
             b.usd_value
                 .partial_cmp(&a.usd_value)
@@ -1179,7 +1267,7 @@ fn score_to_level(score: i32) -> String {
             .ok_or(Error::RowNotFound)?;
 
         let security = Self::get_security_status(pool, address).await?;
-        let assets = Self::list_assets(pool, address).await?;
+        let mut assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
         let wallet_assets_usd =
             SenseiguardRepository::total_asset_usd(pool, wallet.id).await.unwrap_or(0.0);
         let approval_count = SenseiguardRepository::count_approvals(pool, wallet.id).await.unwrap_or(0);
@@ -1195,7 +1283,13 @@ fn score_to_level(score: i32) -> String {
 
         let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
         let (_, pricing_err, _) = Self::aggregate_summary_errors(&agg);
-        let total_usd = wallet_assets_usd + agg.total_usd;
+        let total_usd = Self::portfolio_total_usd_deduped(&assets, &agg, wallet.chain_id);
+        Self::merge_live_native_into_assets(&mut assets, wallet.id, wallet.chain_id, &agg);
+        assets.sort_by(|a, b| {
+            b.usd_value
+                .partial_cmp(&a.usd_value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let primary = &agg.primary;
 
         let activity =

@@ -50,13 +50,13 @@ All dashboard routes require a valid Ethereum address in the path (`0x` + 40 hex
 
 After running migrations, `wallet_monitoring` is extended with `security_score`, `last_scan_at`, `issues_this_month`. New tables: `security_scans`, `threats`, `alerts`, `activity_feed`, `wallet_assets`.
 
-**`total_asset_usd` (dashboard summary)** = `wallet_assets_usd` (DB) + **`native_usd` summed across multiple EVM chains** (default scan list in **DEPLOYMENT.md**; override with **`NATIVE_BALANCE_SCAN_CHAIN_IDS`**). Each chain needs its RPC env set (e.g. **`BSC_RPC_URL`** for BNB on chain `56`). The wallet row’s **`chain_id`** is still used for “primary” legacy fields and UI network label, but **no longer limits** where native balance is read from.
+**`total_asset_usd` (dashboard summary)** = portfolio USD with **per-chain deduping**: all **`wallet_assets`** token rows, plus RPC **native** per scanned chain, but on each chain if both **native** and the **wrapped gas token** (WBNB, WETH, …) have USD, only **`max(native, wrapped)`** counts for that gas position (avoids ~2× vs MetaMask). **`wallet_assets_usd`** and **`native_usd`** in the JSON are **raw** and can overlap — use **`total_asset_usd`** as the single headline number (do not add the two). RPC env per chain: **DEPLOYMENT.md**, **`NATIVE_BALANCE_SCAN_CHAIN_IDS`**.
 
 **`native_balance_eth`** = native balance on the **DB `chain_id` only** (e.g. 0 ETH when `chain_id` is 1). Use **`native_per_chain`** for the full breakdown.
 
 USD spot: CoinGecko (optional Pro key), CoinCap, Binance USDT, Coinbase spot; **120s in-memory cache** per asset to limit rate limits when scanning many chains.
 
-The JSON body includes **`native_per_chain`**, **`wallet_assets_usd`**, **`native_usd`** (multi-chain total), **`native_price_source`**, and on failure **`rpc_error`** / **`native_pricing_error`**.
+The JSON body includes **`total_asset_usd`**, **`native_per_chain`**, **`wallet_assets_usd`**, **`native_usd`**, **`native_price_source`**, and on failure **`rpc_error`** / **`native_pricing_error`**.
 
 ERC-20/BEP-20 balances: call **`POST /api/dashboard/:address/assets/sync`** (Moralis) to populate **`wallet_assets`**; then **`GET .../assets`** and **`GET .../summary`** include them. Native gas tokens remain live from RPC.
 

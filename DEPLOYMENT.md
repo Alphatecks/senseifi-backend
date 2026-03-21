@@ -104,6 +104,8 @@ Indexed token balances are stored in **`wallet_assets`** and included in **`GET 
 
 **On-demand sync:** `POST /api/dashboard/:address/assets/sync` — uses Moralis `chain` as **hex** (e.g. `0x38` for BSC), **`exclude_native=true`**, and skips `native_token` rows so **gas-token USD is not double-counted** (native remains from RPC in `native_usd` / `total_asset_usd`). Paginates with `cursor` until exhausted. Respect Moralis rate limits; add a cron or debounce on the client if needed.
 
+**`total_asset_usd` / modal `total_usd`:** Portfolio headline uses **per-chain deduping**: if the same chain has both RPC **native** balance USD and the **wrapped** gas token (WETH, WBNB, WMATIC, …) in `wallet_assets`, only **`max(native, wrapped)`** counts for that chain’s gas position (aligned with typical MetaMask-style totals). Sub-fields `wallet_assets_usd` and `native_usd` are still raw sums and can overlap — **do not add them** to reconstruct the headline; use `total_asset_usd` / `total_usd` only.
+
 ### Native token USD price (optional)
 
 - Order: **CoinGecko** public (or **Pro** if `COINGECKO_API_KEY`), then **CoinCap**, **Binance** `ticker/price` (USDT), **Coinbase** `v2/prices/{PAIR}/spot`.
