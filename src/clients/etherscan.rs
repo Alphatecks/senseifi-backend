@@ -249,3 +249,132 @@ pub async fn fetch_contract_creation(
         contract_creator,
     }))
 }
+
+/// First on-chain activity for an address on one chain (via Etherscan-class `account` module).
+#[derive(Debug, Clone)]
+pub struct WalletFirstActivity {
+    pub unix_ts: u64,
+    pub tx_hash: Option<String>,
+    pub block_number: u64,
+    /// `normal_tx` | `internal_tx` | `contract_deploy`
+    pub source: &'static str,
+}
+
+fn parse_account_tx_array(result: &serde_json::Value) -> Option<(u64, Option<String>, u64)> {
+    let arr = result.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let first = arr.first()?;
+    let ts = first
+        .get("timeStamp")
+        .or_else(|| first.get("timestamp"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())?;
+    let hash = first
+        .get("hash")
+        .or_else(|| first.get("parentHash"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let block = first
+        .get("blockNumber")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(0);
+    Some((ts, hash, block))
+}
+
+async fn fetch_first_tx_like(
+    address: &str,
+    chain_id_u: u64,
+    action: &str,
+) -> Result<Option<(u64, Option<String>, u64)>, String> {
+    let cid = chain_id_u.to_string();
+    let url = base_url();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let params = vec![
+        ("chainid", cid.as_str()),
+        ("module", "account"),
+        ("action", action),
+        ("address", address),
+        ("startblock", "0"),
+        ("endblock", "99999999"),
+        ("page", "1"),
+        ("offset", "1"),
+        ("sort", "asc"),
+    ];
+    let mut req = client.get(&url).query(&params);
+    if let Some(k) = api_key() {
+        req = req.query(&[("apikey", k.as_str())]);
+    }
+    let res = req.send().await.map_err(|e| e.to_string())?;
+    let v: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    let status = v.get("status").and_then(|x| x.as_str()).unwrap_or("");
+    let result = v.get("result");
+    if status != "1" {
+        let msg = result
+            .and_then(|r| r.as_str())
+            .unwrap_or_else(|| v.get("message").and_then(|m| m.as_str()).unwrap_or("NOTOK"));
+        let msg_l = msg.to_ascii_lowercase();
+        if msg_l.contains("no transaction")
+            || msg_l.contains("no record")
+            || msg_l.contains("not found")
+        {
+            return Ok(None);
+        }
+        return Err(format!("Etherscan {action}: {msg}"));
+    }
+    let Some(r) = result else {
+        return Ok(None);
+    };
+    if r.as_str().is_some() {
+        return Ok(None);
+    }
+    Ok(parse_account_tx_array(r))
+}
+
+/// Oldest activity: normal `txlist`, else `txlistinternal`, else contract `getcontractcreation` if bytecode exists.
+/// Requires `ETHERSCAN_API_KEY` for reliable use; uses V2 `chainid` (same host as ABI calls).
+pub async fn fetch_wallet_first_activity(
+    address: &str,
+    chain_id_u: u64,
+    is_contract: bool,
+) -> Result<Option<WalletFirstActivity>, String> {
+    if let Some((ts, hash, block)) = fetch_first_tx_like(address, chain_id_u, "txlist").await? {
+        if ts > 0 {
+            return Ok(Some(WalletFirstActivity {
+                unix_ts: ts,
+                tx_hash: hash,
+                block_number: block,
+                source: "normal_tx",
+            }));
+        }
+    }
+    if let Some((ts, hash, block)) = fetch_first_tx_like(address, chain_id_u, "txlistinternal").await?
+    {
+        if ts > 0 {
+            return Ok(Some(WalletFirstActivity {
+                unix_ts: ts,
+                tx_hash: hash,
+                block_number: block,
+                source: "internal_tx",
+            }));
+        }
+    }
+    if is_contract {
+        if let Some(c) = fetch_contract_creation(address, Some(chain_id_u)).await? {
+            if c.timestamp > 0 {
+                return Ok(Some(WalletFirstActivity {
+                    unix_ts: c.timestamp,
+                    tx_hash: None,
+                    block_number: c.block_number,
+                    source: "contract_deploy",
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
