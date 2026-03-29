@@ -1,0 +1,485 @@
+openapi: 3.1.0
+info:
+  title: SenseiGuard Extension Backend API
+  version: 1.0.0
+  summary: Backend contracts for the SenseiGuard extension background service worker
+  description: |
+    Canonical OpenAPI contract for extension runtime calls.
+    This document reflects implemented backend endpoints and compatibility fields.
+
+servers:
+  - url: https://senseifi-backend.onrender.com/api
+    description: Production
+  - url: https://staging.senseifi.com/api
+    description: Staging (example)
+
+tags:
+  - name: Protection
+  - name: Telemetry
+  - name: Wallet
+  - name: Scanner
+
+paths:
+  /protection/transaction/analyze:
+    post:
+      tags: [Protection]
+      operationId: analyzeTransactionRisk
+      summary: Analyze transaction/signing payload risk in real time
+      description: |
+        Called by SenseiGuard extension worker on intercepted wallet methods.
+        Supports extension-style request and legacy to/value/data fields.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionAnalyzeRequest"
+            examples:
+              sendTransaction:
+                value:
+                  method: eth_sendTransaction
+                  params:
+                    - from: "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+                      to: "0x000000000000000000000000000000000000dead"
+                      data: "0x095ea7b30000000000000000000000001234123412341234123412341234123412341234ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                      value: "0x0"
+                  url: "https://app.uniswap.org/#/swap"
+                  domain: "app.uniswap.org"
+                  wallet_address: "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"
+                  chain_id: 1
+                  source: senseiguard_extension
+      responses:
+        "200":
+          description: Risk analysis response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TransactionAnalyzeResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /protection/threat-feed:
+    get:
+      tags: [Protection]
+      operationId: getThreatFeed
+      summary: Return malicious contracts and domains feed
+      description: |
+        Intended for extension polling to refresh local heuristics cache.
+      responses:
+        "200":
+          description: Threat feed payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ThreatFeedResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /telemetry/events:
+    post:
+      tags: [Telemetry]
+      operationId: ingestTelemetryEvents
+      summary: Ingest extension telemetry events in batch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TelemetryBatchRequest"
+      responses:
+        "200":
+          description: Events accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TelemetryIngestResponse"
+        "202":
+          description: Events queued asynchronously (compatibility)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TelemetryIngestResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /wallets/connect:
+    post:
+      tags: [Wallet]
+      operationId: connectWallet
+      summary: Register connected wallet session
+      description: Called by extension popup and web wallet flow.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WalletConnectRequest"
+      responses:
+        "200":
+          description: Wallet connected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WalletConnectResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Wallet already connected (optional)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /scan-contract/:
+    post:
+      tags: [Scanner]
+      operationId: scanContractRisk
+      summary: Deep malicious contract/project scan
+      description: |
+        Performs deeper contract intelligence and returns trust score and risk breakdown.
+        Recommended for extension worker when destination contract is unknown or high risk.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScanContractRequest"
+      responses:
+        "200":
+          description: Contract scan result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanContractResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+components:
+  schemas:
+    TransactionAnalyzeRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - wallet_address
+      properties:
+        method:
+          type: string
+          enum:
+            - eth_sendTransaction
+            - eth_sign
+            - eth_signTypedData
+            - eth_signTypedData_v3
+            - eth_signTypedData_v4
+        params:
+          type: array
+          items:
+            oneOf:
+              - type: object
+                additionalProperties: true
+              - type: string
+              - type: number
+              - type: boolean
+              - type: "null"
+        url:
+          type: string
+          format: uri
+        domain:
+          type: string
+        wallet_address:
+          $ref: "#/components/schemas/EvmAddress"
+        chain_id:
+          type: integer
+          minimum: 1
+        source:
+          type: string
+          enum: [senseiguard_extension]
+        to:
+          type: string
+        value:
+          type: string
+        data:
+          type: string
+
+    TransactionAnalyzeResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - risk_score
+        - findings
+      properties:
+        risk_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        riskScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: CamelCase compatibility field
+        findings:
+          type: array
+          items:
+            type: string
+        breakdown:
+          oneOf:
+            - type: object
+              additionalProperties:
+                oneOf:
+                  - type: number
+                  - type: string
+                  - type: boolean
+                  - type: "null"
+            - type: "null"
+        band:
+          type: string
+        recommendation:
+          type: string
+        band:
+          type: string
+          enum: [Safe, Warning, Dangerous, Block]
+
+    ThreatFeedResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - malicious_contracts
+        - malicious_domains
+      properties:
+        malicious_contracts:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvmAddress"
+        malicious_domains:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        updated_at:
+          type: string
+          format: date-time
+
+    TelemetryBatchRequest:
+      type: object
+      additionalProperties: false
+      required: [events]
+      properties:
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/TelemetryEvent"
+
+    TelemetryEvent:
+      type: object
+      additionalProperties: true
+      required:
+        - type
+        - at
+      properties:
+        type:
+          type: string
+          enum:
+            - tx_evaluated
+            - tx_blocked
+            - tx_warned
+            - domain_risk_detected
+            - user_decision
+            - sync_heartbeat
+        riskScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+        domain:
+          type: string
+        method:
+          type: string
+        findings:
+          type: array
+          items:
+            type: string
+        decision:
+          type: string
+        context:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: "null"
+        at:
+          type: string
+          format: date-time
+
+    TelemetryIngestResponse:
+      type: object
+      additionalProperties: true
+      required: [success]
+      properties:
+        success:
+          type: boolean
+        accepted:
+          type: integer
+          minimum: 0
+        message:
+          type: string
+
+    WalletConnectRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - address
+        - chain_id
+        - wallet_type
+      properties:
+        address:
+          $ref: "#/components/schemas/EvmAddress"
+        chain_id:
+          type: integer
+          minimum: 1
+        wallet_type:
+          type: string
+          enum: [metamask, coinbase]
+        user_id:
+          type: string
+
+    WalletConnectResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          additionalProperties: true
+        dashboard_user:
+          oneOf:
+            - type: object
+              additionalProperties: true
+            - type: "null"
+        message:
+          type: string
+
+    ScanContractRequest:
+      type: object
+      additionalProperties: false
+      required: [contract_address]
+      properties:
+        contract_address:
+          $ref: "#/components/schemas/EvmAddress"
+        for_address:
+          $ref: "#/components/schemas/EvmAddress"
+        chain_id:
+          type: integer
+          minimum: 1
+
+    ScanContractResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - scan_id
+        - contract_address
+        - trust_score
+        - critical_risk_flags
+        - scanned_at
+      properties:
+        scan_id:
+          type: string
+          format: uuid
+        contract_address:
+          $ref: "#/components/schemas/EvmAddress"
+        trust_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        critical_risk_flags:
+          type: integer
+        token_controlled:
+          type: string
+        owner_admin_count:
+          type: integer
+        chain_id:
+          type: integer
+        network:
+          type: string
+        contract_name:
+          type: string
+        detected_standard:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        ai_summary:
+          type: string
+        scanned_at:
+          type: string
+          format: date-time
+
+    ErrorResponse:
+      type: object
+      additionalProperties: true
+      required:
+        - success
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        code:
+          type: string
+        message:
+          type: string
+        error:
+          type: string
+
+    EvmAddress:
+      type: string
+      pattern: "^0x[a-fA-F0-9]{40}$"

@@ -13,5 +13,6 @@ pub fn api_routes(pool: crate::db::DbPool) -> Router {
         .nest("/dashboard", dashboard_routes::dashboard_routes())
         .nest("/scan-contract", scan_routes::scan_routes())
         .nest("/protection", protection_routes::protection_routes())
+        .nest("/telemetry", protection_routes::telemetry_routes())
         .with_state(pool)
 }

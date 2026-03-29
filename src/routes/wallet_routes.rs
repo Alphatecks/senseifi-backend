@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Error;
 
-use crate::clients::rpc;
+use crate::clients::{etherscan, rpc};
 use crate::db::DbPool;
 use crate::models::wallet::{
     ConnectWalletRequest, ALLOWED_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN, is_valid_eth_address,
@@ -32,6 +32,13 @@ struct BalanceQuery {
     chain_id: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct WalletAgeQuery {
+    /// EVM chain_id (Etherscan API V2). Default 1 (Ethereum).
+    #[serde(default)]
+    chain_id: Option<i64>,
+}
+
 pub fn wallet_routes() -> Router<DbPool> {
     Router::new()
         .route("/", get(list_connected_wallets))
@@ -40,6 +47,7 @@ pub fn wallet_routes() -> Router<DbPool> {
         .route("/{address}/dashboard-user", get(get_dashboard_user))
         .route("/{address}/modal", get(get_connected_wallet_modal))
         .route("/{address}/status", get(get_wallet_status))
+        .route("/{address}/age", get(get_wallet_age))
         .route("/{address}", get(get_wallet))
         .route("/{address}", delete(disconnect_wallet))
 }
@@ -53,6 +61,7 @@ async fn connect_wallet(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
+                "message": "Invalid wallet address format",
                 "error": "Invalid wallet address format"
             })),
         ));
@@ -62,6 +71,7 @@ async fn connect_wallet(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
+                "message": "Invalid chain_id",
                 "error": "Invalid chain_id"
             })),
         ));
@@ -72,6 +82,7 @@ async fn connect_wallet(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
+                "message": "Invalid wallet_type; allowed: metamask, coinbase",
                 "error": "Invalid wallet_type; allowed: metamask, coinbase"
             })),
         ));
@@ -119,6 +130,7 @@ async fn connect_wallet(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
+                "message": "Invalid wallet address format",
                 "error": "Invalid wallet address format"
             })),
         )),
@@ -128,6 +140,7 @@ async fn connect_wallet(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({
                     "success": false,
+                    "message": "Failed to connect wallet",
                     "error": "Failed to connect wallet"
                 })),
             ))
@@ -179,6 +192,81 @@ async fn get_wallet_balance(
                 Json(json!({
                     "success": false,
                     "error": "Could not fetch balance (RPC not configured or unavailable)"
+                })),
+            ))
+        }
+    }
+}
+
+/// First on-chain activity timestamp for an address (Etherscan V2 indexer). Not wallet DB state.
+async fn get_wallet_age(
+    State(_pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<WalletAgeQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_request_address());
+    }
+    let chain_id = q.chain_id.unwrap_or(1);
+    if chain_id < CHAIN_ID_MIN || chain_id > CHAIN_ID_MAX {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "Invalid chain_id" })),
+        ));
+    }
+    let cid = chain_id as u64;
+    let bytecode = rpc::fetch_bytecode(&address, Some(cid))
+        .await
+        .unwrap_or_default();
+    let is_contract = !bytecode.is_empty();
+
+    match etherscan::fetch_wallet_first_activity(&address, cid, is_contract).await {
+        Ok(Some(act)) => {
+            let now = chrono::Utc::now().timestamp();
+            let age_seconds = now.saturating_sub(act.unix_ts as i64).max(0);
+            let first_at = chrono::DateTime::<chrono::Utc>::from_timestamp(act.unix_ts as i64, 0)
+                .map(|t| t.to_rfc3339());
+            Ok(Json(json!({
+                "success": true,
+                "data": {
+                    "address": address,
+                    "chain_id": chain_id,
+                    "is_contract": is_contract,
+                    "first_activity_unix": act.unix_ts,
+                    "first_activity_at": first_at,
+                    "age_seconds": age_seconds,
+                    "age_days": (age_seconds as f64 / 86400.0 * 100.0).round() / 100.0,
+                    "first_tx_hash": act.tx_hash,
+                    "first_block": act.block_number,
+                    "source": act.source,
+                    "methodology": "Oldest normal tx, else oldest internal tx, else contract creation (contracts only). Requires Etherscan V2 support for chain_id; set ETHERSCAN_API_KEY."
+                }
+            })))
+        }
+        Ok(None) => Ok(Json(json!({
+            "success": true,
+            "data": {
+                "address": address,
+                "chain_id": chain_id,
+                "is_contract": is_contract,
+                "first_activity_unix": Value::Null,
+                "first_activity_at": Value::Null,
+                "age_seconds": Value::Null,
+                "age_days": Value::Null,
+                "first_tx_hash": Value::Null,
+                "first_block": Value::Null,
+                "source": "none",
+                "methodology": "No indexed normal/internal txs and no deployment record for this chain (or address never used here)."
+            }
+        }))),
+        Err(e) => {
+            tracing::warn!("get_wallet_age: {}", e);
+            Err((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "success": false,
+                    "error": e,
+                    "hint": "Set ETHERSCAN_API_KEY and ensure the chain is supported by Etherscan API V2."
                 })),
             ))
         }

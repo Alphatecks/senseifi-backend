@@ -4,17 +4,19 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
     response::Json,
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Router,
 };
+use chrono::Utc;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    AnalyzeTxRequest, BlockContractRequest, CreateSecurityRuleRequest, DappConnectionCheckRequest,
-    EmergencyLockRequest, ReportScamRequest, SimulateTxRequest, SimulateTxResponse,
-    UpdateProtectionSettingsRequest, UpdateSecurityRuleRequest, WatchlistContractRequest,
+    BlockContractRequest, CreateSecurityRuleRequest, DappConnectionCheckRequest,
+    EmergencyLockRequest, IngestActivityRequest, ReportScamRequest, SimulateTxRequest,
+    SimulateTxResponse, UpdateProtectionSettingsRequest, UpdateSecurityRuleRequest,
+    WatchlistContractRequest,
 };
 use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
@@ -66,6 +68,7 @@ pub fn protection_routes() -> Router<DbPool> {
     Router::new()
         .route("/settings", get(get_settings).put(update_settings))
         .route("/transaction/analyze", post(transaction_analyze))
+        .route("/threat-feed", get(get_threat_feed))
         .route("/dapp/connection-check", post(dapp_connection_check))
         .route("/monitor/run", post(monitor_run))
         .route("/rules", get(list_rules).post(create_rule))
@@ -83,6 +86,159 @@ pub fn protection_routes() -> Router<DbPool> {
         .route("/report", post(report_scam))
         .route("/revoke-approval", post(revoke_approval))
         .route("/scan-history", get(scan_history))
+}
+
+pub fn telemetry_routes() -> Router<DbPool> {
+    Router::new().route("/events", post(ingest_telemetry_events))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionAnalyzeRequest {
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    params: Option<Vec<Value>>,
+    #[serde(default)]
+    url: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    wallet_address: Option<String>,
+    #[serde(default)]
+    chain_id: Option<i64>,
+    #[serde(default)]
+    source: Option<String>,
+    // Back-compat fields (legacy mobile/web callers).
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelemetryBatchRequest {
+    events: Vec<TelemetryEvent>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelemetryEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    #[serde(default, rename = "riskScore")]
+    risk_score: Option<i32>,
+    #[serde(default)]
+    domain: Option<String>,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    findings: Option<Vec<String>>,
+    #[serde(default)]
+    decision: Option<String>,
+    #[serde(default)]
+    context: Option<Value>,
+    at: String,
+}
+
+fn extension_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({
+            "success": false,
+            "message": message,
+        })),
+    )
+}
+
+fn extract_tx_fields(req: &ExtensionAnalyzeRequest) -> (Option<String>, Option<String>, Option<String>) {
+    let mut to = req.to.clone();
+    let mut value = req.value.clone();
+    let mut data = req.data.clone();
+
+    if let Some(first) = req.params.as_ref().and_then(|v| v.first()) {
+        if first.is_object() {
+            if to.is_none() {
+                to = first
+                    .get("to")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
+            if value.is_none() {
+                value = first
+                    .get("value")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
+            if data.is_none() {
+                data = first
+                    .get("data")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            }
+        }
+    }
+
+    (to, value, data)
+}
+
+fn findings_from_analyze(
+    score: i32,
+    warning: Option<&str>,
+    threat_types: Option<&Vec<String>>,
+    domain: Option<&str>,
+) -> Vec<String> {
+    let mut findings: Vec<String> = Vec::new();
+    if let Some(w) = warning {
+        findings.push(w.to_string());
+    }
+    if let Some(tt) = threat_types {
+        for t in tt {
+            let text = match t.as_str() {
+                "unlimited_approval" => "Unlimited approval pattern detected",
+                "phishing_indicator" => "Phishing indicator detected",
+                "malicious_transaction" => "Malicious transaction pattern detected",
+                "frontend_phishing" => "Frontend phishing signal detected",
+                _ => t.as_str(),
+            };
+            if !findings.iter().any(|f| f == text) {
+                findings.push(text.to_string());
+            }
+        }
+    }
+    if score >= 80 && findings.is_empty() {
+        findings.push("High-risk transaction pattern detected".to_string());
+    }
+    if let Some(d) = domain {
+        if !d.trim().is_empty() && score >= 30 {
+            findings.push(format!("Risk context includes domain {}", d));
+        }
+    }
+    findings
+}
+
+async fn compute_contract_reputation_risk(
+    pool: &DbPool,
+    contract_address: &str,
+) -> (i32, Option<i32>, i64) {
+    let trust_score = SenseiguardRepository::get_latest_trust_score(pool, contract_address)
+        .await
+        .ok()
+        .flatten();
+    let scam_reports = SenseiguardRepository::count_scam_reports(pool, contract_address)
+        .await
+        .unwrap_or(0);
+
+    let trust_risk = match trust_score {
+        Some(s) if s <= 20 => 35,
+        Some(s) if s <= 35 => 28,
+        Some(s) if s <= 50 => 20,
+        Some(s) if s <= 70 => 10,
+        _ => 0,
+    };
+    let report_risk = (scam_reports as i32 * 12).min(40);
+    let total = (trust_risk + report_risk).min(45);
+    (total, trust_score, scam_reports)
 }
 
 async fn get_settings(
@@ -210,24 +366,153 @@ async fn update_settings(
 
 async fn transaction_analyze(
     State(pool): State<DbPool>,
-    axum::Json(req): axum::Json<AnalyzeTxRequest>,
+    axum::Json(raw): axum::Json<Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
-        return Err(bad_address());
+    let req: ExtensionAnalyzeRequest = serde_json::from_value(raw).map_err(|_| {
+        extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid request body for transaction analysis",
+        )
+    })?;
+
+    if req.source.as_deref().is_some_and(|s| s != "senseiguard_extension") {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid source. Expected senseiguard_extension",
+        ));
     }
+
+    if let Some(method) = req.method.as_deref() {
+        let allowed = [
+            "eth_sendTransaction",
+            "eth_sign",
+            "eth_signTypedData",
+            "eth_signTypedData_v3",
+            "eth_signTypedData_v4",
+        ];
+        if !allowed.contains(&method) {
+            return Err(extension_error(
+                StatusCode::BAD_REQUEST,
+                "Unsupported method for transaction analysis",
+            ));
+        }
+        if req.params.is_none() {
+            return Err(extension_error(
+                StatusCode::BAD_REQUEST,
+                "params is required when method is provided",
+            ));
+        }
+    }
+
+    let wallet_address = req.wallet_address.clone().ok_or_else(|| {
+        extension_error(
+            StatusCode::BAD_REQUEST,
+            "wallet_address is required",
+        )
+    })?;
+
+    if !is_valid_eth_address(&wallet_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format",
+        ));
+    }
+
+    let (to, value, data) = extract_tx_fields(&req);
+
     match analyze_tx_and_respond(
         &pool,
-        &req.wallet_address,
-        req.to.as_deref(),
-        req.value.as_deref(),
-        req.data.as_deref(),
+        &wallet_address,
+        to.as_deref(),
+        value.as_deref(),
+        data.as_deref(),
     )
     .await
     {
-        Ok(out) => Ok(Json(serde_json::to_value(&out).unwrap_or(json!({})))),
+        Ok(out) => {
+            let base_score = out.risk_score.unwrap_or(0).clamp(0, 100);
+            let approval_risk = out
+                .risk_breakdown
+                .as_ref()
+                .and_then(|v| v.get("approval_risk"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as i32;
+
+            // Add contract/project maliciousness signals for extension worker path.
+            let mut contract_reputation_risk = 0i32;
+            let mut trust_score: Option<i32> = None;
+            let mut scam_reports: i64 = 0;
+            if let Some(ref to_addr) = to {
+                if is_valid_eth_address(to_addr) {
+                    let (rep_risk, trust, reports) = compute_contract_reputation_risk(&pool, to_addr).await;
+                    contract_reputation_risk = rep_risk;
+                    trust_score = trust;
+                    scam_reports = reports;
+                }
+            }
+
+            let mut behavioral_risk = 0i32;
+            if let Some(domain) = req.domain.as_deref() {
+                if !domain.trim().is_empty() {
+                    if let Ok(dapp_eval) = evaluate_dapp_connection(&pool, &wallet_address, domain).await {
+                        behavioral_risk = dapp_eval.risk_score.clamp(0, 50);
+                    }
+                }
+            }
+
+            let score = (base_score + contract_reputation_risk + behavioral_risk).clamp(0, 100);
+            let final_band = crate::services::protection_engine::score_to_band(score).to_string();
+            let final_recommendation = if score >= 80 {
+                "Reject transaction".to_string()
+            } else if score >= 30 {
+                "Review before signing".to_string()
+            } else {
+                "Proceed".to_string()
+            };
+            let mut findings = findings_from_analyze(
+                base_score,
+                out.warning.as_deref().or(out.explanation.as_deref()),
+                out.threat_types.as_ref(),
+                req.domain.as_deref(),
+            );
+            if contract_reputation_risk > 0 {
+                if scam_reports > 0 {
+                    findings.push(format!(
+                        "Destination contract has {} community scam report(s)",
+                        scam_reports
+                    ));
+                }
+                if let Some(t) = trust_score {
+                    findings.push(format!("Destination contract trust score is low ({})", t));
+                }
+                findings.push("Destination contract linked to malicious-risk signals".to_string());
+            }
+            if behavioral_risk >= 30 {
+                findings.push("Project/domain phishing risk signal detected".to_string());
+            }
+
+            Ok(Json(json!({
+                "risk_score": score,
+                "riskScore": score,
+                "findings": findings,
+                "breakdown": {
+                    "approval_risk": approval_risk,
+                    "contract_reputation_risk": contract_reputation_risk,
+                    "behavioral_risk": behavioral_risk
+                },
+                "band": final_band,
+                "recommendation": final_recommendation,
+                "chain_id": req.chain_id,
+                "url": req.url,
+                "domain": req.domain
+            })))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "success": false, "error": e })),
+            Json(json!({
+                "success": false,
+                "message": e,
+            })),
         )),
     }
 }
@@ -445,6 +730,130 @@ async fn scan_history(
             Json(json!({ "success": false, "error": e.to_string() })),
         )),
     }
+}
+
+async fn get_threat_feed(
+    State(pool): State<DbPool>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let malicious_contracts = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT contract_address
+        FROM scam_reports
+        WHERE contract_address ~* '^0x[0-9a-f]{40}$'
+        ORDER BY contract_address
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| extension_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build threat feed"))?;
+
+    let domains_raw = sqlx::query_scalar::<_, Option<String>>(
+        r#"
+        SELECT metadata->>'domain' AS domain
+        FROM activity_feed
+        WHERE metadata IS NOT NULL
+          AND metadata ? 'domain'
+        ORDER BY created_at DESC
+        LIMIT 1000
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| extension_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build threat feed"))?;
+
+    let mut malicious_domains: Vec<String> = Vec::new();
+    for d in domains_raw.into_iter().flatten() {
+        let d = d.trim().to_lowercase();
+        if d.is_empty() || malicious_domains.iter().any(|x| x == &d) {
+            continue;
+        }
+        malicious_domains.push(d);
+        if malicious_domains.len() >= 500 {
+            break;
+        }
+    }
+
+    Ok(Json(json!({
+        "malicious_contracts": malicious_contracts,
+        "malicious_domains": malicious_domains,
+        "updated_at": Utc::now(),
+    })))
+}
+
+async fn ingest_telemetry_events(
+    State(pool): State<DbPool>,
+    axum::Json(req): axum::Json<TelemetryBatchRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if req.events.is_empty() {
+        return Err(extension_error(StatusCode::BAD_REQUEST, "events must contain at least one item"));
+    }
+
+    let allowed = [
+        "tx_evaluated",
+        "tx_blocked",
+        "tx_warned",
+        "domain_risk_detected",
+        "user_decision",
+        "sync_heartbeat",
+    ];
+
+    for ev in &req.events {
+        if !allowed.contains(&ev.event_type.as_str()) {
+            return Err(extension_error(StatusCode::BAD_REQUEST, "events contains unsupported type"));
+        }
+        if chrono::DateTime::parse_from_rfc3339(&ev.at).is_err() {
+            return Err(extension_error(StatusCode::BAD_REQUEST, "events.at must be RFC3339 date-time"));
+        }
+        if let Some(s) = ev.risk_score {
+            if !(0..=100).contains(&s) {
+                return Err(extension_error(StatusCode::BAD_REQUEST, "events.riskScore must be between 0 and 100"));
+            }
+        }
+    }
+
+    let mut accepted: i64 = 0;
+    for ev in req.events {
+        accepted += 1;
+        let wallet_from_context = ev
+            .context
+            .as_ref()
+            .and_then(|ctx| ctx.get("wallet_address"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if let Some(wallet_address) = wallet_from_context {
+            if is_valid_eth_address(&wallet_address) {
+                let metadata = json!({
+                    "event_type": ev.event_type,
+                    "risk_score": ev.risk_score,
+                    "domain": ev.domain,
+                    "method": ev.method,
+                    "findings": ev.findings,
+                    "decision": ev.decision,
+                    "context": ev.context,
+                    "at": ev.at,
+                });
+                let _ = crate::services::senseiguard_service::SenseiguardService::ingest_activity(
+                    &pool,
+                    &wallet_address,
+                    IngestActivityRequest {
+                        activity_type: "extension_event".to_string(),
+                        title: "Extension telemetry event".to_string(),
+                        description: Some("Telemetry batch ingest".to_string()),
+                        metadata: Some(metadata),
+                    },
+                )
+                .await;
+            }
+        }
+    }
+
+    Ok(Json(json!({
+        "success": true,
+        "accepted": accepted,
+        "message": "Telemetry events accepted"
+    })))
 }
 
 #[derive(Debug, Deserialize)]
