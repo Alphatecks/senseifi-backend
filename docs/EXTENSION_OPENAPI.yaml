@@ -287,6 +287,23 @@ components:
         band:
           type: string
           enum: [Safe, Warning, Dangerous, Block]
+        malicious_contract_detected:
+          type: boolean
+          description: Explicit signal for malicious contract/project detection in worker flow.
+        risk_level_10:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 10
+          description: UI-friendly risk score (0.0-10.0), derived from risk_score.
+        reported_incidents:
+          type: integer
+          minimum: 0
+          description: Community-reported incidents linked to the destination contract.
+        wallets_drained_estimate:
+          type: integer
+          minimum: 0
+          description: Estimated affected wallet count from observed contract scan trend.
 
     ThreatFeedResponse:
       type: object

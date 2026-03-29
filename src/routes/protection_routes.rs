@@ -220,13 +220,17 @@ fn findings_from_analyze(
 async fn compute_contract_reputation_risk(
     pool: &DbPool,
     contract_address: &str,
-) -> (i32, Option<i32>, i64) {
+) -> (i32, Option<i32>, i64, i64) {
     let trust_score = SenseiguardRepository::get_latest_trust_score(pool, contract_address)
         .await
         .ok()
         .flatten();
     let scam_reports = SenseiguardRepository::count_scam_reports(pool, contract_address)
         .await
+        .unwrap_or(0);
+    let wallets_affected = SenseiguardRepository::get_contract_scan_trend(pool, contract_address)
+        .await
+        .map(|(_, wallets)| wallets)
         .unwrap_or(0);
 
     let trust_risk = match trust_score {
@@ -238,7 +242,7 @@ async fn compute_contract_reputation_risk(
     };
     let report_risk = (scam_reports as i32 * 12).min(40);
     let total = (trust_risk + report_risk).min(45);
-    (total, trust_score, scam_reports)
+    (total, trust_score, scam_reports, wallets_affected)
 }
 
 async fn get_settings(
@@ -442,12 +446,15 @@ async fn transaction_analyze(
             let mut contract_reputation_risk = 0i32;
             let mut trust_score: Option<i32> = None;
             let mut scam_reports: i64 = 0;
+            let mut wallets_drained_estimate: i64 = 0;
             if let Some(ref to_addr) = to {
                 if is_valid_eth_address(to_addr) {
-                    let (rep_risk, trust, reports) = compute_contract_reputation_risk(&pool, to_addr).await;
+                    let (rep_risk, trust, reports, wallets_affected) =
+                        compute_contract_reputation_risk(&pool, to_addr).await;
                     contract_reputation_risk = rep_risk;
                     trust_score = trust;
                     scam_reports = reports;
+                    wallets_drained_estimate = wallets_affected;
                 }
             }
 
@@ -504,7 +511,11 @@ async fn transaction_analyze(
                 "recommendation": final_recommendation,
                 "chain_id": req.chain_id,
                 "url": req.url,
-                "domain": req.domain
+                "domain": req.domain,
+                "malicious_contract_detected": contract_reputation_risk > 0 || score >= 80,
+                "risk_level_10": ((score as f64) / 10.0 * 10.0).round() / 10.0,
+                "reported_incidents": scam_reports,
+                "wallets_drained_estimate": wallets_drained_estimate
             })))
         }
         Err(e) => Err((
