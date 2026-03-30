@@ -4,10 +4,12 @@
 use crate::db::DbPool;
 use strsim::levenshtein;
 use crate::models::senseiguard::{
-    AnalyzeTxResponse, DappConnectionCheckResponse, UserProtectionSettings,
+    AnalyzeTxResponse, DappConnectionCheckResponse, UserProtectionSettings, WebsiteScanSummary,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
+use crate::services::domain_intel_service;
+use crate::services::website_scan_service;
 
 // --- Production risk bands (aligned with PHISHING_DETECTION_ROADMAP) ---
 // Score >= 80 → Block; 50–79 → Dangerous (high warning); 30–49 → Warning (medium); < 30 → Safe.
@@ -53,6 +55,8 @@ pub struct ApprovalEvalResult {
 pub struct DappEvalResult {
     pub risk_score: i32,
     pub phishing_risk: bool,
+    pub safety: String,
+    pub website_scan: Option<WebsiteScanSummary>,
 }
 
 /// When high_risk_tx_warnings is OFF we skip analysis. When ON we run threat analysis and apply rules + emergency lock.
@@ -359,19 +363,20 @@ fn is_homograph_domain(domain: &str) -> bool {
 pub async fn evaluate_dapp_connection(
     pool: &DbPool,
     wallet_address: &str,
-    domain: &str,
+    target: &str,
+    max_pages: Option<u8>,
 ) -> Result<DappEvalResult, String> {
     let _settings = SenseiguardRepository::get_protection_settings(pool, wallet_address)
         .await
         .map_err(|e| e.to_string())?
         .unwrap_or(default_settings());
 
-    let domain_lower = domain.to_lowercase();
+    let domain_lower = target.to_lowercase();
     let legacy_typo = domain_lower.contains("unlswap")
         || domain_lower.contains("unisvvap")
         || (domain_lower.contains("metamask") && domain_lower != "metamask.io");
     let similarity_phishing = domain_similarity_phishing(&domain_lower);
-    let homograph = is_homograph_domain(domain);
+    let homograph = is_homograph_domain(target);
 
     let mut risk_score = 0i32;
     if legacy_typo || similarity_phishing {
@@ -380,12 +385,64 @@ pub async fn evaluate_dapp_connection(
     if homograph {
         risk_score += WEIGHT_DOMAIN_HOMOGRAPH;
     }
-    risk_score = risk_score.min(100);
+    let intel = domain_intel_service::assess_domain(pool, target).await;
+    risk_score += intel.risk_boost;
+
+    let mut website_scan_summary: Option<WebsiteScanSummary> = None;
+    if let Ok(scan) = website_scan_service::scan_website(target, max_pages).await {
+        risk_score = (risk_score + scan.risk_score).min(100);
+        let mut findings = scan
+            .issues
+            .iter()
+            .take(8)
+            .map(|i| format!("[{}] {}", i.severity, i.message))
+            .collect::<Vec<_>>();
+        if intel.is_malicious {
+            findings.insert(
+                0,
+                "[critical] Domain matched malicious threat-intelligence feed.".to_string(),
+            );
+        } else if intel.is_trusted {
+            findings.insert(0, "[low] Domain matched trusted protocol allowlist.".to_string());
+        } else if let Some(reason) = intel.reason.clone() {
+            findings.insert(0, format!("[low] {}", reason));
+        }
+        website_scan_summary = Some(WebsiteScanSummary {
+            target: scan.target,
+            normalized_url: scan.normalized_url,
+            domain: intel.domain,
+            safety: scan.safety,
+            risk_score: scan.risk_score,
+            crawled_pages: scan.crawled_pages,
+            issue_count: scan.issues.len(),
+            findings,
+        });
+    } else if intel.is_malicious || intel.is_trusted {
+        let finding = if intel.is_malicious {
+            "[critical] Domain matched malicious threat-intelligence feed.".to_string()
+        } else {
+            "[low] Domain matched trusted protocol allowlist.".to_string()
+        };
+        website_scan_summary = Some(WebsiteScanSummary {
+            target: target.to_string(),
+            normalized_url: format!("https://{}", intel.domain),
+            domain: intel.domain.clone(),
+            safety: score_to_band(risk_score.clamp(0, 100)).to_string(),
+            risk_score: risk_score.clamp(0, 100),
+            crawled_pages: 0,
+            issue_count: 1,
+            findings: vec![finding],
+        });
+    }
+    risk_score = risk_score.clamp(0, 100);
     let phishing_risk = risk_score >= MEDIUM_WARNING_THRESHOLD;
+    let safety = score_to_band(risk_score).to_string();
 
     Ok(DappEvalResult {
         risk_score,
         phishing_risk,
+        safety,
+        website_scan: website_scan_summary,
     })
 }
 
@@ -472,6 +529,8 @@ pub fn build_dapp_check_response(skipped: bool, result: Option<DappEvalResult>) 
             skipped: true,
             risk_score: None,
             phishing_risk: None,
+            safety: None,
+            website_scan: None,
             reason: Some("New dApp connection alerts are disabled.".to_string()),
         };
     }
@@ -480,6 +539,8 @@ pub fn build_dapp_check_response(skipped: bool, result: Option<DappEvalResult>) 
             skipped: false,
             risk_score: Some(0),
             phishing_risk: Some(false),
+            safety: Some("Safe".to_string()),
+            website_scan: None,
             reason: None,
         };
     };
@@ -487,6 +548,8 @@ pub fn build_dapp_check_response(skipped: bool, result: Option<DappEvalResult>) 
         skipped: false,
         risk_score: Some(r.risk_score),
         phishing_risk: Some(r.phishing_risk),
+        safety: Some(r.safety),
+        website_scan: r.website_scan,
         reason: None,
     }
 }

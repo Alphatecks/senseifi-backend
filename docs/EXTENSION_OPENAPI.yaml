@@ -74,6 +74,40 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /protection/dapp/connection-check:
+    post:
+      tags: [Protection]
+      operationId: checkDappConnectionRisk
+      summary: Crawl and scan dApp website/domain safety
+      description: |
+        Performs heavyweight website crawling and content/security scan.
+        Returns an explicit safety verdict for extension decisioning.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DappConnectionCheckRequest"
+      responses:
+        "200":
+          description: dApp/domain risk analysis response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DappConnectionCheckResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /protection/threat-feed:
     get:
       tags: [Protection]
@@ -88,6 +122,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ThreatFeedResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /protection/domain-threat-feed:
+    get:
+      tags: [Protection]
+      operationId: getDomainThreatFeed
+      summary: Return domain threat intelligence feed
+      description: |
+        Returns malicious domains, trusted allowlist domains, and source metadata.
+        Intended for extension sync and local decision cache refresh.
+      responses:
+        "200":
+          description: Domain threat-intel feed payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DomainThreatFeedResponse"
         "500":
           description: Server error
           content:
@@ -290,6 +346,17 @@ components:
         malicious_contract_detected:
           type: boolean
           description: Explicit signal for malicious contract/project detection in worker flow.
+        site_safety:
+          oneOf:
+            - type: string
+              enum: [Safe, Warning, Dangerous, Block]
+            - type: "null"
+          description: Website/domain safety verdict from heavyweight crawl + content/security scan.
+        site_safe:
+          oneOf:
+            - type: boolean
+            - type: "null"
+          description: Convenience flag for extension UI/decisioning.
         risk_level_10:
           type: number
           format: float
@@ -304,6 +371,99 @@ components:
           type: integer
           minimum: 0
           description: Estimated affected wallet count from observed contract scan trend.
+        website_scan:
+          oneOf:
+            - $ref: "#/components/schemas/WebsiteScanSummary"
+            - type: "null"
+
+    DappConnectionCheckRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - wallet_address
+      properties:
+        wallet_address:
+          $ref: "#/components/schemas/EvmAddress"
+        domain:
+          type: string
+          description: Domain or hostname to scan (e.g. app.uniswap.org).
+        url:
+          type: string
+          format: uri
+          description: Full URL to scan; takes precedence over domain if both provided.
+        max_pages:
+          type: integer
+          minimum: 1
+          maximum: 10
+
+    DappConnectionCheckResponse:
+      type: object
+      additionalProperties: true
+      required: [skipped]
+      properties:
+        skipped:
+          type: boolean
+        risk_score:
+          oneOf:
+            - type: integer
+              minimum: 0
+              maximum: 100
+            - type: "null"
+        phishing_risk:
+          oneOf:
+            - type: boolean
+            - type: "null"
+        safety:
+          oneOf:
+            - type: string
+              enum: [Safe, Warning, Dangerous, Block]
+            - type: "null"
+        website_scan:
+          oneOf:
+            - $ref: "#/components/schemas/WebsiteScanSummary"
+            - type: "null"
+        reason:
+          oneOf:
+            - type: string
+            - type: "null"
+
+    WebsiteScanSummary:
+      type: object
+      additionalProperties: false
+      required:
+        - target
+        - normalized_url
+        - domain
+        - safety
+        - risk_score
+        - crawled_pages
+        - issue_count
+        - findings
+      properties:
+        target:
+          type: string
+        normalized_url:
+          type: string
+          format: uri
+        domain:
+          type: string
+        safety:
+          type: string
+          enum: [Safe, Warning, Dangerous, Block]
+        risk_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        crawled_pages:
+          type: integer
+          minimum: 0
+        issue_count:
+          type: integer
+          minimum: 0
+        findings:
+          type: array
+          items:
+            type: string
 
     ThreatFeedResponse:
       type: object
@@ -311,6 +471,7 @@ components:
       required:
         - malicious_contracts
         - malicious_domains
+        - trusted_domains
       properties:
         malicious_contracts:
           type: array
@@ -321,6 +482,56 @@ components:
           items:
             type: string
             minLength: 1
+        trusted_domains:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        sources:
+          $ref: "#/components/schemas/DomainThreatFeedSources"
+        updated_at:
+          type: string
+          format: date-time
+
+    DomainThreatFeedSources:
+      type: object
+      additionalProperties: false
+      required:
+        - from_activity_feed
+        - from_env_blocklist
+        - static_trusted
+      properties:
+        from_activity_feed:
+          type: integer
+          minimum: 0
+        from_env_blocklist:
+          type: integer
+          minimum: 0
+        static_trusted:
+          type: integer
+          minimum: 0
+
+    DomainThreatFeedResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - malicious_domains
+        - trusted_domains
+        - sources
+        - updated_at
+      properties:
+        malicious_domains:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        trusted_domains:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        sources:
+          $ref: "#/components/schemas/DomainThreatFeedSources"
         updated_at:
           type: string
           format: date-time

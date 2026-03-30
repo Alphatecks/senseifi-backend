@@ -25,6 +25,7 @@ use crate::services::protection_engine::{
     analyze_tx_and_respond, build_dapp_check_response, evaluate_approval, evaluate_dapp_connection,
     run_monitor_cycle,
 };
+use crate::services::domain_intel_service;
 use axum::extract::Path;
 use uuid::Uuid;
 
@@ -69,6 +70,7 @@ pub fn protection_routes() -> Router<DbPool> {
         .route("/settings", get(get_settings).put(update_settings))
         .route("/transaction/analyze", post(transaction_analyze))
         .route("/threat-feed", get(get_threat_feed))
+        .route("/domain-threat-feed", get(domain_threat_feed))
         .route("/dapp/connection-check", post(dapp_connection_check))
         .route("/monitor/run", post(monitor_run))
         .route("/rules", get(list_rules).post(create_rule))
@@ -459,10 +461,28 @@ async fn transaction_analyze(
             }
 
             let mut behavioral_risk = 0i32;
+            let mut website_scan_payload: Option<Value> = None;
+            let mut site_safety: Option<String> = None;
             if let Some(domain) = req.domain.as_deref() {
                 if !domain.trim().is_empty() {
-                    if let Ok(dapp_eval) = evaluate_dapp_connection(&pool, &wallet_address, domain).await {
+                    if let Ok(dapp_eval) = evaluate_dapp_connection(&pool, &wallet_address, domain, None).await {
                         behavioral_risk = dapp_eval.risk_score.clamp(0, 50);
+                        site_safety = Some(dapp_eval.safety.clone());
+                        website_scan_payload = dapp_eval
+                            .website_scan
+                            .as_ref()
+                            .and_then(|s| serde_json::to_value(s).ok());
+                    }
+                }
+            } else if let Some(url) = req.url.as_deref() {
+                if !url.trim().is_empty() {
+                    if let Ok(dapp_eval) = evaluate_dapp_connection(&pool, &wallet_address, url, None).await {
+                        behavioral_risk = dapp_eval.risk_score.clamp(0, 50);
+                        site_safety = Some(dapp_eval.safety.clone());
+                        website_scan_payload = dapp_eval
+                            .website_scan
+                            .as_ref()
+                            .and_then(|s| serde_json::to_value(s).ok());
                     }
                 }
             }
@@ -512,6 +532,9 @@ async fn transaction_analyze(
                 "chain_id": req.chain_id,
                 "url": req.url,
                 "domain": req.domain,
+                "site_safety": site_safety,
+                "site_safe": site_safety.as_deref().map(|s| s == "Safe"),
+                "website_scan": website_scan_payload,
                 "malicious_contract_detected": contract_reputation_risk > 0 || score >= 80,
                 "risk_level_10": ((score as f64) / 10.0 * 10.0).round() / 10.0,
                 "reported_incidents": scam_reports,
@@ -552,7 +575,19 @@ async fn dapp_connection_check(
         let out = build_dapp_check_response(true, None);
         return Ok(Json(serde_json::to_value(&out).unwrap_or(json!({ "skipped": true }))));
     }
-    match evaluate_dapp_connection(&pool, &req.wallet_address, &req.domain).await {
+    let target = req
+        .url
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .or(req.domain.as_deref().filter(|s| !s.trim().is_empty()))
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": "domain or url is required" })),
+            )
+        })?;
+
+    match evaluate_dapp_connection(&pool, &req.wallet_address, target, req.max_pages).await {
         Ok(r) => {
             let out = build_dapp_check_response(false, Some(r));
             Ok(Json(serde_json::to_value(&out).unwrap_or(json!({}))))
@@ -759,37 +794,29 @@ async fn get_threat_feed(
     .await
     .map_err(|_| extension_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build threat feed"))?;
 
-    let domains_raw = sqlx::query_scalar::<_, Option<String>>(
-        r#"
-        SELECT metadata->>'domain' AS domain
-        FROM activity_feed
-        WHERE metadata IS NOT NULL
-          AND metadata ? 'domain'
-        ORDER BY created_at DESC
-        LIMIT 1000
-        "#,
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| extension_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build threat feed"))?;
-
-    let mut malicious_domains: Vec<String> = Vec::new();
-    for d in domains_raw.into_iter().flatten() {
-        let d = d.trim().to_lowercase();
-        if d.is_empty() || malicious_domains.iter().any(|x| x == &d) {
-            continue;
-        }
-        malicious_domains.push(d);
-        if malicious_domains.len() >= 500 {
-            break;
-        }
-    }
+    let domain_feed = domain_intel_service::get_domain_threat_feed(&pool)
+        .await
+        .map_err(|_| extension_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build threat feed"))?;
 
     Ok(Json(json!({
         "malicious_contracts": malicious_contracts,
-        "malicious_domains": malicious_domains,
+        "malicious_domains": domain_feed.malicious_domains,
+        "trusted_domains": domain_feed.trusted_domains,
+        "sources": domain_feed.sources,
         "updated_at": Utc::now(),
     })))
+}
+
+async fn domain_threat_feed(
+    State(pool): State<DbPool>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let feed = domain_intel_service::get_domain_threat_feed(&pool)
+        .await
+        .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+    Ok(Json(serde_json::to_value(feed).unwrap_or(json!({
+        "malicious_domains": [],
+        "trusted_domains": [],
+    }))))
 }
 
 async fn ingest_telemetry_events(

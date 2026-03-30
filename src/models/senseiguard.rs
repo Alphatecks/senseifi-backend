@@ -857,7 +857,39 @@ pub struct AnalyzeTxResponse {
 #[derive(Debug, Deserialize)]
 pub struct DappConnectionCheckRequest {
     pub wallet_address: String,
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub max_pages: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WebsiteScanSummary {
+    pub target: String,
+    pub normalized_url: String,
     pub domain: String,
+    pub safety: String,
+    pub risk_score: i32,
+    pub crawled_pages: usize,
+    pub issue_count: usize,
+    pub findings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DomainThreatFeedSources {
+    pub from_activity_feed: usize,
+    pub from_env_blocklist: usize,
+    pub static_trusted: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DomainThreatFeedResponse {
+    pub malicious_domains: Vec<String>,
+    pub trusted_domains: Vec<String>,
+    pub sources: DomainThreatFeedSources,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// Response: risk score and phishing flag; or skipped if toggle off.
@@ -868,6 +900,10 @@ pub struct DappConnectionCheckResponse {
     pub risk_score: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phishing_risk: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub website_scan: Option<WebsiteScanSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
