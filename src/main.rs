@@ -2,7 +2,7 @@ use axum::Router;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
-use tower_http::cors::{AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use http::header::{HeaderName, HeaderValue, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
@@ -43,15 +43,17 @@ async fn main() {
         has_moralis
     );
 
-    // CORS: allow frontend origins. Always include localhost so local dev works.
-    // Set ALLOWED_ORIGINS (comma-separated) for production, e.g. https://your-app.vercel.app
-    let dev_origins: [&str; 4] = [
+    // CORS: allow trusted frontend origins.
+    // Always include localhost and SenseiFi production domains, then extend via ALLOWED_ORIGINS.
+    let default_origins: [&str; 6] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        "https://senseifi.io",
+        "https://www.senseifi.io",
     ];
-    let mut list: Vec<HeaderValue> = dev_origins
+    let mut list: Vec<HeaderValue> = default_origins
         .iter()
         .map(|s| HeaderValue::from_static(s))
         .collect();
@@ -77,7 +79,8 @@ async fn main() {
             http::Method::DELETE,
             http::Method::OPTIONS,
         ])
-        .allow_headers([http::header::CONTENT_TYPE, http::header::AUTHORIZATION])
+        // Allow requested custom headers during preflight for trusted origins.
+        .allow_headers(Any)
         .max_age(Duration::from_secs(86400));
 
     // Rate limiting: per-IP. Higher defaults so dashboard polling (e.g. activity every few sec) doesn't 429.
