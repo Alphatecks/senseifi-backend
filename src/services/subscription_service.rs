@@ -59,6 +59,16 @@ impl StripeConfig {
                 .filter(|v| !v.is_empty())
                 .ok_or_else(|| format!("{name} must be set"))
         }
+        fn optional_or_fallback(primary: &str, fallback: &str) -> Result<String, String> {
+            if let Some(v) = std::env::var(primary)
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+            {
+                return Ok(v);
+            }
+            required(fallback)
+        }
 
         Ok(Self {
             secret_key: required("STRIPE_SECRET_KEY")?,
@@ -66,20 +76,17 @@ impl StripeConfig {
             success_url: required("STRIPE_SUCCESS_URL")?,
             cancel_url: required("STRIPE_CANCEL_URL")?,
             portal_return_url: required("STRIPE_BILLING_PORTAL_RETURN_URL")?,
-            pro_monthly_price_id: std::env::var("STRIPE_PRICE_PRO_MONTHLY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(required("STRIPE_PRICE_PRO")?),
+            pro_monthly_price_id: optional_or_fallback("STRIPE_PRICE_PRO_MONTHLY", "STRIPE_PRICE_PRO")?,
             pro_annual_price_id: required("STRIPE_PRICE_PRO_ANNUAL")?,
-            pro_plus_monthly_price_id: std::env::var("STRIPE_PRICE_PRO_PLUS_MONTHLY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(required("STRIPE_PRICE_PRO_PLUS")?),
+            pro_plus_monthly_price_id: optional_or_fallback(
+                "STRIPE_PRICE_PRO_PLUS_MONTHLY",
+                "STRIPE_PRICE_PRO_PLUS",
+            )?,
             pro_plus_annual_price_id: required("STRIPE_PRICE_PRO_PLUS_ANNUAL")?,
-            premium_monthly_price_id: std::env::var("STRIPE_PRICE_PREMIUM_MONTHLY")
-                .ok()
-                .filter(|v| !v.trim().is_empty())
-                .unwrap_or(required("STRIPE_PRICE_PREMIUM")?),
+            premium_monthly_price_id: optional_or_fallback(
+                "STRIPE_PRICE_PREMIUM_MONTHLY",
+                "STRIPE_PRICE_PREMIUM",
+            )?,
             premium_annual_price_id: required("STRIPE_PRICE_PREMIUM_ANNUAL")?,
         })
     }
