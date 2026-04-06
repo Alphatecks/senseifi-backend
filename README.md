@@ -30,7 +30,54 @@
 
 ## Example Endpoints
 - `GET /api/hello` — Returns a message from the repository layer.
-- Wallet: `POST /api/wallets/connect`, `GET/DELETE /api/wallets/:address`, `GET /api/wallets/:address/status`.
+- Wallet: `POST /api/wallets/connect`, `GET/DELETE /api/wallets/:address`, `GET /api/wallets/:address/status`, `GET /api/wallets/:address/age?chain_id=56` (first on-chain activity via Etherscan V2; needs `ETHERSCAN_API_KEY`).
+
+## Stripe Subscriptions
+
+This backend includes Stripe subscription flows for three plans:
+- `pro`
+- `pro_plus` (alias accepted in request: `pro+`)
+- `premium`
+
+Each plan supports:
+- `monthly`
+- `annual`
+
+Required env vars:
+- `STRIPE_SECRET_KEY`
+- `STRIPE_WEBHOOK_SECRET`
+- `STRIPE_PRICE_PRO_MONTHLY`
+- `STRIPE_PRICE_PRO_ANNUAL`
+- `STRIPE_PRICE_PRO_PLUS_MONTHLY`
+- `STRIPE_PRICE_PRO_PLUS_ANNUAL`
+- `STRIPE_PRICE_PREMIUM_MONTHLY`
+- `STRIPE_PRICE_PREMIUM_ANNUAL`
+- `STRIPE_SUCCESS_URL`
+- `STRIPE_CANCEL_URL`
+- `STRIPE_BILLING_PORTAL_RETURN_URL`
+
+Endpoints:
+- `GET /api/subscriptions/plans` — Returns configured plan keys and Stripe price IDs.
+- `GET /api/subscriptions/status?user_id=<id>` — Returns current subscription state for a dashboard user.
+- `POST /api/subscriptions/checkout` — Creates Stripe Checkout URL.
+- `POST /api/subscriptions/portal` — Creates Stripe Billing Portal URL.
+- `POST /api/subscriptions/webhook` — Stripe webhook endpoint (expects `stripe-signature` header).
+
+Checkout body example:
+```json
+{
+  "user_id": "fetrtwgebejhssns",
+  "plan": "pro_plus",
+  "billing_cycle": "annual"
+}
+```
+
+Portal body example:
+```json
+{
+  "user_id": "fetrtwgebejhssns"
+}
+```
 
 ## SenseiGuard dashboard API (per wallet address)
 
