@@ -98,8 +98,12 @@ pub struct OnchainSubscribeResponse {
     pub chain_id: i32,
     pub token_contract: String,
     pub payment_contract: String,
+    /// Human-readable USDC amount for one billing period (same units as wallet display).
     pub amount_usdc_per_period: f64,
     pub max_charge_usdc: f64,
+    /// USDC token amount in base units (6 decimals), e.g. `"30000000"` for 30 USDC — use for `approve` / `upsertBilling` value.
+    pub amount_usdc_per_period_base_units: String,
+    pub max_charge_usdc_base_units: String,
     pub currency: String,
 }
 

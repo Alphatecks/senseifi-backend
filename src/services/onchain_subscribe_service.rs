@@ -129,6 +129,9 @@ impl OnchainSubscribeService {
         )
         .await?;
 
+        let amount_base = usdc_decimal_to_base_units_string(amount_dec);
+        let max_base = usdc_decimal_to_base_units_string(max_dec);
+
         Ok(OnchainSubscribeResponse {
             subscription_id: sub.id,
             subscription_id_bytes32: subscription_id_bytes32_hex(&sub.id),
@@ -139,7 +142,16 @@ impl OnchainSubscribeService {
             payment_contract,
             amount_usdc_per_period: amount_usdc,
             max_charge_usdc: max_charge_f,
+            amount_usdc_per_period_base_units: amount_base,
+            max_charge_usdc_base_units: max_base,
             currency: "USD".to_string(),
         })
     }
+}
+
+/// USDC uses 6 decimals on Base. Integer string avoids float/JSON issues in the frontend.
+fn usdc_decimal_to_base_units_string(d: Decimal) -> String {
+    let factor = Decimal::from(1_000_000u32);
+    let scaled = (d * factor).trunc();
+    scaled.to_string().split('.').next().unwrap_or("0").to_string()
 }

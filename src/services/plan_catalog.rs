@@ -119,7 +119,8 @@ impl OnchainPriceTable {
 fn parse_env_f64(name: &str, default: f64) -> f64 {
     std::env::var(name)
         .ok()
-        .and_then(|v| v.trim().parse().ok())
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|&x| x.is_finite() && x > 0.0)
         .unwrap_or(default)
 }
 
