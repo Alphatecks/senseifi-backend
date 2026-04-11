@@ -7,6 +7,7 @@ use crate::services::onchain_payment_webhook_service::OnchainPaymentWebhookServi
 use crate::services::plan_catalog::{
     normalize_billing_cycle, normalize_plan, subscription_id_bytes32_hex, OnchainPriceTable,
 };
+use rust_decimal::Decimal;
 
 pub struct OnchainSubscribeService;
 
@@ -88,10 +89,14 @@ impl OnchainSubscribeService {
             return Err("Invalid token_contract or payment_contract address".to_string());
         }
 
-        let max_charge = req.max_charge_usdc.unwrap_or(amount_usdc);
-        if max_charge + f64::EPSILON < amount_usdc {
+        let amount_dec = Decimal::from_f64_retain(amount_usdc)
+            .ok_or_else(|| "Internal error: invalid configured price amount".to_string())?;
+        let max_charge_f = req.max_charge_usdc.unwrap_or(amount_usdc);
+        let max_dec = Decimal::from_f64_retain(max_charge_f)
+            .ok_or_else(|| "max_charge_usdc is not a valid amount".to_string())?;
+        if max_dec < amount_dec {
             return Err(format!(
-                "max_charge_usdc ({max_charge}) must be >= amount for one billing period ({amount_usdc})"
+                "max_charge_usdc ({max_charge_f}) must be >= amount for one billing period ({amount_usdc})"
             ));
         }
 
@@ -120,7 +125,7 @@ impl OnchainSubscribeService {
             chain_id,
             &token_contract,
             &payment_contract,
-            Some(max_charge),
+            Some(max_dec),
         )
         .await?;
 
@@ -133,7 +138,7 @@ impl OnchainSubscribeService {
             token_contract,
             payment_contract,
             amount_usdc_per_period: amount_usdc,
-            max_charge_usdc: max_charge,
+            max_charge_usdc: max_charge_f,
             currency: "USD".to_string(),
         })
     }

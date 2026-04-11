@@ -8,7 +8,9 @@ use crate::services::subscription_charge_service::{
     RelayerSubmissionResult, SubscriptionChargeService,
 };
 use chrono::Utc;
+use num_traits::ToPrimitive;
 use reqwest::Client;
+use rust_decimal::Decimal;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -62,7 +64,7 @@ impl OnchainPaymentWebhookService {
         chain_id: i32,
         token_contract: &str,
         payment_contract: &str,
-        max_charge_usdc: Option<f64>,
+        max_charge_usdc: Option<Decimal>,
     ) -> Result<(), String> {
         SubscriptionChargeService::validate_base_only_chain(chain_id)?;
         if SubscriptionRepository::get_by_user_id(pool, user_id)
@@ -358,7 +360,7 @@ impl OnchainPaymentWebhookService {
                 "idempotency_key": attempt.idempotency_key,
                 "user_id": attempt.user_id,
                 "subscription_id": attempt.subscription_id,
-                "amount_usdc": attempt.amount_usdc,
+                "amount_usdc": attempt.amount_usdc.to_f64().unwrap_or(0.0),
                 "chain_id": attempt.chain_id,
             }))
             .send()

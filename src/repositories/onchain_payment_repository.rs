@@ -3,6 +3,7 @@ use crate::models::onchain_payment::{
     OnchainEventLog, OnchainPaymentProfile, SubscriptionChargeAttempt, SubscriptionCycle,
 };
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde_json::Value;
 use sqlx::Error;
 use uuid::Uuid;
@@ -15,7 +16,7 @@ pub struct UpsertPaymentProfileInput<'a> {
     pub chain_id: i32,
     pub token_contract: &'a str,
     pub payment_contract: &'a str,
-    pub max_charge_usdc: Option<f64>,
+    pub max_charge_usdc: Option<Decimal>,
 }
 
 pub struct CreateSubscriptionCycleInput<'a> {
@@ -23,7 +24,7 @@ pub struct CreateSubscriptionCycleInput<'a> {
     pub subscription_id: Uuid,
     pub plan: &'a str,
     pub billing_cycle: &'a str,
-    pub amount_due_usdc: f64,
+    pub amount_due_usdc: Decimal,
     pub due_at: DateTime<Utc>,
     pub grace_expires_at: Option<DateTime<Utc>>,
 }
@@ -34,7 +35,7 @@ pub struct CreateChargeAttemptInput<'a> {
     pub chain_id: i32,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
-    pub amount_usdc: f64,
+    pub amount_usdc: Decimal,
     pub idempotency_key: &'a str,
 }
 

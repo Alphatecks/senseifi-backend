@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use rust_decimal::Decimal;
 use serde_json::{json, Value};
 
 use crate::db::DbPool;
@@ -73,6 +74,7 @@ async fn upsert_payment_profile(
         ));
     }
     let chain_id = req.chain_id.unwrap_or(8453);
+    let max_charge_usdc = req.max_charge_usdc.and_then(Decimal::from_f64_retain);
     match OnchainPaymentWebhookService::upsert_payment_profile(
         &pool,
         req.user_id.trim(),
@@ -80,7 +82,7 @@ async fn upsert_payment_profile(
         chain_id,
         req.token_contract.trim(),
         req.payment_contract.trim(),
-        req.max_charge_usdc,
+        max_charge_usdc,
     )
     .await
     {
@@ -111,6 +113,12 @@ async fn create_subscription_cycle(
                 Json(json!({ "success": false, "error": "No subscription found for user_id" })),
             )
         })?;
+    let amount_due_usdc = Decimal::from_f64_retain(req.amount_due_usdc).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "Invalid amount_due_usdc" })),
+        )
+    })?;
     let cycle = OnchainPaymentRepository::create_subscription_cycle(
         &pool,
         CreateSubscriptionCycleInput {
@@ -118,7 +126,7 @@ async fn create_subscription_cycle(
             subscription_id: sub.id,
             plan: req.plan.trim(),
             billing_cycle: req.billing_cycle.trim(),
-            amount_due_usdc: req.amount_due_usdc,
+            amount_due_usdc,
             due_at: req.due_at,
             grace_expires_at: req.grace_expires_at,
         },

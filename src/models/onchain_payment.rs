@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::FromRow;
@@ -13,7 +14,8 @@ pub struct OnchainPaymentProfile {
     pub token_contract: String,
     pub payment_contract: String,
     pub allowance_status: String,
-    pub max_charge_usdc: Option<f64>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub max_charge_usdc: Option<Decimal>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -26,7 +28,8 @@ pub struct SubscriptionChargeAttempt {
     pub chain_id: i32,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
-    pub amount_usdc: f64,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub amount_usdc: Decimal,
     pub status: String,
     pub onchain_tx_hash: Option<String>,
     pub onchain_nonce: Option<i64>,
@@ -59,7 +62,8 @@ pub struct SubscriptionCycle {
     pub subscription_id: Uuid,
     pub plan: String,
     pub billing_cycle: String,
-    pub amount_due_usdc: f64,
+    #[serde(with = "rust_decimal::serde::str")]
+    pub amount_due_usdc: Decimal,
     pub due_at: DateTime<Utc>,
     pub charge_attempt_id: Option<Uuid>,
     pub status: String,
