@@ -5,7 +5,7 @@ use crate::models::senseiguard::{
     UserBlockedContract, UserContractWatchlist, UserProtectionSettings, WalletApproval,
     WalletApprovalAlert, WalletAsset, WalletSecurityRule,
 };
-use chrono::{Datelike, DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use sqlx::Error;
 use uuid::Uuid;
 
@@ -103,7 +103,10 @@ pub struct ActivityFeedRowLive {
 pub struct SenseiguardRepository;
 
 impl SenseiguardRepository {
-    pub async fn get_latest_scan(pool: &DbPool, wallet_id: Uuid) -> Result<Option<SecurityScan>, Error> {
+    pub async fn get_latest_scan(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<Option<SecurityScan>, Error> {
         sqlx::query_as(
             "SELECT id, wallet_id, score, status, scanned_at, created_at, COALESCE(observations, '[]'::jsonb) as observations FROM security_scans WHERE wallet_id = $1 ORDER BY scanned_at DESC LIMIT 1",
         )
@@ -288,7 +291,11 @@ impl SenseiguardRepository {
         if let Some(s) = search {
             let s = s.trim();
             if !s.is_empty() {
-                let param = if risk_level_filter.as_ref().map(|r| !r.trim().is_empty()).unwrap_or(false) {
+                let param = if risk_level_filter
+                    .as_ref()
+                    .map(|r| !r.trim().is_empty())
+                    .unwrap_or(false)
+                {
                     "$2"
                 } else {
                     "$1"
@@ -348,7 +355,11 @@ impl SenseiguardRepository {
         if let Some(s) = search {
             let s = s.trim();
             if !s.is_empty() {
-                let param = if risk_level_filter.as_ref().map(|r| !r.trim().is_empty()).unwrap_or(false) {
+                let param = if risk_level_filter
+                    .as_ref()
+                    .map(|r| !r.trim().is_empty())
+                    .unwrap_or(false)
+                {
                     "$2"
                 } else {
                     "$1"
@@ -377,9 +388,7 @@ impl SenseiguardRepository {
     }
 
     /// Distinct chain_id per threat_type (for network column). Returns (threat_type, chain_id).
-    pub async fn list_threat_type_networks(
-        pool: &DbPool,
-    ) -> Result<Vec<(String, i64)>, Error> {
+    pub async fn list_threat_type_networks(pool: &DbPool) -> Result<Vec<(String, i64)>, Error> {
         let rows: Vec<(String, i64)> = sqlx::query_as(
             r#"
             SELECT COALESCE(t.threat_type, 'unknown') AS threat_type, w.chain_id
@@ -438,10 +447,7 @@ impl SenseiguardRepository {
     }
 
     /// Total threat count for user's active wallets (last 30 days).
-    pub async fn count_threats_for_user(
-        pool: &DbPool,
-        user_id: &str,
-    ) -> Result<i64, Error> {
+    pub async fn count_threats_for_user(pool: &DbPool, user_id: &str) -> Result<i64, Error> {
         let start = Utc::now() - chrono::Duration::days(30);
         let row: (i64,) = sqlx::query_as(
             r#"
@@ -559,7 +565,10 @@ impl SenseiguardRepository {
     }
 
     /// Threats in the previous 30-day window (days 31–60 ago) for trend.
-    pub async fn count_threats_previous_period(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+    pub async fn count_threats_previous_period(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<i64, Error> {
         let now = Utc::now();
         let end = now - chrono::Duration::days(30);
         let start = now - chrono::Duration::days(60);
@@ -575,7 +584,10 @@ impl SenseiguardRepository {
     }
 
     /// Unread alerts created this month vs previous month for trend (calendar months).
-    pub async fn count_unread_alerts_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+    pub async fn count_unread_alerts_this_month(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<i64, Error> {
         let start = month_start_utc(Utc::now());
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND read_at IS NULL AND created_at >= $2",
@@ -587,7 +599,10 @@ impl SenseiguardRepository {
         Ok(row.0)
     }
 
-    pub async fn count_unread_alerts_previous_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+    pub async fn count_unread_alerts_previous_month(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<i64, Error> {
         let now = Utc::now();
         let this_start = month_start_utc(now);
         let (prev_year, prev_month) = if now.month() == 1 {
@@ -611,7 +626,10 @@ impl SenseiguardRepository {
     }
 
     /// Alerts created in current calendar month (for trend).
-    pub async fn count_alerts_created_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+    pub async fn count_alerts_created_this_month(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<i64, Error> {
         let start = month_start_utc(Utc::now());
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND created_at >= $2",
@@ -624,7 +642,10 @@ impl SenseiguardRepository {
     }
 
     /// Alerts created in previous calendar month (for trend).
-    pub async fn count_alerts_created_previous_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+    pub async fn count_alerts_created_previous_month(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<i64, Error> {
         let now = Utc::now();
         let this_start = month_start_utc(now);
         let (prev_year, prev_month) = if now.month() == 1 {
@@ -648,7 +669,10 @@ impl SenseiguardRepository {
     }
 
     /// Unread alerts by severity for one wallet: (high, medium, low).
-    pub async fn alerts_count_by_severity(pool: &DbPool, wallet_id: Uuid) -> Result<(i64, i64, i64), Error> {
+    pub async fn alerts_count_by_severity(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<(i64, i64, i64), Error> {
         let high: (i64,) = sqlx::query_as(
             "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND read_at IS NULL AND severity = 'high'",
         )
@@ -671,7 +695,11 @@ impl SenseiguardRepository {
     }
 
     /// Activity feed items for one wallet since given time.
-    pub async fn activity_count_since(pool: &DbPool, wallet_id: Uuid, since: DateTime<Utc>) -> Result<i64, Error> {
+    pub async fn activity_count_since(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*)::bigint FROM activity_feed WHERE wallet_id = $1 AND created_at >= $2",
         )
@@ -683,7 +711,11 @@ impl SenseiguardRepository {
     }
 
     /// Suspicious or blocked activity count since given time.
-    pub async fn activity_suspicious_count_since(pool: &DbPool, wallet_id: Uuid, since: DateTime<Utc>) -> Result<i64, Error> {
+    pub async fn activity_suspicious_count_since(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
         let row: (i64,) = sqlx::query_as(
             "SELECT COUNT(*)::bigint FROM activity_feed WHERE wallet_id = $1 AND created_at >= $2 AND activity_type IN ('suspicious_approval', 'blocked_interaction')",
         )
@@ -722,19 +754,17 @@ impl SenseiguardRepository {
 
     /// Latest scan time across all wallets (from wallet_monitoring.last_scan_at or security_scans).
     pub async fn global_last_scan_at(pool: &DbPool) -> Result<Option<DateTime<Utc>>, Error> {
-        let row: (Option<DateTime<Utc>>,) = sqlx::query_as(
-            "SELECT MAX(last_scan_at) FROM wallet_monitoring",
-        )
-        .fetch_one(pool)
-        .await?;
+        let row: (Option<DateTime<Utc>>,) =
+            sqlx::query_as("SELECT MAX(last_scan_at) FROM wallet_monitoring")
+                .fetch_one(pool)
+                .await?;
         if row.0.is_some() {
             return Ok(row.0);
         }
-        let row2: (Option<DateTime<Utc>>,) = sqlx::query_as(
-            "SELECT MAX(scanned_at) FROM security_scans",
-        )
-        .fetch_one(pool)
-        .await?;
+        let row2: (Option<DateTime<Utc>>,) =
+            sqlx::query_as("SELECT MAX(scanned_at) FROM security_scans")
+                .fetch_one(pool)
+                .await?;
         Ok(row2.0)
     }
 
@@ -844,7 +874,10 @@ impl SenseiguardRepository {
     }
 
     /// Activity feed across all active wallets, most recent first.
-    pub async fn list_activity_across_wallets(pool: &DbPool, limit: i64) -> Result<Vec<ActivityFeedItemWithAddress>, Error> {
+    pub async fn list_activity_across_wallets(
+        pool: &DbPool,
+        limit: i64,
+    ) -> Result<Vec<ActivityFeedItemWithAddress>, Error> {
         sqlx::query_as(
             r#"
             SELECT af.id, af.wallet_id, w.address AS wallet_address, af.activity_type, af.title, af.description, af.metadata, af.created_at
@@ -883,7 +916,10 @@ impl SenseiguardRepository {
     }
 
     /// Total activity count in the last 24h across all active wallets.
-    pub async fn activity_count_since_global(pool: &DbPool, since: DateTime<Utc>) -> Result<i64, Error> {
+    pub async fn activity_count_since_global(
+        pool: &DbPool,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
         let row: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*)::bigint FROM activity_feed af
@@ -918,7 +954,10 @@ impl SenseiguardRepository {
     }
 
     /// Suspicious/blocked activity count in the last 24h across all wallets.
-    pub async fn activity_suspicious_count_since_global(pool: &DbPool, since: DateTime<Utc>) -> Result<i64, Error> {
+    pub async fn activity_suspicious_count_since_global(
+        pool: &DbPool,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
         let row: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*)::bigint FROM activity_feed af
@@ -1139,12 +1178,11 @@ impl SenseiguardRepository {
 
     /// Count of active approvals for this wallet (for Security tab "Active Approval").
     pub async fn count_approvals(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint FROM wallet_approvals WHERE wallet_id = $1",
-        )
-        .bind(wallet_id)
-        .fetch_one(pool)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*)::bigint FROM wallet_approvals WHERE wallet_id = $1")
+                .bind(wallet_id)
+                .fetch_one(pool)
+                .await?;
         Ok(row.0)
     }
 
@@ -1194,7 +1232,10 @@ impl SenseiguardRepository {
         Ok(rows)
     }
 
-    pub async fn get_wallet_issues_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i32, Error> {
+    pub async fn get_wallet_issues_this_month(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<i32, Error> {
         let row = sqlx::query_as(
             "SELECT COALESCE(issues_this_month, 0) FROM wallet_monitoring WHERE wallet_id = $1",
         )
@@ -1338,7 +1379,17 @@ impl SenseiguardRepository {
         title: &str,
         source_contract: Option<&str>,
     ) -> Result<Threat, Error> {
-        Self::create_threat_with_surface(pool, wallet_id, severity, title, source_contract, None, None, None).await
+        Self::create_threat_with_surface(
+            pool,
+            wallet_id,
+            severity,
+            title,
+            source_contract,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     /// Create a threat with surface and explanation (transaction lie detector pipeline).
@@ -1543,12 +1594,11 @@ impl SenseiguardRepository {
         pool: &DbPool,
         contract_address: &str,
     ) -> Result<i64, Error> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint FROM threats WHERE source_contract = $1",
-        )
-        .bind(contract_address)
-        .fetch_one(pool)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*)::bigint FROM threats WHERE source_contract = $1")
+                .bind(contract_address)
+                .fetch_one(pool)
+                .await?;
         Ok(row.0)
     }
 
@@ -1724,12 +1774,11 @@ impl SenseiguardRepository {
     }
 
     pub async fn count_scam_reports(pool: &DbPool, contract_address: &str) -> Result<i64, Error> {
-        let row: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM scam_reports WHERE contract_address = $1",
-        )
-        .bind(contract_address)
-        .fetch_one(pool)
-        .await?;
+        let row: (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM scam_reports WHERE contract_address = $1")
+                .bind(contract_address)
+                .fetch_one(pool)
+                .await?;
         Ok(row.0)
     }
 
@@ -1787,8 +1836,11 @@ impl SenseiguardRepository {
             (None, None) => {
                 let existing = Self::get_protection_settings(pool, wallet_address).await?;
                 match existing {
-                    Some(s) => (s.emergency_lock, s.whitelisted_addresses.unwrap_or(serde_json::json!([]))),
-                    None => (false, serde_json::json!([]))
+                    Some(s) => (
+                        s.emergency_lock,
+                        s.whitelisted_addresses.unwrap_or(serde_json::json!([])),
+                    ),
+                    None => (false, serde_json::json!([])),
                 }
             }
         };
@@ -2034,15 +2086,49 @@ impl SenseiguardRepository {
         rule_id: Uuid,
         wallet_address: &str,
     ) -> Result<u64, Error> {
-        let r = sqlx::query("DELETE FROM wallet_security_rules WHERE id = $1 AND wallet_address = $2")
-            .bind(rule_id)
-            .bind(wallet_address)
-            .execute(pool)
-            .await?;
+        let r =
+            sqlx::query("DELETE FROM wallet_security_rules WHERE id = $1 AND wallet_address = $2")
+                .bind(rule_id)
+                .bind(wallet_address)
+                .execute(pool)
+                .await?;
         Ok(r.rows_affected())
     }
 
     // ---- Activity Monitor: dApp connections ----
+    /// Upsert one wallet->dApp connection and bump `last_activity_at`.
+    pub async fn upsert_dapp_connection(
+        pool: &DbPool,
+        wallet_address: &str,
+        domain: &str,
+        dapp_name: &str,
+        description: Option<&str>,
+        tokens: Option<&str>,
+    ) -> Result<DappConnectionRow, Error> {
+        sqlx::query_as::<_, DappConnectionRow>(
+            r#"
+            INSERT INTO dapp_connections (
+                wallet_address, domain, dapp_name, description, tokens, connected_at, last_activity_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), NOW())
+            ON CONFLICT (wallet_address, domain) DO UPDATE SET
+                dapp_name = EXCLUDED.dapp_name,
+                description = COALESCE(EXCLUDED.description, dapp_connections.description),
+                tokens = COALESCE(EXCLUDED.tokens, dapp_connections.tokens),
+                last_activity_at = NOW(),
+                updated_at = NOW()
+            RETURNING wallet_address, domain, dapp_name, description, tokens, connected_at, last_activity_at
+            "#,
+        )
+        .bind(wallet_address)
+        .bind(domain)
+        .bind(dapp_name)
+        .bind(description)
+        .bind(tokens)
+        .fetch_one(pool)
+        .await
+    }
+
     /// List dApp connections for a user's wallets (for Activity Monitor "Connected dApps" tab).
     pub async fn list_dapp_connections_for_user(
         pool: &DbPool,

@@ -1,0 +1,80 @@
+# Senseifi Subscription Payment Contract
+
+This contract implements non-custodial recurring USDC billing for subscriptions.
+
+## What this contract does
+
+- Users register billing settings with `upsertBilling(subscriptionId, maxChargeAmount)`.
+- Users approve USDC spending for this contract (standard ERC20 approve).
+- A trusted relayer calls `chargeSubscription(...)` per billing cycle.
+- Contract emits:
+  - `AllowanceUpdated`
+  - `ChargeSubmitted`
+  - `ChargeConfirmed` or `ChargeFailed`
+
+`ChargeFailed` codes match backend expectations:
+- `insufficient_allowance`
+- `insufficient_balance`
+- `transfer_failed`
+- `user_revoked`
+
+## Folder structure
+
+- `src/SenseifiSubscriptionPayments.sol` - main contract
+- `script/DeploySenseifiSubscriptionPayments.s.sol` - Foundry deploy script
+- `foundry.toml` - Foundry config
+
+## Prerequisites
+
+- Install [Foundry](https://book.getfoundry.sh/getting-started/installation)
+- Set environment variables:
+
+```bash
+export PRIVATE_KEY=0x...
+export BASE_SEPOLIA_RPC_URL=https://sepolia.base.org
+export BASE_RPC_URL=https://mainnet.base.org
+export USDC_ADDRESS=0x...          # Base or Base Sepolia USDC
+export TREASURY_ADDRESS=0x...      # Senseifi treasury wallet
+export RELAYER_ADDRESS=0x...       # Relayer EOA address
+```
+
+## Deploy (Base Sepolia first)
+
+```bash
+cd contracts
+forge script script/DeploySenseifiSubscriptionPayments.s.sol:DeploySenseifiSubscriptionPayments \
+  --rpc-url base_sepolia \
+  --broadcast \
+  -vvvv
+```
+
+For Base mainnet:
+
+```bash
+forge script script/DeploySenseifiSubscriptionPayments.s.sol:DeploySenseifiSubscriptionPayments \
+  --rpc-url base \
+  --broadcast \
+  -vvvv
+```
+
+After deploy, copy deployed address into backend env:
+
+```bash
+ONCHAIN_PAYMENT_CONTRACT=0xYourDeployedContractAddress
+```
+
+## Backend env mapping
+
+Set these in backend `.env`:
+
+- `ONCHAIN_PAYMENT_CONTRACT` = deployed contract address
+- `ONCHAIN_USDC_CONTRACT` = same USDC token address used in deployment
+- `PAYMENTS_ONCHAIN_ENABLED=true`
+- `PAYMENTS_ONCHAIN_SHADOW_MODE=false` (set true for dry-run mode)
+
+## Notes
+
+- Amounts are token-native decimals (USDC = 6).
+- `subscriptionId` in contract is `bytes32`; backend should hash its subscription identifier before passing to relayer.
+- `chargeId` is the idempotency key (bytes32) to block duplicate charge execution.
+

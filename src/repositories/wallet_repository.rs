@@ -40,12 +40,11 @@ impl WalletRepository {
         pool: &DbPool,
         address: &str,
     ) -> Result<Option<Wallet>, Error> {
-        let wallet = sqlx::query_as::<_, Wallet>(
-            "SELECT * FROM wallets WHERE LOWER(address) = LOWER($1)",
-        )
-        .bind(address)
-        .fetch_optional(pool)
-        .await?;
+        let wallet =
+            sqlx::query_as::<_, Wallet>("SELECT * FROM wallets WHERE LOWER(address) = LOWER($1)")
+                .bind(address)
+                .fetch_optional(pool)
+                .await?;
 
         Ok(wallet)
     }
@@ -75,10 +74,10 @@ impl WalletRepository {
         sqlx::query(
             "UPDATE wallets SET user_id = $1, updated_at = NOW() WHERE LOWER(address) = LOWER($2)",
         )
-            .bind(user_id)
-            .bind(address)
-            .execute(pool)
-            .await?;
+        .bind(user_id)
+        .bind(address)
+        .execute(pool)
+        .await?;
         Ok(())
     }
 
@@ -114,11 +113,10 @@ impl WalletRepository {
         page: u32,
         per_page: u32,
     ) -> Result<(Vec<Wallet>, i64), Error> {
-        let total: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*)::bigint FROM wallets WHERE is_active = true",
-        )
-        .fetch_one(pool)
-        .await?;
+        let total: (i64,) =
+            sqlx::query_as("SELECT COUNT(*)::bigint FROM wallets WHERE is_active = true")
+                .fetch_one(pool)
+                .await?;
 
         let offset = (page.saturating_sub(1) as i64) * (per_page as i64);
         let limit = per_page as i64;

@@ -128,7 +128,10 @@ pub async fn get_domain_threat_feed(pool: &DbPool) -> Result<DomainThreatFeedRes
     malicious_domains.sort();
     malicious_domains.truncate(MAX_MALICIOUS_DOMAINS);
 
-    let mut trusted_domains = TRUSTED_DOMAINS.iter().map(|d| d.to_string()).collect::<Vec<_>>();
+    let mut trusted_domains = TRUSTED_DOMAINS
+        .iter()
+        .map(|d| d.to_string())
+        .collect::<Vec<_>>();
     trusted_domains.sort();
     trusted_domains.dedup();
 
@@ -160,7 +163,11 @@ pub async fn assess_domain(pool: &DbPool, target: &str) -> DomainIntelAssessment
 
     let malicious = feed
         .as_ref()
-        .map(|f| f.malicious_domains.iter().any(|d| is_same_or_subdomain(&domain, d)))
+        .map(|f| {
+            f.malicious_domains
+                .iter()
+                .any(|d| is_same_or_subdomain(&domain, d))
+        })
         .unwrap_or(false);
     if malicious {
         return DomainIntelAssessment {

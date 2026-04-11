@@ -5,32 +5,42 @@ use sqlx::Error;
 pub struct DashboardUserRepository;
 
 impl DashboardUserRepository {
-    pub async fn get_by_wallet(pool: &DbPool, wallet_address: &str) -> Result<Option<DashboardUser>, Error> {
+    pub async fn get_by_wallet(
+        pool: &DbPool,
+        wallet_address: &str,
+    ) -> Result<Option<DashboardUser>, Error> {
         let row = sqlx::query_as::<_, (String, String, i32)>(
             "SELECT user_id, display_name, user_number FROM dashboard_users WHERE LOWER(wallet_address) = LOWER($1)",
         )
         .bind(wallet_address)
         .fetch_optional(pool)
         .await?;
-        Ok(row.map(|(user_id, display_name, user_number)| DashboardUser {
-            user_id,
-            display_name,
-            user_number,
-        }))
+        Ok(
+            row.map(|(user_id, display_name, user_number)| DashboardUser {
+                user_id,
+                display_name,
+                user_number,
+            }),
+        )
     }
 
-    pub async fn get_by_user_id(pool: &DbPool, user_id: &str) -> Result<Option<DashboardUser>, Error> {
+    pub async fn get_by_user_id(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<Option<DashboardUser>, Error> {
         let row = sqlx::query_as::<_, (String, String, i32)>(
             "SELECT user_id, display_name, user_number FROM dashboard_users WHERE user_id = $1",
         )
         .bind(user_id)
         .fetch_optional(pool)
         .await?;
-        Ok(row.map(|(user_id, display_name, user_number)| DashboardUser {
-            user_id,
-            display_name,
-            user_number,
-        }))
+        Ok(
+            row.map(|(user_id, display_name, user_number)| DashboardUser {
+                user_id,
+                display_name,
+                user_number,
+            }),
+        )
     }
 
     pub async fn create(

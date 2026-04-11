@@ -31,7 +31,10 @@ impl WalletService {
 
         // Start monitoring (best-effort; do not fail connect if monitoring table missing/broken)
         if let Err(e) = Self::start_monitoring(pool, &wallet.address).await {
-            eprintln!("Warning: start_monitoring failed (wallet still connected): {}", e);
+            eprintln!(
+                "Warning: start_monitoring failed (wallet still connected): {}",
+                e
+            );
         }
 
         Ok(WalletResponse::from(wallet))

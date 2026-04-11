@@ -106,7 +106,10 @@ pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
         .route("/security-overview", get(security_overview))
-        .route("/community-reported-threats", get(community_reported_threats))
+        .route(
+            "/community-reported-threats",
+            get(community_reported_threats),
+        )
         .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/activity/feed", get(live_activity_feed))
         .route("/threat-intelligence", get(threat_intelligence_catalog))
@@ -118,15 +121,24 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/{address}/summary", get(dashboard_summary))
         .route("/{address}/security-status", get(security_status))
         .route("/{address}/security-score", get(security_status))
-        .route("/{address}/scan", post(run_full_scan).get(get_latest_scan_report))
+        .route(
+            "/{address}/scan",
+            post(run_full_scan).get(get_latest_scan_report),
+        )
         .route("/{address}/threats", get(list_threats))
         .route("/{address}/risky-tokens", get(list_risky_tokens))
         .route("/{address}/scans", get(list_scans))
         .route("/{address}/alerts/unread", get(list_unread_alerts))
         .route("/{address}/alerts", get(list_alerts))
-        .route("/{address}/activity", get(list_activity).post(ingest_activity))
+        .route(
+            "/{address}/activity",
+            get(list_activity).post(ingest_activity),
+        )
         .route("/{address}/approvals", get(list_approvals))
-        .route("/{address}/transaction-monitoring", get(list_transaction_monitoring))
+        .route(
+            "/{address}/transaction-monitoring",
+            get(list_transaction_monitoring),
+        )
         .route("/{address}/assets/sync", post(sync_wallet_indexed_tokens))
         .route("/{address}/assets", get(list_assets))
 }
@@ -156,7 +168,11 @@ async fn dashboard_overview(
     let user_id = match user_id {
         Some(id) => id,
         None => {
-            let addr = q.wallet_address.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let addr = q
+                .wallet_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
             match addr.filter(|a| is_valid_eth_address(a)) {
                 Some(address) => {
                     match WalletRepository::get_wallet_by_address(&pool, address).await {
@@ -166,8 +182,7 @@ async fn dashboard_overview(
                             } else {
                                 // Wallet connected but user_id null (e.g. legacy). Assign dashboard user.
                                 match dashboard_user_service::get_or_create_for_wallet(
-                                    &pool,
-                                    address,
+                                    &pool, address,
                                 )
                                 .await
                                 {
@@ -186,7 +201,11 @@ async fn dashboard_overview(
     };
     // When we resolved user_id from wallet_address, persist it on the wallet so it stays linked.
     if !user_id.is_empty() {
-        if let Some(addr) = q.wallet_address.as_deref().filter(|a| is_valid_eth_address(a)) {
+        if let Some(addr) = q
+            .wallet_address
+            .as_deref()
+            .filter(|a| is_valid_eth_address(a))
+        {
             let _ = WalletRepository::update_wallet_user_id(&pool, addr, &user_id).await;
         }
     }
@@ -211,13 +230,20 @@ async fn dashboard_overview(
                     match dashboard_user_service::get_or_create_for_wallet(&pool, &w.address).await
                     {
                         Ok(du) => {
-                            let _ =
-                                WalletRepository::update_wallet_user_id(&pool, &w.address, &du.user_id)
-                                    .await;
+                            let _ = WalletRepository::update_wallet_user_id(
+                                &pool,
+                                &w.address,
+                                &du.user_id,
+                            )
+                            .await;
                             du.user_id
                         }
                         Err(e) => {
-                            tracing::warn!("dashboard_overview: get_or_create_for_wallet failed for {}: {}", w.address, e);
+                            tracing::warn!(
+                                "dashboard_overview: get_or_create_for_wallet failed for {}: {}",
+                                w.address,
+                                e
+                            );
                             String::new()
                         }
                     }
@@ -236,7 +262,9 @@ async fn dashboard_overview(
         user_id
     };
     if user_id.is_empty() {
-        tracing::debug!("dashboard_overview: no user_id or wallet_address; overview will show 0 active wallets");
+        tracing::debug!(
+            "dashboard_overview: no user_id or wallet_address; overview will show 0 active wallets"
+        );
     }
     match SenseiguardService::get_dashboard_overview(&pool, &user_id, limit).await {
         Ok(overview) => Ok(Json(json!({
@@ -276,7 +304,9 @@ async fn security_overview(
     State(pool): State<DbPool>,
     Query(q): Query<SecurityOverviewQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let user_id = resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref()).await;
+    let user_id =
+        resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref())
+            .await;
     match SenseiguardService::get_security_overview(&pool, &user_id).await {
         Ok(data) => Ok(Json(json!({
             "success": true,
@@ -432,7 +462,11 @@ async fn resolve_user_id_for_dashboard(
                             if let Some(uid) = w.user_id.filter(|s| !s.is_empty()) {
                                 uid
                             } else {
-                                match dashboard_user_service::get_or_create_for_wallet(pool, address).await {
+                                match dashboard_user_service::get_or_create_for_wallet(
+                                    pool, address,
+                                )
+                                .await
+                                {
                                     Ok(du) => du.user_id,
                                     Err(_) => String::new(),
                                 }
@@ -446,7 +480,9 @@ async fn resolve_user_id_for_dashboard(
         }
     };
     let user_id = if user_id.is_empty()
-        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK").map(|s| s != "false").unwrap_or(true)
+        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK")
+            .map(|s| s != "false")
+            .unwrap_or(true)
     {
         match WalletRepository::get_all_active_wallets(pool).await {
             Ok(wallets) if !wallets.is_empty() => {
@@ -487,7 +523,11 @@ async fn activity_monitor_wallets(
     let user_id = match user_id {
         Some(id) => id,
         None => {
-            let addr = q.wallet_address.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let addr = q
+                .wallet_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
             match addr.filter(|a| is_valid_eth_address(a)) {
                 Some(address) => {
                     match WalletRepository::get_wallet_by_address(&pool, address).await {
@@ -500,7 +540,9 @@ async fn activity_monitor_wallets(
         }
     };
     let user_id = if user_id.is_empty()
-        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK").map(|s| s != "false").unwrap_or(true)
+        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK")
+            .map(|s| s != "false")
+            .unwrap_or(true)
     {
         match WalletRepository::get_all_active_wallets(&pool).await {
             Ok(wallets) if !wallets.is_empty() => wallets[0].user_id.clone().unwrap_or_default(),
@@ -520,7 +562,9 @@ async fn activity_monitor_wallets(
             eprintln!("activity_monitor_wallets: {}", e);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": "Failed to load activity monitor wallets" })),
+                Json(
+                    json!({ "success": false, "error": "Failed to load activity monitor wallets" }),
+                ),
             ))
         }
     }
@@ -540,7 +584,11 @@ async fn activity_monitor_dapps(
     let user_id = match user_id {
         Some(id) => id,
         None => {
-            let addr = q.wallet_address.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let addr = q
+                .wallet_address
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
             match addr.filter(|a| is_valid_eth_address(a)) {
                 Some(address) => {
                     match WalletRepository::get_wallet_by_address(&pool, address).await {
@@ -553,7 +601,9 @@ async fn activity_monitor_dapps(
         }
     };
     let user_id = if user_id.is_empty()
-        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK").map(|s| s != "false").unwrap_or(true)
+        && std::env::var("OVERVIEW_SINGLE_WALLET_FALLBACK")
+            .map(|s| s != "false")
+            .unwrap_or(true)
     {
         match WalletRepository::get_all_active_wallets(&pool).await {
             Ok(wallets) if !wallets.is_empty() => wallets[0].user_id.clone().unwrap_or_default(),
@@ -585,7 +635,11 @@ async fn threat_intelligence_catalog(
     State(pool): State<DbPool>,
     Query(q): Query<ThreatIntelligenceQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let user_id = q.user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let user_id = q
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     match SenseiguardRepository::list_threats_for_dashboard(&pool, user_id, limit).await {
         Ok(rows) => {
@@ -717,34 +771,38 @@ async fn risk_profile(
     };
     let wallet_id = wallet.id;
 
-    let last_score = if let Ok(Some(s)) = SenseiguardRepository::get_latest_scan(&pool, wallet_id).await {
-        s.score
-    } else {
-        let row: Option<(i32,)> = sqlx::query_as(
-            "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
-        )
-        .bind(wallet_id)
-        .fetch_optional(&pool)
-        .await
-        .ok()
-        .flatten();
-        row.map(|r| r.0).unwrap_or(0)
-    };
+    let last_score =
+        if let Ok(Some(s)) = SenseiguardRepository::get_latest_scan(&pool, wallet_id).await {
+            s.score
+        } else {
+            let row: Option<(i32,)> = sqlx::query_as(
+                "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
+            )
+            .bind(wallet_id)
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten();
+            row.map(|r| r.0).unwrap_or(0)
+        };
 
-    let approval_count = SenseiguardRepository::count_approvals(&pool, wallet_id).await.unwrap_or(0);
-    let cached_contract_risks: Vec<serde_json::Value> = SenseiguardRepository::list_contract_scans_for_wallet(&pool, &address, 20)
+    let approval_count = SenseiguardRepository::count_approvals(&pool, wallet_id)
         .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|s| {
-            json!({
-                "contract_address": s.contract_address,
-                "trust_score": s.trust_score,
-                "critical_risk_flags": s.critical_risk_flags,
-                "scanned_at": s.scanned_at
+        .unwrap_or(0);
+    let cached_contract_risks: Vec<serde_json::Value> =
+        SenseiguardRepository::list_contract_scans_for_wallet(&pool, &address, 20)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| {
+                json!({
+                    "contract_address": s.contract_address,
+                    "trust_score": s.trust_score,
+                    "critical_risk_flags": s.critical_risk_flags,
+                    "scanned_at": s.scanned_at
+                })
             })
-        })
-        .collect();
+            .collect();
 
     let wallet_state_risk = last_score;
 
@@ -838,7 +896,9 @@ async fn get_latest_scan_report(
         }))),
         Ok(None) => Err((
             StatusCode::NOT_FOUND,
-            Json(json!({ "success": false, "error": "No scan found for this wallet. Run a full scan first." })),
+            Json(
+                json!({ "success": false, "error": "No scan found for this wallet. Run a full scan first." }),
+            ),
         )),
         Err(sqlx::Error::RowNotFound) => Err((
             StatusCode::NOT_FOUND,

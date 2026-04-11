@@ -3,7 +3,7 @@
 use crate::clients::etherscan;
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    ContractScan, ScanDetailsPayload, ScanContractResponse, ScanTrend,
+    ContractScan, ScanContractResponse, ScanDetailsPayload, ScanTrend,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::services::ai_insight_service::AiInsightService;
@@ -33,27 +33,37 @@ impl ScanService {
         } else {
             tokens_controlled.join(", ")
         };
-        let abi_source = if analysis.abi_from_etherscan { "etherscan" } else { "stub" };
+        let abi_source = if analysis.abi_from_etherscan {
+            "etherscan"
+        } else {
+            "stub"
+        };
 
         // 2. Contract creation (for age risk and owner count)
-        let creation = etherscan::fetch_contract_creation(contract_address, chain_id).await.ok().flatten();
-        let contract_age_risk = creation.as_ref().map(|c| {
-            let now_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let age_secs = now_secs.saturating_sub(c.timestamp);
-            let age_days = age_secs / 86400;
-            if age_days < 7 {
-                80u8
-            } else if age_days < 30 {
-                50
-            } else if age_days < 365 {
-                30
-            } else {
-                10
-            }
-        }).unwrap_or(30);
+        let creation = etherscan::fetch_contract_creation(contract_address, chain_id)
+            .await
+            .ok()
+            .flatten();
+        let contract_age_risk = creation
+            .as_ref()
+            .map(|c| {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let age_secs = now_secs.saturating_sub(c.timestamp);
+                let age_days = age_secs / 86400;
+                if age_days < 7 {
+                    80u8
+                } else if age_days < 30 {
+                    50
+                } else if age_days < 365 {
+                    30
+                } else {
+                    10
+                }
+            })
+            .unwrap_or(30);
         let owner_admin_count = creation.as_ref().map(|_| 1i32).unwrap_or(1);
 
         // 3. Simulation (Alchemy when RPC is Alchemy; else stub)
@@ -62,17 +72,18 @@ impl ScanService {
             &tokens_controlled,
             &dangerous_functions,
             chain_id,
-        ).await;
+        )
+        .await;
         let sim_with_fns = simulation;
 
         // 4. Reputation (uses pool for scam_reports)
         let reputation = ReputationService::get_reputation(pool, contract_address).await;
 
         // 5. Trend from DB
-        let (scans_today, wallets_affected) = SenseiguardRepository::get_contract_scan_trend(
-            pool,
-            contract_address,
-        ).await.unwrap_or((0, 0));
+        let (scans_today, wallets_affected) =
+            SenseiguardRepository::get_contract_scan_trend(pool, contract_address)
+                .await
+                .unwrap_or((0, 0));
         let risk_trend = if scans_today > 10 && wallets_affected > 5 {
             "increasing"
         } else if scans_today > 0 {
@@ -88,7 +99,13 @@ impl ScanService {
 
         // 6. User-aware anomaly: from DB (how often this wallet scanned this contract)
         let user_anomaly_score = if let Some(wallet) = for_address {
-            match SenseiguardRepository::count_scans_for_wallet_contract(pool, wallet, contract_address).await {
+            match SenseiguardRepository::count_scans_for_wallet_contract(
+                pool,
+                wallet,
+                contract_address,
+            )
+            .await
+            {
                 Ok(0) => 0.5,
                 Ok(_) => 0.2,
                 _ => 0.0,
@@ -98,7 +115,11 @@ impl ScanService {
         };
 
         // 7. Token control scope risk: from actual tokens_controlled length
-        let token_control_risk = if tokens_controlled.len() >= 2 { 40u8 } else { 20u8 };
+        let token_control_risk = if tokens_controlled.len() >= 2 {
+            40u8
+        } else {
+            20u8
+        };
 
         // 8. Scoring
         let (trust_score, risk_breakdown) = ScoringEngine::compute(
@@ -119,10 +140,13 @@ impl ScanService {
             &token_controlled_str,
         );
 
-        let critical_risk_flags = [sim_with_fns.drains_full_balance == Some(true), reputation.reported_scam == Some(true)]
-            .into_iter()
-            .filter(|&b| b)
-            .count() as i32
+        let critical_risk_flags = [
+            sim_with_fns.drains_full_balance == Some(true),
+            reputation.reported_scam == Some(true),
+        ]
+        .into_iter()
+        .filter(|&b| b)
+        .count() as i32
             + owner_privileges.withdraw_liquidity.unwrap_or(false) as i32;
 
         let detected_standard_display = if analysis.detected_standards.is_empty() {
@@ -146,7 +170,9 @@ impl ScanService {
         let details_json = serde_json::to_value(&details).ok();
 
         let effective_chain_id = chain_id.or_else(|| {
-            std::env::var("ETHERSCAN_CHAIN_ID").ok().and_then(|s| s.parse::<u64>().ok())
+            std::env::var("ETHERSCAN_CHAIN_ID")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
         });
         let chain_id_db = effective_chain_id.map(|c| c as i64);
 

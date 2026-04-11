@@ -1,26 +1,25 @@
 use axum::Router;
+use http::header::{HeaderName, HeaderValue, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
 use std::net::SocketAddr;
 use std::time::Duration;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
-use http::header::{HeaderName, HeaderValue, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
 
 mod clients;
-mod routes;
-mod services;
+mod db;
 mod models;
 mod repositories;
-mod db;
+mod routes;
+mod services;
 
 #[tokio::main]
 async fn main() {
     dotenv::dotenv().ok();
     tracing_subscriber::fmt::init();
 
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
     let pool = db::create_pool(&database_url)
         .await
@@ -33,9 +32,18 @@ async fn main() {
     println!("Database connected and migrations completed");
 
     // Log scanner env so you can confirm keys are loaded (no values logged)
-    let has_etherscan = std::env::var("ETHERSCAN_API_KEY").ok().filter(|s| !s.is_empty()).is_some();
-    let has_rpc = std::env::var("ETHEREUM_RPC_URL").ok().filter(|s| !s.is_empty()).is_some();
-    let has_moralis = std::env::var("MORALIS_API_KEY").ok().filter(|s| !s.is_empty()).is_some();
+    let has_etherscan = std::env::var("ETHERSCAN_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some();
+    let has_rpc = std::env::var("ETHEREUM_RPC_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some();
+    let has_moralis = std::env::var("MORALIS_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .is_some();
     tracing::info!(
         "Contract scanner env: ETHERSCAN_API_KEY={}, ETHEREUM_RPC_URL={}; token sync: MORALIS_API_KEY={}",
         has_etherscan,
@@ -135,7 +143,10 @@ async fn main() {
     println!("Listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await
-        .unwrap();
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .unwrap();
 }

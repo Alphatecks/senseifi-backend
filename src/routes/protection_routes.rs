@@ -10,6 +10,7 @@ use axum::{
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
+use url::Url;
 
 use crate::db::DbPool;
 use crate::models::senseiguard::{
@@ -21,11 +22,11 @@ use crate::models::senseiguard::{
 use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
+use crate::services::domain_intel_service;
 use crate::services::protection_engine::{
     analyze_tx_and_respond, build_dapp_check_response, evaluate_approval, evaluate_dapp_connection,
     run_monitor_cycle,
 };
-use crate::services::domain_intel_service;
 use axum::extract::Path;
 use uuid::Uuid;
 
@@ -65,6 +66,34 @@ fn bad_address() -> (StatusCode, Json<serde_json::Value>) {
     )
 }
 
+fn normalize_dapp_domain(target: &str) -> Option<String> {
+    let raw = target.trim().to_lowercase();
+    if raw.is_empty() {
+        return None;
+    }
+    let with_scheme = if raw.starts_with("http://") || raw.starts_with("https://") {
+        raw
+    } else {
+        format!("https://{}", raw)
+    };
+    Url::parse(&with_scheme)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()))
+}
+
+fn derive_dapp_name(domain: &str) -> String {
+    let host = domain
+        .trim()
+        .trim_start_matches("www.")
+        .trim_start_matches("app.");
+    let root = host.split('.').next().unwrap_or("dapp");
+    let mut chars = root.chars();
+    match chars.next() {
+        Some(first) => format!("{}{}", first.to_ascii_uppercase(), chars.as_str()),
+        None => "Dapp".to_string(),
+    }
+}
+
 pub fn protection_routes() -> Router<DbPool> {
     Router::new()
         .route("/settings", get(get_settings).put(update_settings))
@@ -82,9 +111,17 @@ pub fn protection_routes() -> Router<DbPool> {
         .route("/address-safety", get(address_safety))
         .route("/simulate-tx", post(simulate_tx))
         .route("/block-malicious", post(block_malicious))
-        .route("/block-contract", post(block_contract).delete(unblock_contract))
+        .route(
+            "/block-contract",
+            post(block_contract).delete(unblock_contract),
+        )
         .route("/blocked", get(list_blocked))
-        .route("/watchlist", post(add_watchlist).delete(remove_from_watchlist).get(list_watchlist))
+        .route(
+            "/watchlist",
+            post(add_watchlist)
+                .delete(remove_from_watchlist)
+                .get(list_watchlist),
+        )
         .route("/report", post(report_scam))
         .route("/revoke-approval", post(revoke_approval))
         .route("/scan-history", get(scan_history))
@@ -153,7 +190,9 @@ fn extension_error(status: StatusCode, message: &str) -> (StatusCode, Json<Value
     )
 }
 
-fn extract_tx_fields(req: &ExtensionAnalyzeRequest) -> (Option<String>, Option<String>, Option<String>) {
+fn extract_tx_fields(
+    req: &ExtensionAnalyzeRequest,
+) -> (Option<String>, Option<String>, Option<String>) {
     let mut to = req.to.clone();
     let mut value = req.value.clone();
     let mut data = req.data.clone();
@@ -310,7 +349,8 @@ async fn update_settings(
             req.auto_security_scan.unwrap_or(s.auto_security_scan),
             req.high_risk_tx_warnings.unwrap_or(s.high_risk_tx_warnings),
             req.new_approval_alerts.unwrap_or(s.new_approval_alerts),
-            req.new_dapp_connection_alerts.unwrap_or(s.new_dapp_connection_alerts),
+            req.new_dapp_connection_alerts
+                .unwrap_or(s.new_dapp_connection_alerts),
             req.auto_block_high_risk.unwrap_or(s.auto_block_high_risk),
         ),
         None => (
@@ -321,12 +361,18 @@ async fn update_settings(
             req.auto_block_high_risk.unwrap_or(false),
         ),
     };
-    let emergency_lock = req.emergency_lock.or_else(|| existing.as_ref().map(|s| s.emergency_lock));
+    let emergency_lock = req
+        .emergency_lock
+        .or_else(|| existing.as_ref().map(|s| s.emergency_lock));
     let whitelisted_addresses = req
         .whitelisted_addresses
         .as_ref()
         .map(|v| serde_json::to_value(v).unwrap_or(serde_json::json!([])))
-        .or_else(|| existing.as_ref().and_then(|s| s.whitelisted_addresses.clone()));
+        .or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|s| s.whitelisted_addresses.clone())
+        });
     match SenseiguardRepository::upsert_protection_settings_full(
         &pool,
         &req.wallet_address,
@@ -381,7 +427,11 @@ async fn transaction_analyze(
         )
     })?;
 
-    if req.source.as_deref().is_some_and(|s| s != "senseiguard_extension") {
+    if req
+        .source
+        .as_deref()
+        .is_some_and(|s| s != "senseiguard_extension")
+    {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid source. Expected senseiguard_extension",
@@ -410,12 +460,10 @@ async fn transaction_analyze(
         }
     }
 
-    let wallet_address = req.wallet_address.clone().ok_or_else(|| {
-        extension_error(
-            StatusCode::BAD_REQUEST,
-            "wallet_address is required",
-        )
-    })?;
+    let wallet_address = req
+        .wallet_address
+        .clone()
+        .ok_or_else(|| extension_error(StatusCode::BAD_REQUEST, "wallet_address is required"))?;
 
     if !is_valid_eth_address(&wallet_address) {
         return Err(extension_error(
@@ -465,7 +513,9 @@ async fn transaction_analyze(
             let mut site_safety: Option<String> = None;
             if let Some(domain) = req.domain.as_deref() {
                 if !domain.trim().is_empty() {
-                    if let Ok(dapp_eval) = evaluate_dapp_connection(&pool, &wallet_address, domain, None).await {
+                    if let Ok(dapp_eval) =
+                        evaluate_dapp_connection(&pool, &wallet_address, domain, None).await
+                    {
                         behavioral_risk = dapp_eval.risk_score.clamp(0, 50);
                         site_safety = Some(dapp_eval.safety.clone());
                         website_scan_payload = dapp_eval
@@ -476,7 +526,9 @@ async fn transaction_analyze(
                 }
             } else if let Some(url) = req.url.as_deref() {
                 if !url.trim().is_empty() {
-                    if let Ok(dapp_eval) = evaluate_dapp_connection(&pool, &wallet_address, url, None).await {
+                    if let Ok(dapp_eval) =
+                        evaluate_dapp_connection(&pool, &wallet_address, url, None).await
+                    {
                         behavioral_risk = dapp_eval.risk_score.clamp(0, 50);
                         site_safety = Some(dapp_eval.safety.clone());
                         website_scan_payload = dapp_eval
@@ -558,22 +610,27 @@ async fn dapp_connection_check(
     if !is_valid_eth_address(&req.wallet_address) {
         return Err(bad_address());
     }
-    let settings = match SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            let out = build_dapp_check_response(true, None);
-            return Ok(Json(serde_json::to_value(&out).unwrap_or(json!({ "skipped": true }))));
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": e.to_string() })),
-            ));
-        }
-    };
+    let settings =
+        match SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                let out = build_dapp_check_response(true, None);
+                return Ok(Json(
+                    serde_json::to_value(&out).unwrap_or(json!({ "skipped": true })),
+                ));
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "success": false, "error": e.to_string() })),
+                ));
+            }
+        };
     if !settings.new_dapp_connection_alerts {
         let out = build_dapp_check_response(true, None);
-        return Ok(Json(serde_json::to_value(&out).unwrap_or(json!({ "skipped": true }))));
+        return Ok(Json(
+            serde_json::to_value(&out).unwrap_or(json!({ "skipped": true })),
+        ));
     }
     let target = req
         .url
@@ -589,6 +646,23 @@ async fn dapp_connection_check(
 
     match evaluate_dapp_connection(&pool, &req.wallet_address, target, req.max_pages).await {
         Ok(r) => {
+            if let Some(domain) = normalize_dapp_domain(target) {
+                let dapp_name = derive_dapp_name(&domain);
+                let description = r
+                    .website_scan
+                    .as_ref()
+                    .map(|scan| format!("Connection checked via SenseiGuard (safety: {}).", scan.safety))
+                    .unwrap_or_else(|| "Connection checked via SenseiGuard.".to_string());
+                let _ = SenseiguardRepository::upsert_dapp_connection(
+                    &pool,
+                    &req.wallet_address,
+                    &domain,
+                    &dapp_name,
+                    Some(&description),
+                    None,
+                )
+                .await;
+            }
             let out = build_dapp_check_response(false, Some(r));
             Ok(Json(serde_json::to_value(&out).unwrap_or(json!({}))))
         }
@@ -622,7 +696,9 @@ async fn monitor_run(
         return Err(bad_address());
     }
     match run_monitor_cycle(&pool, &req.wallet_address).await {
-        Ok(()) => Ok(Json(json!({ "success": true, "message": "Monitor cycle completed" }))),
+        Ok(()) => Ok(Json(
+            json!({ "success": true, "message": "Monitor cycle completed" }),
+        )),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e })),
@@ -693,32 +769,35 @@ async fn security_alerts(
     }
     let limit = q.limit.unwrap_or(20).min(100) as i64;
 
-    let approval_alerts = match SenseiguardRepository::list_approval_alerts(&pool, &q.wallet_address, limit).await {
-        Ok(list) => list
-            .into_iter()
-            .map(|a| {
-                json!({
-                    "id": a.id,
-                    "type": "high_risk_approval",
-                    "title": "High-Risk Approval Detected",
-                    "contract": a.spender_address,
-                    "contract_truncated": truncate_address(&a.spender_address),
-                    "token_address": a.token_address,
-                    "risk_score": a.risk_score,
-                    "created_at": a.created_at,
+    let approval_alerts =
+        match SenseiguardRepository::list_approval_alerts(&pool, &q.wallet_address, limit).await {
+            Ok(list) => list
+                .into_iter()
+                .map(|a| {
+                    json!({
+                        "id": a.id,
+                        "type": "high_risk_approval",
+                        "title": "High-Risk Approval Detected",
+                        "contract": a.spender_address,
+                        "contract_truncated": truncate_address(&a.spender_address),
+                        "token_address": a.token_address,
+                        "risk_score": a.risk_score,
+                        "created_at": a.created_at,
+                    })
                 })
-            })
-            .collect::<Vec<_>>(),
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": e.to_string() })),
-            ));
-        }
-    };
+                .collect::<Vec<_>>(),
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "success": false, "error": e.to_string() })),
+                ));
+            }
+        };
 
     let mut general: Vec<serde_json::Value> = Vec::new();
-    if let Ok(Some(wallet)) = WalletRepository::get_wallet_by_address(&pool, &q.wallet_address).await {
+    if let Ok(Some(wallet)) =
+        WalletRepository::get_wallet_by_address(&pool, &q.wallet_address).await
+    {
         if let Ok(alerts) = SenseiguardRepository::list_alerts(&pool, wallet.id, limit).await {
             for a in alerts {
                 general.push(json!({
@@ -792,11 +871,21 @@ async fn get_threat_feed(
     )
     .fetch_all(&pool)
     .await
-    .map_err(|_| extension_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build threat feed"))?;
+    .map_err(|_| {
+        extension_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to build threat feed",
+        )
+    })?;
 
     let domain_feed = domain_intel_service::get_domain_threat_feed(&pool)
         .await
-        .map_err(|_| extension_error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to build threat feed"))?;
+        .map_err(|_| {
+            extension_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to build threat feed",
+            )
+        })?;
 
     Ok(Json(json!({
         "malicious_contracts": malicious_contracts,
@@ -824,7 +913,10 @@ async fn ingest_telemetry_events(
     axum::Json(req): axum::Json<TelemetryBatchRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if req.events.is_empty() {
-        return Err(extension_error(StatusCode::BAD_REQUEST, "events must contain at least one item"));
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "events must contain at least one item",
+        ));
     }
 
     let allowed = [
@@ -838,14 +930,23 @@ async fn ingest_telemetry_events(
 
     for ev in &req.events {
         if !allowed.contains(&ev.event_type.as_str()) {
-            return Err(extension_error(StatusCode::BAD_REQUEST, "events contains unsupported type"));
+            return Err(extension_error(
+                StatusCode::BAD_REQUEST,
+                "events contains unsupported type",
+            ));
         }
         if chrono::DateTime::parse_from_rfc3339(&ev.at).is_err() {
-            return Err(extension_error(StatusCode::BAD_REQUEST, "events.at must be RFC3339 date-time"));
+            return Err(extension_error(
+                StatusCode::BAD_REQUEST,
+                "events.at must be RFC3339 date-time",
+            ));
         }
         if let Some(s) = ev.risk_score {
             if !(0..=100).contains(&s) {
-                return Err(extension_error(StatusCode::BAD_REQUEST, "events.riskScore must be between 0 and 100"));
+                return Err(extension_error(
+                    StatusCode::BAD_REQUEST,
+                    "events.riskScore must be between 0 and 100",
+                ));
             }
         }
     }
@@ -903,7 +1004,7 @@ fn truncate_address(addr: &str) -> String {
     if addr.len() <= 14 {
         return addr.to_string();
     }
-    format!("{}...{}", &addr[..6], &addr[addr.len()-4..])
+    format!("{}...{}", &addr[..6], &addr[addr.len() - 4..])
 }
 
 fn risk_level_from_score(score: i32) -> &'static str {
@@ -924,20 +1025,29 @@ async fn address_safety(
         return Err(bad_address());
     }
 
-    let addresses = match SenseiguardRepository::list_relevant_addresses_for_wallet(&pool, &q.wallet_address).await {
-        Ok(a) => a,
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": e.to_string() })),
-            ));
-        }
-    };
+    let addresses =
+        match SenseiguardRepository::list_relevant_addresses_for_wallet(&pool, &q.wallet_address)
+            .await
+        {
+            Ok(a) => a,
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "success": false, "error": e.to_string() })),
+                ));
+            }
+        };
 
     let mut results: Vec<serde_json::Value> = Vec::new();
     for addr in addresses {
-        let trust = SenseiguardRepository::get_latest_trust_score(&pool, &addr).await.ok().flatten().unwrap_or(50);
-        let scam_count: i64 = SenseiguardRepository::count_scam_reports(&pool, &addr).await.unwrap_or(0);
+        let trust = SenseiguardRepository::get_latest_trust_score(&pool, &addr)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(50);
+        let scam_count: i64 = SenseiguardRepository::count_scam_reports(&pool, &addr)
+            .await
+            .unwrap_or(0);
         let safety_score = (trust - (scam_count * 15) as i32).clamp(0, 100);
         results.push(json!({
             "address": addr,
@@ -946,7 +1056,12 @@ async fn address_safety(
             "risk_level": risk_level_from_score(safety_score),
         }));
     }
-    results.sort_by(|a, b| b.get("safety_score").and_then(|v| v.as_i64()).unwrap_or(0).cmp(&a.get("safety_score").and_then(|v| v.as_i64()).unwrap_or(0)));
+    results.sort_by(|a, b| {
+        b.get("safety_score")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            .cmp(&a.get("safety_score").and_then(|v| v.as_i64()).unwrap_or(0))
+    });
 
     Ok(Json(json!({ "success": true, "data": results })))
 }
@@ -1076,7 +1191,12 @@ async fn emergency_lock(
     let whitelist = req
         .whitelisted_addresses
         .map(|v| serde_json::to_value(v).unwrap_or(serde_json::json!([])))
-        .unwrap_or_else(|| existing.as_ref().and_then(|s| s.whitelisted_addresses.clone()).unwrap_or(serde_json::json!([])));
+        .unwrap_or_else(|| {
+            existing
+                .as_ref()
+                .and_then(|s| s.whitelisted_addresses.clone())
+                .unwrap_or(serde_json::json!([]))
+        });
     match SenseiguardRepository::upsert_protection_settings_full(
         &pool,
         &req.wallet_address,
@@ -1130,7 +1250,11 @@ async fn emergency_freeze(
         ),
         None => (true, true, true, true, false),
     };
-    let auto_block = req.freeze || existing.as_ref().map(|s| s.auto_block_high_risk).unwrap_or(false);
+    let auto_block = req.freeze
+        || existing
+            .as_ref()
+            .map(|s| s.auto_block_high_risk)
+            .unwrap_or(false);
     let whitelist = existing
         .as_ref()
         .and_then(|s| s.whitelisted_addresses.clone())
@@ -1187,7 +1311,9 @@ async fn block_malicious(
     if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
         return Err(bad_address());
     }
-    match SenseiguardRepository::block_contract(&pool, &req.wallet_address, &req.contract_address).await {
+    match SenseiguardRepository::block_contract(&pool, &req.wallet_address, &req.contract_address)
+        .await
+    {
         Ok(record) => Ok(Json(json!({
             "success": true,
             "data": { "id": record.id, "wallet_address": record.wallet_address, "contract_address": record.contract_address }
@@ -1206,7 +1332,9 @@ async fn block_contract(
     if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
         return Err(bad_address());
     }
-    match SenseiguardRepository::block_contract(&pool, &req.wallet_address, &req.contract_address).await {
+    match SenseiguardRepository::block_contract(&pool, &req.wallet_address, &req.contract_address)
+        .await
+    {
         Ok(record) => Ok(Json(json!({
             "success": true,
             "data": { "id": record.id, "wallet_address": record.wallet_address, "contract_address": record.contract_address }
@@ -1225,7 +1353,9 @@ async fn unblock_contract(
     if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
         return Err(bad_address());
     }
-    match SenseiguardRepository::unblock_contract(&pool, &req.wallet_address, &req.contract_address).await {
+    match SenseiguardRepository::unblock_contract(&pool, &req.wallet_address, &req.contract_address)
+        .await
+    {
         Ok(n) => Ok(Json(json!({ "success": true, "removed": n }))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1257,7 +1387,9 @@ async fn add_watchlist(
     if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
         return Err(bad_address());
     }
-    match SenseiguardRepository::add_to_watchlist(&pool, &req.wallet_address, &req.contract_address).await {
+    match SenseiguardRepository::add_to_watchlist(&pool, &req.wallet_address, &req.contract_address)
+        .await
+    {
         Ok(record) => Ok(Json(json!({
             "success": true,
             "data": { "id": record.id, "wallet_address": record.wallet_address, "contract_address": record.contract_address }
@@ -1276,7 +1408,13 @@ async fn remove_from_watchlist(
     if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
         return Err(bad_address());
     }
-    match SenseiguardRepository::remove_from_watchlist(&pool, &req.wallet_address, &req.contract_address).await {
+    match SenseiguardRepository::remove_from_watchlist(
+        &pool,
+        &req.wallet_address,
+        &req.contract_address,
+    )
+    .await
+    {
         Ok(n) => Ok(Json(json!({ "success": true, "removed": n }))),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,

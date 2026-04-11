@@ -9,7 +9,10 @@ fn base_url() -> String {
     let url = std::env::var("ETHERSCAN_BASE_URL").unwrap_or_else(|_| ETHERSCAN_V2_BASE.to_string());
     // If env is set to legacy V1 URL, use V2 so we don't get deprecation errors
     if url.trim_end_matches('/').ends_with("/api") && !url.contains("/v2") {
-        tracing::info!("ETHERSCAN_BASE_URL looks like V1 ({}); using V2 endpoint", url);
+        tracing::info!(
+            "ETHERSCAN_BASE_URL looks like V1 ({}); using V2 endpoint",
+            url
+        );
         return ETHERSCAN_V2_BASE.to_string();
     }
     url
@@ -20,7 +23,9 @@ fn chain_id() -> String {
 }
 
 fn api_key() -> Option<String> {
-    std::env::var("ETHERSCAN_API_KEY").ok().filter(|s| !s.is_empty())
+    std::env::var("ETHERSCAN_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,7 +72,10 @@ fn source_code_non_empty(v: &serde_json::Value) -> bool {
 /// Returns (abi_json_string, verified, contract_name). Uses getabi if API key set; else tries getsourcecode for ABI.
 /// contract_name is only set when getsourcecode is used (verified contracts); getabi does not return name.
 /// request_chain_id: if Some, use for this request; else use ETHERSCAN_CHAIN_ID env or 1.
-pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>) -> Result<(String, bool, Option<String>), String> {
+pub async fn fetch_abi_and_verified(
+    address: &str,
+    request_chain_id: Option<u64>,
+) -> Result<(String, bool, Option<String>), String> {
     let key = api_key();
     let url = base_url();
     if key.is_some() {
@@ -85,7 +93,11 @@ pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>
         .map(|n| n.to_string())
         .unwrap_or_else(chain_id);
     if key.is_some() {
-        tracing::info!("Etherscan getabi request for contract {} (chainid={})", address, cid);
+        tracing::info!(
+            "Etherscan getabi request for contract {} (chainid={})",
+            address,
+            cid
+        );
         let mut params = vec![
             ("chainid", cid.as_str()),
             ("module", "contract"),
@@ -95,15 +107,10 @@ pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>
         if let Some(k) = &key {
             params.push(("apikey", k.as_str()));
         }
-        let res = client
-            .get(&url)
-            .query(&params)
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::error!("Etherscan getabi request failed: {}", e);
-                e.to_string()
-            })?;
+        let res = client.get(&url).query(&params).send().await.map_err(|e| {
+            tracing::error!("Etherscan getabi request failed: {}", e);
+            e.to_string()
+        })?;
         let _status = res.status();
         let body: EtherscanAbiResponse = res.json().await.map_err(|e| e.to_string())?;
         if body.status == "1" && body.result.trim_start().starts_with('[') {
@@ -111,19 +118,32 @@ pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>
             return Ok((body.result, true, None)); // getabi does not return contract name
         }
         if body.message == "NOTOK" && body.result.contains("Contract source code not verified") {
-            tracing::info!("Etherscan: contract {} not verified; using empty ABI (stub data)", address);
+            tracing::info!(
+                "Etherscan: contract {} not verified; using empty ABI (stub data)",
+                address
+            );
             return Ok((String::new(), false, None));
         }
         // Log why getabi didn't succeed so we can debug NOTOK / wrong chain / rate limit
         let result_preview = body.result.chars().take(200).collect::<String>();
-        tracing::warn!("Etherscan getabi did not return ABI for {}: status={} message={} result_preview={:?}", address, body.status, body.message, result_preview);
+        tracing::warn!(
+            "Etherscan getabi did not return ABI for {}: status={} message={} result_preview={:?}",
+            address,
+            body.status,
+            body.message,
+            result_preview
+        );
     }
 
     // Fallback: getsourcecode (returns ABI + source; verified = SourceCode non-empty). V2 requires chainid.
     let cid2 = request_chain_id
         .map(|n| n.to_string())
         .unwrap_or_else(chain_id);
-    tracing::info!("Etherscan getsourcecode request for contract {} (chainid={})", address, cid2);
+    tracing::info!(
+        "Etherscan getsourcecode request for contract {} (chainid={})",
+        address,
+        cid2
+    );
     let mut params = vec![
         ("chainid", cid2.as_str()),
         ("module", "contract"),
@@ -133,26 +153,28 @@ pub async fn fetch_abi_and_verified(address: &str, request_chain_id: Option<u64>
     if let Some(k) = &key {
         params.push(("apikey", k.as_str()));
     }
-    let res = client
-        .get(&url)
-        .query(&params)
-        .send()
-        .await
-        .map_err(|e| {
-            tracing::error!("Etherscan getsourcecode request failed: {}", e);
-            e.to_string()
-        })?;
+    let res = client.get(&url).query(&params).send().await.map_err(|e| {
+        tracing::error!("Etherscan getsourcecode request failed: {}", e);
+        e.to_string()
+    })?;
     let body: EtherscanSourceResponse = res.json().await.map_err(|e| {
-        tracing::error!("Etherscan getsourcecode decode error: {} (response may have unexpected shape)", e);
+        tracing::error!(
+            "Etherscan getsourcecode decode error: {} (response may have unexpected shape)",
+            e
+        );
         e.to_string()
     })?;
     if body.status != "1" {
-        let reason = body.result.as_ref().and_then(|r| {
-            r.as_str()
-                .map(String::from)
-                .or_else(|| r.get("message").and_then(|m| m.as_str()).map(String::from))
-                .or_else(|| Some(r.to_string()))
-        }).unwrap_or_else(|| body.message.clone());
+        let reason = body
+            .result
+            .as_ref()
+            .and_then(|r| {
+                r.as_str()
+                    .map(String::from)
+                    .or_else(|| r.get("message").and_then(|m| m.as_str()).map(String::from))
+                    .or_else(|| Some(r.to_string()))
+            })
+            .unwrap_or_else(|| body.message.clone());
         tracing::warn!("Etherscan getsourcecode NOTOK for {}: {} (check ETHERSCAN_BASE_URL if this is a non-Ethereum contract)", address, reason);
         return Err(reason);
     }
@@ -353,7 +375,8 @@ pub async fn fetch_wallet_first_activity(
             }));
         }
     }
-    if let Some((ts, hash, block)) = fetch_first_tx_like(address, chain_id_u, "txlistinternal").await?
+    if let Some((ts, hash, block)) =
+        fetch_first_tx_like(address, chain_id_u, "txlistinternal").await?
     {
         if ts > 0 {
             return Ok(Some(WalletFirstActivity {

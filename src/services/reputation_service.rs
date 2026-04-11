@@ -9,10 +9,7 @@ pub struct ReputationService;
 impl ReputationService {
     /// Aggregate reputation from external APIs and our scam_reports.
     /// Stub: uses only local scam_reports count; add GoPlus/Chainabuse/TokenSniffer later.
-    pub async fn get_reputation(
-        pool: &DbPool,
-        contract_address: &str,
-    ) -> ReputationInfo {
+    pub async fn get_reputation(pool: &DbPool, contract_address: &str) -> ReputationInfo {
         let community_flags = SenseiguardRepository::count_scam_reports(pool, contract_address)
             .await
             .unwrap_or(0) as u32;

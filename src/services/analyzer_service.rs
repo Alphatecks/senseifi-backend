@@ -9,7 +9,13 @@ use serde::Deserialize;
 const MINT_NAMES: &[&str] = &["mint", "mintto", "mint_token"];
 const PAUSE_NAMES: &[&str] = &["pause", "unpause", "pausable"];
 const UPGRADE_NAMES: &[&str] = &["upgradeto", "upgradetoandcall", "upgrade", "initialize"];
-const WITHDRAW_NAMES: &[&str] = &["withdraw", "withdrawliquidity", "withdrawfunds", "sweep", "rescue"];
+const WITHDRAW_NAMES: &[&str] = &[
+    "withdraw",
+    "withdrawliquidity",
+    "withdrawfunds",
+    "sweep",
+    "rescue",
+];
 const BLACKLIST_NAMES: &[&str] = &["blacklist", "addblacklist", "setblacklist"];
 /// Dangerous for user approvals / proxy.
 const DANGEROUS_NAMES: &[&str] = &[
@@ -71,13 +77,21 @@ impl AnalyzerService {
     /// Run analyzer with a single Etherscan fetch. Returns privileges, dangerous functions, and whether ABI was from Etherscan.
     /// chain_id: if Some, use for this scan (1=ETH, 56=BSC, etc.); else use ETHERSCAN_CHAIN_ID env or 1.
     pub async fn analyze_contract(contract_address: &str, chain_id: Option<u64>) -> AnalysisResult {
-        let (abi, _verified, contract_name) = match etherscan::fetch_abi_and_verified(contract_address, chain_id).await {
+        let (abi, _verified, contract_name) = match etherscan::fetch_abi_and_verified(
+            contract_address,
+            chain_id,
+        )
+        .await
+        {
             Ok((a, v, name)) if !a.is_empty() => (a, v, name),
             Ok((_, _, _)) => {
                 tracing::info!("Analyzer: empty ABI for {} (contract not verified?); using stub (no fake token list)", contract_address);
                 return AnalysisResult {
                     owner_privileges: Self::stub_owner_privileges(),
-                    dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
+                    dangerous_functions: vec![
+                        "delegatecall".to_string(),
+                        "setApprovalForAll".to_string(),
+                    ],
                     abi_from_etherscan: false,
                     tokens_controlled: vec!["Unknown".into()],
                     contract_name: None,
@@ -85,10 +99,17 @@ impl AnalyzerService {
                 };
             }
             Err(e) => {
-                tracing::warn!("Analyzer: Etherscan fetch failed for {}: {}; using stub (no fake token list)", contract_address, e);
+                tracing::warn!(
+                    "Analyzer: Etherscan fetch failed for {}: {}; using stub (no fake token list)",
+                    contract_address,
+                    e
+                );
                 return AnalysisResult {
                     owner_privileges: Self::stub_owner_privileges(),
-                    dangerous_functions: vec!["delegatecall".to_string(), "setApprovalForAll".to_string()],
+                    dangerous_functions: vec![
+                        "delegatecall".to_string(),
+                        "setApprovalForAll".to_string(),
+                    ],
                     abi_from_etherscan: false,
                     tokens_controlled: vec!["Unknown".into()],
                     contract_name: None,
@@ -104,7 +125,12 @@ impl AnalyzerService {
             withdraw_liquidity: Some(abi_has_function(&abi, WITHDRAW_NAMES)),
             blacklist: Some(abi_has_function(&abi, BLACKLIST_NAMES)),
         };
-        let dangerous_functions = Self::dangerous_functions_from_abi_impl(abi.clone(), contract_address.to_string(), chain_id).await;
+        let dangerous_functions = Self::dangerous_functions_from_abi_impl(
+            abi.clone(),
+            contract_address.to_string(),
+            chain_id,
+        )
+        .await;
         let tokens_controlled = Self::tokens_controlled_from_abi(&abi);
         let detected_standards = Self::detect_standards_from_abi(&abi);
         AnalysisResult {
@@ -133,7 +159,11 @@ impl AnalyzerService {
             out.push("ERC-721".to_string());
         }
         // ERC-1155: balanceOf(address,uint256), balanceOfBatch, safeTransferFrom, safeBatchTransferFrom
-        if abi_lower.contains("balanceofbatch") || (abi_lower.contains("balanceof") && abi_lower.contains("uint256") && abi_lower.contains("safebatchtransferfrom")) {
+        if abi_lower.contains("balanceofbatch")
+            || (abi_lower.contains("balanceof")
+                && abi_lower.contains("uint256")
+                && abi_lower.contains("safebatchtransferfrom"))
+        {
             out.push("ERC-1155".to_string());
         }
         if out.is_empty() && (abi_lower.contains("approve") || abi_lower.contains("transferfrom")) {
@@ -154,7 +184,11 @@ impl AnalyzerService {
         tokens
     }
 
-    async fn dangerous_functions_from_abi_impl(abi: String, contract_address: String, chain_id: Option<u64>) -> Vec<String> {
+    async fn dangerous_functions_from_abi_impl(
+        abi: String,
+        contract_address: String,
+        chain_id: Option<u64>,
+    ) -> Vec<String> {
         let mut out = Vec::new();
         #[derive(Debug, Deserialize)]
         struct AbiItem {
@@ -197,7 +231,9 @@ impl AnalyzerService {
             }
         }
         if let Ok(code) = rpc::fetch_bytecode(contract_address, chain_id).await {
-            if bytecode_has_delegatecall(&code) && !out.iter().any(|s| s.eq_ignore_ascii_case("delegatecall")) {
+            if bytecode_has_delegatecall(&code)
+                && !out.iter().any(|s| s.eq_ignore_ascii_case("delegatecall"))
+            {
                 out.push("delegatecall".to_string());
             }
         }
@@ -209,12 +245,16 @@ impl AnalyzerService {
 
     /// Extract owner/admin privileges from ABI (and optionally bytecode). Uses Etherscan + RPC when configured.
     pub async fn extract_owner_privileges(contract_address: &str) -> OwnerPrivileges {
-        Self::analyze_contract(contract_address, None).await.owner_privileges
+        Self::analyze_contract(contract_address, None)
+            .await
+            .owner_privileges
     }
 
     /// Dangerous function names from ABI; plus "delegatecall" if bytecode contains DELEGATECALL.
     pub async fn dangerous_functions(contract_address: &str) -> Vec<String> {
-        Self::analyze_contract(contract_address, None).await.dangerous_functions
+        Self::analyze_contract(contract_address, None)
+            .await
+            .dangerous_functions
     }
 
     fn stub_owner_privileges() -> OwnerPrivileges {

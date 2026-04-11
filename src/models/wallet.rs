@@ -28,9 +28,7 @@ pub struct ConnectWalletRequest {
 
 /// Valid Ethereum address: 0x + 40 hex chars. Used to reject path/body injection and malformed input.
 pub fn is_valid_eth_address(s: &str) -> bool {
-    s.len() == 42
-        && s.starts_with("0x")
-        && s[2..].chars().all(|c| c.is_ascii_hexdigit())
+    s.len() == 42 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Canonical form for DB storage and lookups: `0x` + lowercase hex (avoids checksum vs all-lower mismatches).

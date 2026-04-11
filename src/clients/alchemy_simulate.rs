@@ -32,7 +32,10 @@ struct SimulateResponse {
 
 /// Simulate a zero-value call to the contract. Returns whether the contract receives assets (drain risk) and number of asset changes.
 /// Only works when rpc_url is an Alchemy endpoint (e.g. https://eth-mainnet.g.alchemy.com/v2/...).
-pub async fn simulate_contract_call(rpc_url: &str, contract_address: &str) -> Result<SimulateResult, String> {
+pub async fn simulate_contract_call(
+    rpc_url: &str,
+    contract_address: &str,
+) -> Result<SimulateResult, String> {
     if !rpc_url.contains("alchemy.com") {
         return Err("Not an Alchemy RPC URL".to_string());
     }

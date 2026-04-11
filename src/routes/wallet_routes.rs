@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Json,
-    routing::{get, post, delete},
+    routing::{delete, get, post},
     Router,
 };
 use serde::Deserialize;
@@ -12,7 +12,7 @@ use sqlx::Error;
 use crate::clients::{etherscan, rpc};
 use crate::db::DbPool;
 use crate::models::wallet::{
-    ConnectWalletRequest, ALLOWED_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN, is_valid_eth_address,
+    is_valid_eth_address, ConnectWalletRequest, ALLOWED_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
 };
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -91,7 +91,13 @@ async fn connect_wallet(
     req.wallet_type = wt.clone();
 
     // If frontend doesn't send user_id, create/get dashboard user (random user_id, display_name, user_number).
-    let dashboard_user = if req.user_id.is_none() || req.user_id.as_deref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+    let dashboard_user = if req.user_id.is_none()
+        || req
+            .user_id
+            .as_deref()
+            .map(|s| s.trim().is_empty())
+            .unwrap_or(true)
+    {
         match dashboard_user_service::get_or_create_for_wallet(&pool, &req.address).await {
             Ok(du) => {
                 req.user_id = Some(du.user_id.clone());
@@ -110,7 +116,9 @@ async fn connect_wallet(
         Ok(wallet) => {
             // Ensure wallet row has user_id so overview "active wallets" count includes this wallet.
             if let Some(ref du) = dashboard_user {
-                let _ = WalletRepository::update_wallet_user_id(&pool, &wallet.address, &du.user_id).await;
+                let _ =
+                    WalletRepository::update_wallet_user_id(&pool, &wallet.address, &du.user_id)
+                        .await;
             }
             let mut body = json!({
                 "success": true,

@@ -94,7 +94,9 @@ fn http_client() -> Option<reqwest::Client> {
 
 async fn fetch_coingecko(chain_id: i64) -> Option<NativeUsdQuote> {
     let id = coingecko_id_for_chain(chain_id);
-    let pro_key = std::env::var("COINGECKO_API_KEY").ok().filter(|s| !s.is_empty());
+    let pro_key = std::env::var("COINGECKO_API_KEY")
+        .ok()
+        .filter(|s| !s.is_empty());
     let use_pro = pro_key.is_some();
     let (url, source): (String, &'static str) = if use_pro {
         (

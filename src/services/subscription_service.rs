@@ -4,6 +4,7 @@ use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::repositories::subscription_repository::{
     SubscriptionRepository, UpsertSubscriptionInput,
 };
+use crate::services::plan_catalog::{normalize_billing_cycle, normalize_plan};
 use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde::Deserialize;
@@ -76,7 +77,10 @@ impl StripeConfig {
             success_url: required("STRIPE_SUCCESS_URL")?,
             cancel_url: required("STRIPE_CANCEL_URL")?,
             portal_return_url: required("STRIPE_BILLING_PORTAL_RETURN_URL")?,
-            pro_monthly_price_id: optional_or_fallback("STRIPE_PRICE_PRO_MONTHLY", "STRIPE_PRICE_PRO")?,
+            pro_monthly_price_id: optional_or_fallback(
+                "STRIPE_PRICE_PRO_MONTHLY",
+                "STRIPE_PRICE_PRO",
+            )?,
             pro_annual_price_id: required("STRIPE_PRICE_PRO_ANNUAL")?,
             pro_plus_monthly_price_id: optional_or_fallback(
                 "STRIPE_PRICE_PRO_PLUS_MONTHLY",
@@ -130,25 +134,6 @@ impl StripeConfig {
                 stripe_price_id: self.premium_annual_price_id.clone(),
             },
         ]
-    }
-
-    fn normalize_plan(plan: &str) -> Option<String> {
-        let p = plan.trim().to_lowercase();
-        match p.as_str() {
-            "pro" => Some("pro".to_string()),
-            "pro+" | "pro_plus" | "pro-plus" => Some("pro_plus".to_string()),
-            "premium" => Some("premium".to_string()),
-            _ => None,
-        }
-    }
-
-    fn normalize_billing_cycle(cycle: Option<&str>) -> Option<String> {
-        let normalized = cycle.unwrap_or("monthly").trim().to_lowercase();
-        match normalized.as_str() {
-            "monthly" | "month" => Some("monthly".to_string()),
-            "annual" | "yearly" | "year" => Some("annual".to_string()),
-            _ => None,
-        }
     }
 
     fn price_id_for_plan(&self, plan: &str, billing_cycle: &str) -> Option<String> {
@@ -339,9 +324,9 @@ impl SubscriptionService {
         cancel_url: Option<&str>,
     ) -> Result<String, String> {
         let cfg = StripeConfig::from_env()?;
-        let normalized_plan = StripeConfig::normalize_plan(plan)
+        let normalized_plan = normalize_plan(plan)
             .ok_or_else(|| "Invalid plan. Use pro, pro+, or premium.".to_string())?;
-        let normalized_cycle = StripeConfig::normalize_billing_cycle(billing_cycle)
+        let normalized_cycle = normalize_billing_cycle(billing_cycle)
             .ok_or_else(|| "Invalid billing_cycle. Use monthly or annual.".to_string())?;
         let price_id = cfg
             .price_id_for_plan(&normalized_plan, &normalized_cycle)
@@ -521,12 +506,12 @@ impl SubscriptionService {
                     .get("metadata")
                     .and_then(|v| v.get("plan"))
                     .and_then(|v| v.as_str())
-                    .and_then(StripeConfig::normalize_plan);
+                    .and_then(normalize_plan);
                 let metadata_billing_cycle = object
                     .get("metadata")
                     .and_then(|v| v.get("billing_cycle"))
                     .and_then(|v| v.as_str())
-                    .and_then(|s| StripeConfig::normalize_billing_cycle(Some(s)));
+                    .and_then(|s| normalize_billing_cycle(Some(s)));
 
                 let user_id = match metadata_user_id {
                     Some(uid) => uid,
@@ -569,9 +554,10 @@ impl SubscriptionService {
 
                 let mut derived_plan = metadata_plan;
                 let mut derived_billing_cycle = metadata_billing_cycle;
-                if (derived_plan.is_none() || derived_billing_cycle.is_none()) && price_id.is_some() {
-                    if let Some((p, cycle)) = cfg
-                        .plan_and_cycle_for_price_id(price_id.as_deref().unwrap_or_default())
+                if (derived_plan.is_none() || derived_billing_cycle.is_none()) && price_id.is_some()
+                {
+                    if let Some((p, cycle)) =
+                        cfg.plan_and_cycle_for_price_id(price_id.as_deref().unwrap_or_default())
                     {
                         if derived_plan.is_none() {
                             derived_plan = Some(p);
@@ -661,15 +647,15 @@ impl SubscriptionService {
                     .get("metadata")
                     .and_then(|v| v.get("plan"))
                     .and_then(|v| v.as_str())
-                    .and_then(StripeConfig::normalize_plan);
+                    .and_then(normalize_plan);
                 let mut billing_cycle = object
                     .get("metadata")
                     .and_then(|v| v.get("billing_cycle"))
                     .and_then(|v| v.as_str())
-                    .and_then(|s| StripeConfig::normalize_billing_cycle(Some(s)));
+                    .and_then(|s| normalize_billing_cycle(Some(s)));
                 if (plan.is_none() || billing_cycle.is_none()) && price_id.is_some() {
-                    if let Some((p, cycle)) = cfg
-                        .plan_and_cycle_for_price_id(price_id.as_deref().unwrap_or_default())
+                    if let Some((p, cycle)) =
+                        cfg.plan_and_cycle_for_price_id(price_id.as_deref().unwrap_or_default())
                     {
                         if plan.is_none() {
                             plan = Some(p);

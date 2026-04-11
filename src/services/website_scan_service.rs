@@ -1,4 +1,4 @@
-use reqwest::header::{CONTENT_TYPE, HeaderMap};
+use reqwest::header::{HeaderMap, CONTENT_TYPE};
 use scraper::{Html, Selector};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
@@ -141,8 +141,17 @@ fn check_security_headers(headers: &HeaderMap) -> Vec<WebsiteScanIssue> {
 fn extract_title(document: &Html) -> Option<String> {
     let selector = Selector::parse("title").ok()?;
     let title = document.select(&selector).next()?;
-    let text = title.text().collect::<Vec<_>>().join(" ").trim().to_string();
-    if text.is_empty() { None } else { Some(text) }
+    let text = title
+        .text()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 fn analyze_content(body: &str) -> Vec<WebsiteScanIssue> {
@@ -213,7 +222,10 @@ fn extract_same_host_links(base_url: &Url, body: &str) -> Vec<String> {
     };
     for a in document.select(&selector) {
         if let Some(href) = a.value().attr("href") {
-            if href.starts_with('#') || href.starts_with("mailto:") || href.starts_with("javascript:") {
+            if href.starts_with('#')
+                || href.starts_with("mailto:")
+                || href.starts_with("javascript:")
+            {
                 continue;
             }
             if let Ok(next) = base_url.join(href) {
@@ -248,7 +260,10 @@ async fn set_cache(cache_key: &str, result: WebsiteScanResult) {
     );
 }
 
-pub async fn scan_website(target: &str, max_pages: Option<u8>) -> Result<WebsiteScanResult, String> {
+pub async fn scan_website(
+    target: &str,
+    max_pages: Option<u8>,
+) -> Result<WebsiteScanResult, String> {
     let normalized = normalize_target_url(target)?;
     let host = normalized
         .host_str()

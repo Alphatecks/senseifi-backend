@@ -2,7 +2,6 @@
 //! dApp connections, and wallet activity (monitor cycle). Emergency lock and custom rules enforced here.
 
 use crate::db::DbPool;
-use strsim::levenshtein;
 use crate::models::senseiguard::{
     AnalyzeTxResponse, DappConnectionCheckResponse, UserProtectionSettings, WebsiteScanSummary,
 };
@@ -10,6 +9,7 @@ use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::domain_intel_service;
 use crate::services::website_scan_service;
+use strsim::levenshtein;
 
 // --- Production risk bands (aligned with PHISHING_DETECTION_ROADMAP) ---
 // Score >= 80 → Block; 50–79 → Dangerous (high warning); 30–49 → Warning (medium); < 30 → Safe.
@@ -89,7 +89,9 @@ pub async fn evaluate_transaction(
                 band: "Block".to_string(),
                 threat_types: vec![],
                 explanation: Some(msg.to_string()),
-                risk_breakdown: Some(serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 })),
+                risk_breakdown: Some(
+                    serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 }),
+                ),
             });
         }
     }
@@ -107,9 +109,10 @@ pub async fn evaluate_transaction(
         });
     }
 
-    let blocked = SenseiguardRepository::is_contract_blocked(pool, wallet_address, to.unwrap_or(""))
-        .await
-        .unwrap_or(false);
+    let blocked =
+        SenseiguardRepository::is_contract_blocked(pool, wallet_address, to.unwrap_or(""))
+            .await
+            .unwrap_or(false);
     if blocked {
         let msg = "Contract is blocked by your protection settings.";
         return Ok(TxEvalResult {
@@ -118,7 +121,9 @@ pub async fn evaluate_transaction(
             recommended_action: "Reject transaction".to_string(),
             blocked: true,
             band: "Block".to_string(),
-            threat_types: vec![crate::models::senseiguard::threat_types::PHISHING_INDICATOR.to_string()],
+            threat_types: vec![
+                crate::models::senseiguard::threat_types::PHISHING_INDICATOR.to_string()
+            ],
             explanation: Some(msg.to_string()),
             risk_breakdown: Some(serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 })),
         });
@@ -127,7 +132,8 @@ pub async fn evaluate_transaction(
     let (risk_score, warning, recommended_action, mut threat_types, risk_breakdown) =
         threat_analyze_tx_sync(to, value, data);
     let rules_block = apply_security_rules_tx(pool, wallet_address, to, value, data).await;
-    let blocked = rules_block.unwrap_or(false) || (settings.auto_block_high_risk && risk_score >= BLOCK_THRESHOLD);
+    let blocked = rules_block.unwrap_or(false)
+        || (settings.auto_block_high_risk && risk_score >= BLOCK_THRESHOLD);
     let recommended_action = if blocked {
         "Reject transaction".to_string()
     } else {
@@ -141,7 +147,8 @@ pub async fn evaluate_transaction(
         }
     });
     if blocked && risk_score >= 70 && threat_types.is_empty() {
-        threat_types.push(crate::models::senseiguard::threat_types::MALICIOUS_TRANSACTION.to_string());
+        threat_types
+            .push(crate::models::senseiguard::threat_types::MALICIOUS_TRANSACTION.to_string());
     }
     let band = score_to_band(risk_score).to_string();
     let explanation = warning.clone();
@@ -175,7 +182,8 @@ fn threat_analyze_tx_sync(
             score += WEIGHT_UNLIMITED_APPROVAL;
             approval_risk = WEIGHT_UNLIMITED_APPROVAL;
             warning = Some("Unlimited or high-value approval detected.".to_string());
-            threat_types.push(crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string());
+            threat_types
+                .push(crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string());
         }
         if data.len() > 138 && (sig == "095ea7b3" || sig == "a22cb465") {
             let amount_hex = data.get(74..138).unwrap_or("");
@@ -184,7 +192,9 @@ fn threat_analyze_tx_sync(
                     score += WEIGHT_UNLIMITED_APPROVAL;
                     approval_risk = WEIGHT_UNLIMITED_APPROVAL;
                     warning = Some("Unlimited approval detected.".to_string());
-                    threat_types.push(crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string());
+                    threat_types.push(
+                        crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL.to_string(),
+                    );
                 }
             }
         }
@@ -203,7 +213,13 @@ fn threat_analyze_tx_sync(
         "approval_risk": approval_risk,
         "simulation_drain": 0
     });
-    (score, warning, recommended_action, threat_types, risk_breakdown)
+    (
+        score,
+        warning,
+        recommended_action,
+        threat_types,
+        risk_breakdown,
+    )
 }
 
 async fn apply_security_rules_tx(
@@ -227,14 +243,20 @@ async fn apply_security_rules_tx(
                     let sig = &data[2..10].to_lowercase();
                     if sig == "095ea7b3" || sig == "a22cb465" {
                         let amount_hex = data.get(74..138).unwrap_or("");
-                        if amount_hex == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" {
+                        if amount_hex
+                            == "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+                        {
                             return Some(true);
                         }
                     }
                 }
             }
             "block_tx_above_usd" => {
-                let max_usd = r.condition_json.get("max_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let max_usd = r
+                    .condition_json
+                    .get("max_usd")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 if max_usd > 0.0 {
                     let value_wei = value
                         .and_then(|s| s.strip_prefix("0x"))
@@ -278,16 +300,17 @@ pub async fn evaluate_approval(
     let is_unlimited = amount_raw
         .map(|s| s.to_lowercase().contains("ffffffff"))
         .unwrap_or(false);
-    let risk_score = if SenseiguardRepository::is_contract_blocked(pool, wallet_address, spender_address)
-        .await
-        .unwrap_or(false)
-    {
-        100
-    } else if is_unlimited {
-        85
-    } else {
-        40
-    };
+    let risk_score =
+        if SenseiguardRepository::is_contract_blocked(pool, wallet_address, spender_address)
+            .await
+            .unwrap_or(false)
+        {
+            100
+        } else if is_unlimited {
+            85
+        } else {
+            40
+        };
 
     let should_alert = settings.new_approval_alerts && risk_score >= 50;
     let warning = if risk_score >= 70 {
@@ -403,7 +426,10 @@ pub async fn evaluate_dapp_connection(
                 "[critical] Domain matched malicious threat-intelligence feed.".to_string(),
             );
         } else if intel.is_trusted {
-            findings.insert(0, "[low] Domain matched trusted protocol allowlist.".to_string());
+            findings.insert(
+                0,
+                "[low] Domain matched trusted protocol allowlist.".to_string(),
+            );
         } else if let Some(reason) = intel.reason.clone() {
             findings.insert(0, format!("[low] {}", reason));
         }
@@ -523,7 +549,10 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
     }
 }
 
-pub fn build_dapp_check_response(skipped: bool, result: Option<DappEvalResult>) -> DappConnectionCheckResponse {
+pub fn build_dapp_check_response(
+    skipped: bool,
+    result: Option<DappEvalResult>,
+) -> DappConnectionCheckResponse {
     if skipped {
         return DappConnectionCheckResponse {
             skipped: true,
@@ -563,7 +592,8 @@ pub async fn analyze_tx_and_respond(
     value: Option<&str>,
     data: Option<&str>,
 ) -> Result<AnalyzeTxResponse, String> {
-    let settings = match SenseiguardRepository::get_protection_settings(pool, wallet_address).await {
+    let settings = match SenseiguardRepository::get_protection_settings(pool, wallet_address).await
+    {
         Ok(Some(s)) => s,
         Ok(None) => {
             return Ok(build_analyze_tx_response(true, None));
@@ -575,7 +605,9 @@ pub async fn analyze_tx_and_respond(
     }
     let r = evaluate_transaction(pool, wallet_address, to, value, data).await?;
     if (r.risk_score >= 60 || !r.threat_types.is_empty()) && r.risk_score > 0 {
-        if let Ok(Some(wallet)) = WalletRepository::get_wallet_by_address(pool, wallet_address).await {
+        if let Ok(Some(wallet)) =
+            WalletRepository::get_wallet_by_address(pool, wallet_address).await
+        {
             let severity = match r.band.as_str() {
                 "Block" | "Dangerous" => "high",
                 "Warning" => "medium",

@@ -19,6 +19,16 @@ pub struct UpsertSubscriptionInput<'a> {
 }
 
 impl SubscriptionRepository {
+    pub async fn get_by_id(
+        pool: &DbPool,
+        id: uuid::Uuid,
+    ) -> Result<Option<UserSubscription>, Error> {
+        sqlx::query_as::<_, UserSubscription>("SELECT * FROM user_subscriptions WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+    }
+
     pub async fn get_by_user_id(
         pool: &DbPool,
         user_id: &str,

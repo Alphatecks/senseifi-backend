@@ -64,7 +64,10 @@ fn parse_jsonrpc_string_result(body: &str) -> Result<String, String> {
 }
 
 /// Returns runtime bytecode (hex with 0x prefix) as bytes.
-pub async fn fetch_bytecode(address: &str, request_chain_id: Option<u64>) -> Result<Vec<u8>, String> {
+pub async fn fetch_bytecode(
+    address: &str,
+    request_chain_id: Option<u64>,
+) -> Result<Vec<u8>, String> {
     let url = rpc_url_for_chain(request_chain_id).ok_or_else(|| {
         let cid = request_chain_id.unwrap_or(1);
         rpc_missing_msg(cid)

@@ -194,10 +194,7 @@ pub async fn fetch_wallet_tokens(
                 ("exclude_native", "true"),
                 ("limit", "100"),
             ])
-            .query(&[(
-                "exclude_spam",
-                if exclude_spam { "true" } else { "false" },
-            )]);
+            .query(&[("exclude_spam", if exclude_spam { "true" } else { "false" })]);
         if let Some(ref c) = cursor {
             if !c.is_empty() {
                 req = req.query(&[("cursor", c.as_str())]);

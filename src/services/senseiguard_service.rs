@@ -1,21 +1,23 @@
 use crate::clients::{moralis_wallet, native_price, rpc};
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    threat_types, ActiveAlertsOverview, ActivityFeedItem, ActivityMonitorDappResponse,
-    ActivityMonitorWalletResponse, Alert, ActiveThreatsCard, AiThreatExplanationCard, ConnectedRiskOverview,
-    ConnectedWalletModalBalance, ConnectedWalletModalDetails, ConnectedWalletModalResponse,
-    ConnectedWalletModalSecurity, DashboardMetricsResponse, DashboardOverviewResponse, DashboardSummaryResponse,
-    NativeChainBalance,
-    FullScanReportResponse, IndexedTokenSyncChainOutcome, IngestActivityRequest, LiveActivityFeedItem,
-    LiveScamSignalItem, MetricCard,
-    MonitoredTransaction, OverallRiskCard, RecentActivityOverview, ReportedThreatsCard, ScamFrequencyDay,
-    ScamPatternInsightsCard, ScamPatternsCard, ScanObservation, SecurityOverviewResponse, SecurityStatusResponse,
-    SecurityScan, Threat, ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
+    threat_types, ActiveAlertsOverview, ActiveThreatsCard, ActivityFeedItem,
+    ActivityMonitorDappResponse, ActivityMonitorWalletResponse, AiThreatExplanationCard, Alert,
+    ConnectedRiskOverview, ConnectedWalletModalBalance, ConnectedWalletModalDetails,
+    ConnectedWalletModalResponse, ConnectedWalletModalSecurity, DashboardMetricsResponse,
+    DashboardOverviewResponse, DashboardSummaryResponse, FullScanReportResponse,
+    IndexedTokenSyncChainOutcome, IngestActivityRequest, LiveActivityFeedItem, LiveScamSignalItem,
+    MetricCard, MonitoredTransaction, NativeChainBalance, OverallRiskCard, RecentActivityOverview,
+    ReportedThreatsCard, ScamFrequencyDay, ScamPatternInsightsCard, ScamPatternsCard,
+    ScanObservation, SecurityOverviewResponse, SecurityScan, SecurityStatusResponse, Threat,
+    ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
 };
-use crate::repositories::senseiguard_repository::{SenseiguardRepository, ActivityFeedRowLive, ThreatDetectionRow};
+use crate::repositories::senseiguard_repository::{
+    ActivityFeedRowLive, SenseiguardRepository, ThreatDetectionRow,
+};
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::protection_engine;
-use chrono::{Datelike, Duration, DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use sqlx::Error;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -50,7 +52,10 @@ impl SenseiguardService {
     }
 
     /// Live native balance + USD (RPC + price APIs). Surfaces rpc/pricing errors for API diagnostics.
-    async fn live_native_balance_breakdown(address: &str, chain_id: i64) -> LiveNativeBalanceBreakdown {
+    async fn live_native_balance_breakdown(
+        address: &str,
+        chain_id: i64,
+    ) -> LiveNativeBalanceBreakdown {
         let mut out = LiveNativeBalanceBreakdown::default();
         match rpc::fetch_balance_wei(address, Some(chain_id as u64)).await {
             Ok(wei_hex) => {
@@ -91,9 +96,7 @@ impl SenseiguardService {
                 return v;
             }
         }
-        vec![
-            1, 56, 137, 8453, 42161, 10, 324, 59144, 534352, 43114, 250,
-        ]
+        vec![1, 56, 137, 8453, 42161, 10, 324, 59144, 534352, 43114, 250]
     }
 
     fn merge_wallet_chain_id(mut ids: Vec<u64>, wallet_chain_id: i64) -> Vec<u64> {
@@ -179,10 +182,7 @@ impl SenseiguardService {
                 continue;
             }
             let usd = a.usd_value.max(0.0);
-            let addr_l = a
-                .contract_address
-                .as_deref()
-                .map(|s| s.to_lowercase());
+            let addr_l = a.contract_address.as_deref().map(|s| s.to_lowercase());
             let is_wrapped = addr_l
                 .as_deref()
                 .and_then(|addr| Self::wrapped_native_contract_lower(cid).map(|w| addr == w))
@@ -218,7 +218,8 @@ impl SenseiguardService {
         address: &str,
         wallet_chain_id: i64,
     ) -> MultiChainNativeAggregate {
-        let ids = Self::merge_wallet_chain_id(Self::default_native_scan_chain_ids(), wallet_chain_id);
+        let ids =
+            Self::merge_wallet_chain_id(Self::default_native_scan_chain_ids(), wallet_chain_id);
         let mut per_chain = Vec::new();
         let mut total_usd = 0.0_f64;
         let mut primary = LiveNativeBalanceBreakdown::default();
@@ -272,24 +273,22 @@ impl SenseiguardService {
             .and_then(|p| p.price_source.clone());
 
         let rpc_err = if agg.total_usd <= 1e-12 {
-            agg.per_chain
-                .iter()
-                .find_map(|p| p.rpc_error.clone())
+            agg.per_chain.iter().find_map(|p| p.rpc_error.clone())
         } else {
             None
         };
 
-        let pricing_err = if agg.total_usd <= 1e-12
-            && agg.per_chain.iter().any(|p| p.balance > 1e-12)
-        {
-            Some(
-                "USD pricing failed for one or more chains with non-zero native balance".to_string(),
-            )
-        } else if agg.total_usd <= 1e-12 {
-            agg.primary.pricing_error.clone()
-        } else {
-            None
-        };
+        let pricing_err =
+            if agg.total_usd <= 1e-12 && agg.per_chain.iter().any(|p| p.balance > 1e-12) {
+                Some(
+                    "USD pricing failed for one or more chains with non-zero native balance"
+                        .to_string(),
+                )
+            } else if agg.total_usd <= 1e-12 {
+                agg.primary.pricing_error.clone()
+            } else {
+                None
+            };
 
         (rpc_err, pricing_err, price_src)
     }
@@ -301,11 +300,7 @@ impl SenseiguardService {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
         let latest = SenseiguardRepository::get_latest_scan(pool, wallet_id).await?;
         let (score, status, last_scan_at) = match &latest {
-            Some(s) => (
-                s.score,
-                s.status.clone(),
-                Some(s.scanned_at),
-            ),
+            Some(s) => (s.score, s.status.clone(), Some(s.scanned_at)),
             None => {
                 let sc: (i32,) = sqlx::query_as(
                     "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
@@ -362,7 +357,8 @@ impl SenseiguardService {
     ) -> Result<FullScanReportResponse, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
 
-        let threats_count = SenseiguardRepository::count_threats_this_month(pool, wallet_id).await?;
+        let threats_count =
+            SenseiguardRepository::count_threats_this_month(pool, wallet_id).await?;
         let high_risk_alerts =
             SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
@@ -374,7 +370,10 @@ impl SenseiguardService {
         observations.push(ScanObservation {
             observation_type: "threats".to_string(),
             title: "Threats this month".to_string(),
-            description: Some(format!("{} threat(s) detected in the last 30 days.", threats_count)),
+            description: Some(format!(
+                "{} threat(s) detected in the last 30 days.",
+                threats_count
+            )),
             severity: if threats_count > 0 {
                 Some("warning".to_string())
             } else {
@@ -386,7 +385,10 @@ impl SenseiguardService {
         observations.push(ScanObservation {
             observation_type: "alerts".to_string(),
             title: "Unread alerts".to_string(),
-            description: Some(format!("{} unread alert(s), {} high risk.", unread_alerts, high_risk_alerts)),
+            description: Some(format!(
+                "{} unread alert(s), {} high risk.",
+                unread_alerts, high_risk_alerts
+            )),
             severity: if high_risk_alerts > 0 {
                 Some("critical".to_string())
             } else if unread_alerts > 0 {
@@ -414,8 +416,7 @@ impl SenseiguardService {
         let suspicious_activity = activity
             .iter()
             .filter(|a| {
-                a.activity_type == "suspicious_approval"
-                    || a.activity_type == "blocked_interaction"
+                a.activity_type == "suspicious_approval" || a.activity_type == "blocked_interaction"
             })
             .count();
         observations.push(ScanObservation {
@@ -450,8 +451,10 @@ impl SenseiguardService {
             .saturating_sub(high_risk_alerts as i32 * 10)
             .clamp(0, 100);
 
-        let observations_json = serde_json::to_value(&observations).unwrap_or_else(|_| serde_json::json!([]));
-        let scan = SenseiguardRepository::create_scan(pool, wallet_id, score, &observations_json).await?;
+        let observations_json =
+            serde_json::to_value(&observations).unwrap_or_else(|_| serde_json::json!([]));
+        let scan =
+            SenseiguardRepository::create_scan(pool, wallet_id, score, &observations_json).await?;
 
         Ok(FullScanReportResponse {
             scan_id: scan.id,
@@ -632,10 +635,7 @@ impl SenseiguardService {
     ) -> Result<(Vec<LiveActivityFeedItem>, i64), Error> {
         let (rows, total) =
             SenseiguardRepository::list_activity_feed_live(pool, user_id, page, per_page).await?;
-        let items = rows
-            .into_iter()
-            .map(|r| row_to_live_feed_item(r))
-            .collect();
+        let items = rows.into_iter().map(|r| row_to_live_feed_item(r)).collect();
         Ok((items, total))
     }
 
@@ -677,8 +677,7 @@ impl SenseiguardService {
             if let Some(existing) = assets.iter_mut().find(|x| {
                 x.symbol == symbol
                     && x.contract_address.is_none()
-                    && (x.chain_id == Some(cid)
-                        || (x.chain_id.is_none() && a.chain_id == primary))
+                    && (x.chain_id == Some(cid) || (x.chain_id.is_none() && a.chain_id == primary))
             }) {
                 existing.balance = balance;
                 existing.usd_value = existing.usd_value.max(a.usd);
@@ -726,7 +725,10 @@ impl SenseiguardService {
             .await?
             .ok_or(Error::RowNotFound)?;
         let wallet_id = wallet.id;
-        let ids = Self::merge_wallet_chain_id(Self::default_token_balance_scan_chain_ids(), wallet.chain_id);
+        let ids = Self::merge_wallet_chain_id(
+            Self::default_token_balance_scan_chain_ids(),
+            wallet.chain_id,
+        );
         let mut outcomes = Vec::with_capacity(ids.len());
 
         for cid in ids {
@@ -755,7 +757,8 @@ impl SenseiguardService {
                     continue;
                 }
             };
-            SenseiguardRepository::delete_indexed_assets_for_chain(pool, wallet_id, cid as i32).await?;
+            SenseiguardRepository::delete_indexed_assets_for_chain(pool, wallet_id, cid as i32)
+                .await?;
             let mut n: u32 = 0;
             for t in tokens {
                 SenseiguardRepository::upsert_indexed_token(
@@ -790,8 +793,10 @@ impl SenseiguardService {
         per_page: u32,
     ) -> Result<(Vec<MonitoredTransaction>, i64), Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
-        SenseiguardRepository::list_transaction_monitoring_paginated(pool, wallet_id, page, per_page)
-            .await
+        SenseiguardRepository::list_transaction_monitoring_paginated(
+            pool, wallet_id, page, per_page,
+        )
+        .await
     }
 
     /// Recent activity for all active wallets. Used when polling every 6s for live activity.
@@ -837,24 +842,24 @@ impl SenseiguardService {
             threat_types::PHISHING_INDICATOR,
         )
         .await?
-        + SenseiguardRepository::count_threats_by_type_this_month(
-            pool,
-            wallet_id,
-            threat_types::FRONTEND_PHISHING,
-        )
-        .await?;
+            + SenseiguardRepository::count_threats_by_type_this_month(
+                pool,
+                wallet_id,
+                threat_types::FRONTEND_PHISHING,
+            )
+            .await?;
         let phish_prev = SenseiguardRepository::count_threats_by_type_previous_month(
             pool,
             wallet_id,
             threat_types::PHISHING_INDICATOR,
         )
         .await?
-        + SenseiguardRepository::count_threats_by_type_previous_month(
-            pool,
-            wallet_id,
-            threat_types::FRONTEND_PHISHING,
-        )
-        .await?;
+            + SenseiguardRepository::count_threats_by_type_previous_month(
+                pool,
+                wallet_id,
+                threat_types::FRONTEND_PHISHING,
+            )
+            .await?;
         let (risk_this, risk_prev) = (
             SenseiguardRepository::count_threats_by_type_this_month(
                 pool,
@@ -909,7 +914,8 @@ impl SenseiguardService {
         let active_wallet_count = wallets.len() as i64;
 
         let min_score =
-            SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id).await?;
+            SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id)
+                .await?;
         let status = match min_score {
             None => "safe".to_string(),
             Some(s) => Self::overview_status_from_score(s),
@@ -919,17 +925,26 @@ impl SenseiguardService {
             SenseiguardRepository::global_last_scan_at_for_user(pool, user_id).await?;
         let (alerts_high, alerts_medium, alerts_low) =
             SenseiguardRepository::alerts_count_by_severity_global_for_user(pool, user_id).await?;
-        let activity_timeline =
-            SenseiguardRepository::list_activity_across_wallets_for_user(pool, user_id, timeline_limit).await?;
+        let activity_timeline = SenseiguardRepository::list_activity_across_wallets_for_user(
+            pool,
+            user_id,
+            timeline_limit,
+        )
+        .await?;
 
         let since_24h = Utc::now() - chrono::Duration::hours(24);
         let transactions_24h =
-            SenseiguardRepository::activity_count_since_global_for_user(pool, user_id, since_24h).await?;
+            SenseiguardRepository::activity_count_since_global_for_user(pool, user_id, since_24h)
+                .await?;
         let suspicious_events_24h =
-            SenseiguardRepository::activity_suspicious_count_since_global_for_user(pool, user_id, since_24h).await?;
+            SenseiguardRepository::activity_suspicious_count_since_global_for_user(
+                pool, user_id, since_24h,
+            )
+            .await?;
 
         let (total_risk_items, high_risk_connections) =
-            SenseiguardRepository::transaction_monitoring_global_totals_for_user(pool, user_id).await?;
+            SenseiguardRepository::transaction_monitoring_global_totals_for_user(pool, user_id)
+                .await?;
 
         Ok(DashboardOverviewResponse {
             wallet_status: WalletStatusOverview {
@@ -963,18 +978,23 @@ impl SenseiguardService {
         user_id: &str,
     ) -> Result<SecurityOverviewResponse, Error> {
         let min_score =
-            SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id).await?;
+            SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id)
+                .await?;
         // security_score is 0–100 higher=better; risk_score is 0–100 higher=worse.
         let risk_score = min_score.map(|s| 100 - s).unwrap_or(0);
         let risk_level = protection_engine::score_to_band(risk_score).to_string();
 
-        let threat_count =
-            SenseiguardRepository::count_threats_for_user(pool, user_id).await.unwrap_or(0);
+        let threat_count = SenseiguardRepository::count_threats_for_user(pool, user_id)
+            .await
+            .unwrap_or(0);
         let networks_affected =
-            SenseiguardRepository::count_networks_affected_for_user(pool, user_id).await.unwrap_or(0);
+            SenseiguardRepository::count_networks_affected_for_user(pool, user_id)
+                .await
+                .unwrap_or(0);
 
-        let daily_rows =
-            SenseiguardRepository::threats_per_day_for_user(pool, user_id, 7).await.unwrap_or_default();
+        let daily_rows = SenseiguardRepository::threats_per_day_for_user(pool, user_id, 7)
+            .await
+            .unwrap_or_default();
         let daily: Vec<ScamFrequencyDay> = daily_rows
             .into_iter()
             .map(|(d, c)| ScamFrequencyDay {
@@ -984,7 +1004,9 @@ impl SenseiguardService {
             .collect();
 
         let distinct_patterns =
-            SenseiguardRepository::count_distinct_threat_types_for_user(pool, user_id).await.unwrap_or(0);
+            SenseiguardRepository::count_distinct_threat_types_for_user(pool, user_id)
+                .await
+                .unwrap_or(0);
         let scam_pattern_status = if distinct_patterns >= 3 {
             "High"
         } else if distinct_patterns >= 1 {
@@ -993,8 +1015,9 @@ impl SenseiguardService {
             "Low"
         };
 
-        let verified =
-            SenseiguardRepository::count_scam_reports_global(pool).await.unwrap_or(0);
+        let verified = SenseiguardRepository::count_scam_reports_global(pool)
+            .await
+            .unwrap_or(0);
 
         let live_rows =
             SenseiguardRepository::list_threats_for_dashboard(pool, Some(user_id), 10).await?;
@@ -1069,7 +1092,9 @@ impl SenseiguardService {
 
         if threat_count > 0 {
             signals.push("active_threats".to_string());
-            reasons.push("Threats have been detected on your wallets in the last 30 days.".to_string());
+            reasons.push(
+                "Threats have been detected on your wallets in the last 30 days.".to_string(),
+            );
         }
         if distinct_patterns >= 3 {
             signals.push("high_scam_pattern_count".to_string());
@@ -1083,14 +1108,20 @@ impl SenseiguardService {
             reasons.push("Your overall risk score is in the critical range. Review blocked or high-risk items.".to_string());
         } else if risk_score >= 50 {
             signals.push("elevated_risk_score".to_string());
-            reasons.push("Your overall risk score is elevated based on wallet and activity signals.".to_string());
+            reasons.push(
+                "Your overall risk score is elevated based on wallet and activity signals."
+                    .to_string(),
+            );
         } else if risk_score >= 30 {
             signals.push("moderate_risk_score".to_string());
             reasons.push("Some risk signals are present; consider reviewing connected contracts and approvals.".to_string());
         }
         if verified_reports > 0 {
             signals.push("community_reports".to_string());
-            reasons.push("Community reports indicate verified scam or abuse activity in the ecosystem.".to_string());
+            reasons.push(
+                "Community reports indicate verified scam or abuse activity in the ecosystem."
+                    .to_string(),
+            );
         }
 
         let description = if reasons.is_empty() {
@@ -1106,10 +1137,7 @@ impl SenseiguardService {
     }
 
     fn threat_row_to_live_signal(r: ThreatDetectionRow) -> LiveScamSignalItem {
-        let address = r
-            .source_contract
-            .as_deref()
-            .unwrap_or(&r.wallet_address);
+        let address = r.source_contract.as_deref().unwrap_or(&r.wallet_address);
         let short = if address.len() >= 10 {
             format!("{}...{}", &address[..6], &address[address.len() - 4..])
         } else {
@@ -1121,7 +1149,13 @@ impl SenseiguardService {
             "medium" => "Medium",
             _ => "Low",
         };
-        let threat_type: String = match r.threat_type.as_deref().unwrap_or("").to_lowercase().as_str() {
+        let threat_type: String = match r
+            .threat_type
+            .as_deref()
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
             "phishing_indicator" | "frontend_phishing" => "Phishing".to_string(),
             "malicious_transaction" => "Malware".to_string(),
             "unlimited_approval" => "Approval".to_string(),
@@ -1135,7 +1169,9 @@ impl SenseiguardService {
                 .next()
                 .map(|s| {
                     let mut c = s.chars();
-                    c.next().map(|f| f.to_uppercase().chain(c).collect::<String>()).unwrap_or_else(|| s.to_string())
+                    c.next()
+                        .map(|f| f.to_uppercase().chain(c).collect::<String>())
+                        .unwrap_or_else(|| s.to_string())
                 })
                 .unwrap_or_else(|| "Threat".to_string()),
         };
@@ -1147,29 +1183,29 @@ impl SenseiguardService {
         }
     }
 
-fn overview_status_from_score(score: i32) -> String {
-    match score {
-        0..=39 => "attention".to_string(),
-        40..=69 => "moderate".to_string(),
-        _ => "safe".to_string(),
+    fn overview_status_from_score(score: i32) -> String {
+        match score {
+            0..=39 => "attention".to_string(),
+            40..=69 => "moderate".to_string(),
+            _ => "safe".to_string(),
+        }
     }
-}
 
-fn change_percent(this_month: i64, prev_month: i64) -> f64 {
-    if prev_month == 0 {
-        return 0.0;
+    fn change_percent(this_month: i64, prev_month: i64) -> f64 {
+        if prev_month == 0 {
+            return 0.0;
+        }
+        let d = (this_month - prev_month) as f64 / prev_month as f64 * 100.0;
+        (d * 10.0).round() / 10.0
     }
-    let d = (this_month - prev_month) as f64 / prev_month as f64 * 100.0;
-    (d * 10.0).round() / 10.0
-}
 
-fn score_to_level(score: i32) -> String {
-    match score {
-        0..=33 => "High".to_string(),
-        34..=66 => "Medium".to_string(),
-        _ => "Low".to_string(),
+    fn score_to_level(score: i32) -> String {
+        match score {
+            0..=33 => "High".to_string(),
+            34..=66 => "Medium".to_string(),
+            _ => "Low".to_string(),
+        }
     }
-}
 
     /// Activity Monitor "Connected wallet" tab: wallets with security level and last activity.
     pub async fn get_activity_monitor_wallets(
@@ -1212,9 +1248,17 @@ fn score_to_level(score: i32) -> String {
         } else if d.num_minutes() < 60 {
             format!("{} minutes ago", d.num_minutes())
         } else if d.num_hours() < 24 {
-            format!("{} hour{} ago", d.num_hours(), if d.num_hours() == 1 { "" } else { "s" })
+            format!(
+                "{} hour{} ago",
+                d.num_hours(),
+                if d.num_hours() == 1 { "" } else { "s" }
+            )
         } else if d.num_days() < 7 {
-            format!("{} day{} ago", d.num_days(), if d.num_days() == 1 { "" } else { "s" })
+            format!(
+                "{} day{} ago",
+                d.num_days(),
+                if d.num_days() == 1 { "" } else { "s" }
+            )
         } else {
             format!("{} days ago", d.num_days())
         }
@@ -1268,9 +1312,12 @@ fn score_to_level(score: i32) -> String {
 
         let security = Self::get_security_status(pool, address).await?;
         let mut assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
-        let wallet_assets_usd =
-            SenseiguardRepository::total_asset_usd(pool, wallet.id).await.unwrap_or(0.0);
-        let approval_count = SenseiguardRepository::count_approvals(pool, wallet.id).await.unwrap_or(0);
+        let wallet_assets_usd = SenseiguardRepository::total_asset_usd(pool, wallet.id)
+            .await
+            .unwrap_or(0.0);
+        let approval_count = SenseiguardRepository::count_approvals(pool, wallet.id)
+            .await
+            .unwrap_or(0);
         let (high_risk, total_monitored) =
             SenseiguardRepository::transaction_monitoring_risk_counts(pool, wallet.id)
                 .await
@@ -1368,18 +1415,22 @@ fn chain_id_to_network(chain_id: i64) -> String {
 fn row_to_live_feed_item(r: ActivityFeedRowLive) -> LiveActivityFeedItem {
     let wallet = wallet_type_to_display(&r.wallet_type);
     let type_display = activity_type_to_display(&r.activity_type);
-    let (asset, amount, counterparty, risk_level, status) = r.metadata.as_ref().map_or(
-        (None, None, None, None, None),
-        |m| {
-            (
-                m.get("asset").and_then(|v| v.as_str()).map(String::from),
-                m.get("amount").and_then(|v| v.as_str()).map(String::from),
-                m.get("counterparty").and_then(|v| v.as_str()).map(String::from),
-                m.get("risk_level").and_then(|v| v.as_str()).map(String::from),
-                m.get("status").and_then(|v| v.as_str()).map(String::from),
-            )
-        },
-    );
+    let (asset, amount, counterparty, risk_level, status) =
+        r.metadata
+            .as_ref()
+            .map_or((None, None, None, None, None), |m| {
+                (
+                    m.get("asset").and_then(|v| v.as_str()).map(String::from),
+                    m.get("amount").and_then(|v| v.as_str()).map(String::from),
+                    m.get("counterparty")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    m.get("risk_level")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    m.get("status").and_then(|v| v.as_str()).map(String::from),
+                )
+            });
     LiveActivityFeedItem {
         id: r.id,
         created_at: r.created_at,

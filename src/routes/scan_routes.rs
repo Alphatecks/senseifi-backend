@@ -43,10 +43,16 @@ pub fn scan_routes() -> Router<DbPool> {
     Router::new()
         .route("/", post(scan_contract))
         .route("/{scan_id}", get(get_scan_details))
-        .route("/contract/{address}/scam-pattern", get(contract_scam_pattern))
+        .route(
+            "/contract/{address}/scam-pattern",
+            get(contract_scam_pattern),
+        )
         .route("/contract/{address}/activity", get(contract_activity))
         .route("/contract/{address}/liquidity", get(contract_liquidity))
-        .route("/contract/{address}/community-signals", get(contract_community_signals))
+        .route(
+            "/contract/{address}/community-signals",
+            get(contract_community_signals),
+        )
 }
 
 async fn scan_contract(
@@ -85,14 +91,12 @@ async fn get_scan_details(
     State(pool): State<DbPool>,
     Path(scan_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    let id = scan_id
-        .parse::<Uuid>()
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "success": false, "error": "Invalid scan ID" })),
-            )
-        })?;
+    let id = scan_id.parse::<Uuid>().map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "Invalid scan ID" })),
+        )
+    })?;
     match ScanService::get_scan_details(&pool, id).await {
         Ok(Some(scan)) => Ok(Json(json!({
             "success": true,
@@ -121,33 +125,41 @@ async fn contract_scam_pattern(
             Json(json!({ "success": false, "error": "Invalid contract address" })),
         ));
     }
-    let scan = match SenseiguardRepository::get_latest_contract_scan_by_address(&pool, address).await {
-        Ok(Some(s)) => s,
-        Ok(None) => {
-            return Ok(Json(json!({
-                "success": true,
-                "data": {
-                    "honeypot": false,
-                    "approval_drain": false,
-                    "delayed_rug": false,
-                    "fee_escalation": false,
-                    "similarity_score_percent": 0
-                },
-                "message": "No scan found for this contract. Run a scan first."
-            })));
-        }
-        Err(e) => {
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": e.to_string() })),
-            ));
-        }
-    };
+    let scan =
+        match SenseiguardRepository::get_latest_contract_scan_by_address(&pool, address).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return Ok(Json(json!({
+                    "success": true,
+                    "data": {
+                        "honeypot": false,
+                        "approval_drain": false,
+                        "delayed_rug": false,
+                        "fee_escalation": false,
+                        "similarity_score_percent": 0
+                    },
+                    "message": "No scan found for this contract. Run a scan first."
+                })));
+            }
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "success": false, "error": e.to_string() })),
+                ));
+            }
+        };
     let details = scan.details.as_ref().and_then(|d| d.get("simulation"));
-    let sim = details.and_then(|s| s.get("drains_full_balance")).and_then(|v| v.as_bool());
+    let sim = details
+        .and_then(|s| s.get("drains_full_balance"))
+        .and_then(|v| v.as_bool());
     let approval_drain = sim == Some(true);
-    let owner = scan.details.as_ref().and_then(|d| d.get("owner_privileges"));
-    let withdraw_liq = owner.and_then(|o| o.get("withdraw_liquidity")).and_then(|v| v.as_bool());
+    let owner = scan
+        .details
+        .as_ref()
+        .and_then(|d| d.get("owner_privileges"));
+    let withdraw_liq = owner
+        .and_then(|o| o.get("withdraw_liquidity"))
+        .and_then(|v| v.as_bool());
     let delayed_rug = withdraw_liq == Some(true);
     let mint = owner.and_then(|o| o.get("mint")).and_then(|v| v.as_bool());
     let pause = owner.and_then(|o| o.get("pause")).and_then(|v| v.as_bool());
@@ -220,9 +232,10 @@ async fn contract_community_signals(
     let confirmed_exploits = SenseiguardRepository::count_threats_for_contract(&pool, address)
         .await
         .unwrap_or(0);
-    let users_flagged_count = SenseiguardRepository::count_distinct_reporters_for_contract(&pool, address)
-        .await
-        .unwrap_or(0);
+    let users_flagged_count =
+        SenseiguardRepository::count_distinct_reporters_for_contract(&pool, address)
+            .await
+            .unwrap_or(0);
     let data = CommunitySignalsResponse {
         report_count,
         confirmed_exploits,
