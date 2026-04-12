@@ -851,6 +851,47 @@ pub struct AnalyzeTxResponse {
     pub recommended_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elite_assessment: Option<EliteRiskAssessment>,
+}
+
+/// User policy level for personalized risk thresholds.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum UserRiskProfile {
+    Beginner,
+    Standard,
+    Pro,
+}
+
+impl Default for UserRiskProfile {
+    fn default() -> Self {
+        Self::Standard
+    }
+}
+
+/// One reason in explainable risk output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EliteRiskReason {
+    pub code: String,
+    pub category: String,
+    pub score_impact: i32,
+    pub message: String,
+}
+
+/// Unified elite intelligence score payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EliteRiskAssessment {
+    pub risk_score: i32,
+    pub risk_tier: String,
+    pub recommended_action: String,
+    pub confidence_score: i32,
+    pub confidence_summary: String,
+    pub hard_stop_codes: Vec<String>,
+    pub profile: String,
+    pub shadow_mode: bool,
+    pub component_scores: serde_json::Value,
+    pub reasons: Vec<EliteRiskReason>,
 }
 
 /// Request for POST /api/dapp/connection-check.

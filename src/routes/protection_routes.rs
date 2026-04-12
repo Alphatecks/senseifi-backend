@@ -17,12 +17,15 @@ use crate::models::senseiguard::{
     BlockContractRequest, CreateSecurityRuleRequest, DappConnectionCheckRequest,
     EmergencyLockRequest, IngestActivityRequest, ReportScamRequest, SimulateTxRequest,
     SimulateTxResponse, UpdateProtectionSettingsRequest, UpdateSecurityRuleRequest,
-    WatchlistContractRequest,
+    UserRiskProfile, WatchlistContractRequest,
 };
 use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::domain_intel_service;
+use crate::services::elite_intelligence_service::{
+    EliteAssessmentRequest, EliteIntelligenceService,
+};
 use crate::services::protection_engine::{
     analyze_tx_and_respond, build_dapp_check_response, evaluate_approval, evaluate_dapp_connection,
     run_monitor_cycle,
@@ -147,6 +150,26 @@ struct ExtensionAnalyzeRequest {
     chain_id: Option<i64>,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    risk_profile: Option<String>,
+    #[serde(default)]
+    liquidity_drop_1h_pct: Option<f64>,
+    #[serde(default)]
+    dev_wallet_sell_pct_supply: Option<f64>,
+    #[serde(default)]
+    token_mint_burst_count: Option<i64>,
+    #[serde(default)]
+    abnormal_volume_zscore: Option<f64>,
+    #[serde(default)]
+    recently_upgraded_hours_ago: Option<i64>,
+    #[serde(default)]
+    recently_exploited_days_ago: Option<i64>,
+    #[serde(default)]
+    interaction_count_with_contract: Option<i64>,
+    #[serde(default)]
+    wallet_balance_usd: Option<f64>,
+    #[serde(default)]
+    tx_value_usd: Option<f64>,
     // Back-compat fields (legacy mobile/web callers).
     #[serde(default)]
     to: Option<String>,
@@ -256,6 +279,14 @@ fn findings_from_analyze(
         }
     }
     findings
+}
+
+fn parse_user_profile(raw: Option<&str>) -> UserRiskProfile {
+    match raw.unwrap_or("standard").to_lowercase().as_str() {
+        "beginner" => UserRiskProfile::Beginner,
+        "pro" => UserRiskProfile::Pro,
+        _ => UserRiskProfile::Standard,
+    }
 }
 
 async fn compute_contract_reputation_risk(
@@ -539,15 +570,40 @@ async fn transaction_analyze(
                 }
             }
 
-            let score = (base_score + contract_reputation_risk + behavioral_risk).clamp(0, 100);
-            let final_band = crate::services::protection_engine::score_to_band(score).to_string();
-            let final_recommendation = if score >= 80 {
-                "Reject transaction".to_string()
-            } else if score >= 30 {
-                "Review before signing".to_string()
-            } else {
-                "Proceed".to_string()
+            let elite = EliteIntelligenceService::assess_transaction(
+                &pool,
+                EliteAssessmentRequest {
+                    wallet_address: wallet_address.clone(),
+                    method: req.method.clone(),
+                    to: to.clone(),
+                    value: value.clone(),
+                    data: data.clone(),
+                    params: req.params.clone(),
+                    base_protocol_risk: base_score,
+                    tx_engine_risk: base_score,
+                    contract_reputation_risk,
+                    behavioral_risk,
+                    liquidity_drop_1h_pct: req.liquidity_drop_1h_pct,
+                    dev_wallet_sell_pct_supply: req.dev_wallet_sell_pct_supply,
+                    token_mint_burst_count: req.token_mint_burst_count,
+                    abnormal_volume_zscore: req.abnormal_volume_zscore,
+                    recently_upgraded_hours_ago: req.recently_upgraded_hours_ago,
+                    recently_exploited_days_ago: req.recently_exploited_days_ago,
+                    interaction_count_with_contract: req.interaction_count_with_contract,
+                    wallet_balance_usd: req.wallet_balance_usd,
+                    tx_value_usd: req.tx_value_usd,
+                    profile: parse_user_profile(req.risk_profile.as_deref()),
+                },
+            )
+            .await;
+
+            let score = elite.risk_score;
+            let final_band = match elite.risk_tier.as_str() {
+                "block" => "Block".to_string(),
+                "warn" => "Warning".to_string(),
+                _ => "Safe".to_string(),
             };
+            let final_recommendation = elite.recommended_action.clone();
             let mut findings = findings_from_analyze(
                 base_score,
                 out.warning.as_deref().or(out.explanation.as_deref()),
@@ -569,6 +625,11 @@ async fn transaction_analyze(
             if behavioral_risk >= 30 {
                 findings.push("Project/domain phishing risk signal detected".to_string());
             }
+            for reason in &elite.reasons {
+                if !findings.iter().any(|f| f == &reason.message) {
+                    findings.push(reason.message.clone());
+                }
+            }
 
             Ok(Json(json!({
                 "risk_score": score,
@@ -577,10 +638,19 @@ async fn transaction_analyze(
                 "breakdown": {
                     "approval_risk": approval_risk,
                     "contract_reputation_risk": contract_reputation_risk,
-                    "behavioral_risk": behavioral_risk
+                    "behavioral_risk": behavioral_risk,
+                    "elite_components": elite.component_scores
                 },
                 "band": final_band,
                 "recommendation": final_recommendation,
+                "risk_tier": elite.risk_tier,
+                "confidence_score": elite.confidence_score,
+                "confidence_summary": elite.confidence_summary,
+                "hard_stop_codes": elite.hard_stop_codes,
+                "profile": elite.profile,
+                "shadow_mode": elite.shadow_mode,
+                "elite_reasons": elite.reasons,
+                "elite_assessment": elite,
                 "chain_id": req.chain_id,
                 "url": req.url,
                 "domain": req.domain,
@@ -651,7 +721,12 @@ async fn dapp_connection_check(
                 let description = r
                     .website_scan
                     .as_ref()
-                    .map(|scan| format!("Connection checked via SenseiGuard (safety: {}).", scan.safety))
+                    .map(|scan| {
+                        format!(
+                            "Connection checked via SenseiGuard (safety: {}).",
+                            scan.safety
+                        )
+                    })
                     .unwrap_or_else(|| "Connection checked via SenseiGuard.".to_string());
                 let _ = SenseiguardRepository::upsert_dapp_connection(
                     &pool,

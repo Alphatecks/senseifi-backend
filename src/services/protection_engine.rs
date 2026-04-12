@@ -21,6 +21,8 @@ const MEDIUM_WARNING_THRESHOLD: i32 = 30;
 const WEIGHT_DOMAIN_TYPOSQUAT: i32 = 25;
 const WEIGHT_DOMAIN_HOMOGRAPH: i32 = 25;
 const WEIGHT_UNLIMITED_APPROVAL: i32 = 35;
+const WEIGHT_DELEGATECALL_PATTERN: i32 = 20;
+const WEIGHT_UNKNOWN_DESTINATION: i32 = 25;
 
 /// Band for API response: Safe | Warning | Dangerous | Block (from risk_score).
 pub fn score_to_band(score: i32) -> &'static str {
@@ -167,15 +169,26 @@ pub async fn evaluate_transaction(
 
 /// Returns (score, warning, recommended_action, threat_types, risk_breakdown). Uses additive signal weights.
 fn threat_analyze_tx_sync(
-    _to: Option<&str>,
-    _value: Option<&str>,
+    to: Option<&str>,
+    value: Option<&str>,
     data: Option<&str>,
 ) -> (i32, Option<String>, String, Vec<String>, serde_json::Value) {
     let mut score = 0i32;
     let mut approval_risk = 0i32;
+    let mut delegatecall_risk = 0i32;
+    let mut destination_risk = 0i32;
+    let mut value_exposure_risk = 0i32;
     let mut warning = None;
     let mut threat_types: Vec<String> = Vec::new();
     let data = data.unwrap_or("");
+    let to = to.unwrap_or("").to_lowercase();
+    if to.is_empty() || to == "0x0000000000000000000000000000000000000000" {
+        score += WEIGHT_UNKNOWN_DESTINATION;
+        destination_risk = WEIGHT_UNKNOWN_DESTINATION;
+        warning = Some("Unknown destination contract detected.".to_string());
+        threat_types
+            .push(crate::models::senseiguard::threat_types::MALICIOUS_TRANSACTION.to_string());
+    }
     if data.starts_with("0x") && data.len() >= 10 {
         let sig = &data[2..10].to_lowercase();
         if sig == "095ea7b3" || sig == "a22cb465" {
@@ -198,6 +211,26 @@ fn threat_analyze_tx_sync(
                 }
             }
         }
+        if sig == "3659cfe6" {
+            score += WEIGHT_DELEGATECALL_PATTERN;
+            delegatecall_risk = WEIGHT_DELEGATECALL_PATTERN;
+            if warning.is_none() {
+                warning =
+                    Some("Upgradeable proxy/admin transaction signature detected.".to_string());
+            }
+            threat_types
+                .push(crate::models::senseiguard::threat_types::MALICIOUS_TRANSACTION.to_string());
+        }
+    }
+    if let Some(v) = value {
+        if let Some(hex) = v.strip_prefix("0x") {
+            if let Ok(value_wei) = u128::from_str_radix(hex, 16) {
+                if value_wei > 0 {
+                    value_exposure_risk = 10;
+                    score += value_exposure_risk;
+                }
+            }
+        }
     }
     score = score.min(100);
     let recommended_action = if score >= BLOCK_THRESHOLD {
@@ -211,6 +244,9 @@ fn threat_analyze_tx_sync(
     };
     let risk_breakdown = serde_json::json!({
         "approval_risk": approval_risk,
+        "delegatecall_risk": delegatecall_risk,
+        "destination_risk": destination_risk,
+        "value_exposure_risk": value_exposure_risk,
         "simulation_drain": 0
     });
     (
@@ -518,6 +554,7 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
             warning: None,
             recommended_action: None,
             reason: Some("High-risk transaction warnings are disabled.".to_string()),
+            elite_assessment: None,
         };
     }
     let Some(r) = result else {
@@ -532,6 +569,7 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
             warning: None,
             recommended_action: Some("Proceed".to_string()),
             reason: None,
+            elite_assessment: None,
         };
     };
     let recommendation = r.recommended_action.clone();
@@ -546,6 +584,7 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
         warning: r.warning,
         recommended_action: Some(recommendation),
         reason: None,
+        elite_assessment: None,
     }
 }
 

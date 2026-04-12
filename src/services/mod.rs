@@ -2,6 +2,7 @@ pub mod ai_insight_service;
 pub mod analyzer_service;
 pub mod dashboard_user_service;
 pub mod domain_intel_service;
+pub mod elite_intelligence_service;
 pub mod hello_service;
 pub mod onchain_payment_webhook_service;
 pub mod onchain_subscribe_service;
