@@ -27,8 +27,8 @@ use crate::services::elite_intelligence_service::{
     EliteAssessmentRequest, EliteIntelligenceService,
 };
 use crate::services::protection_engine::{
-    analyze_tx_and_respond, build_dapp_check_response, evaluate_approval, evaluate_dapp_connection,
-    run_monitor_cycle,
+    analyze_tx_and_respond, build_dapp_check_response, build_dapp_check_skipped_with_reason,
+    evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
 };
 use axum::extract::Path;
 use uuid::Uuid;
@@ -684,7 +684,9 @@ async fn dapp_connection_check(
         match SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address).await {
             Ok(Some(s)) => s,
             Ok(None) => {
-                let out = build_dapp_check_response(true, None);
+                let out = build_dapp_check_skipped_with_reason(
+                    "Protection settings not found for wallet. Save settings first.",
+                );
                 return Ok(Json(
                     serde_json::to_value(&out).unwrap_or(json!({ "skipped": true })),
                 ));
@@ -697,7 +699,7 @@ async fn dapp_connection_check(
             }
         };
     if !settings.new_dapp_connection_alerts {
-        let out = build_dapp_check_response(true, None);
+        let out = build_dapp_check_skipped_with_reason("New dApp connection alerts are disabled.");
         return Ok(Json(
             serde_json::to_value(&out).unwrap_or(json!({ "skipped": true })),
         ));

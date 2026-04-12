@@ -1786,10 +1786,11 @@ impl SenseiguardRepository {
         pool: &DbPool,
         wallet_address: &str,
     ) -> Result<Option<UserProtectionSettings>, Error> {
+        let wallet_address_normalized = wallet_address.to_lowercase();
         sqlx::query_as(
-            "SELECT wallet_address, auto_security_scan, high_risk_tx_warnings, new_approval_alerts, new_dapp_connection_alerts, auto_block_high_risk, COALESCE(emergency_lock, false) as emergency_lock, whitelisted_addresses, created_at, updated_at FROM user_protection_settings WHERE wallet_address = $1",
+            "SELECT wallet_address, auto_security_scan, high_risk_tx_warnings, new_approval_alerts, new_dapp_connection_alerts, auto_block_high_risk, COALESCE(emergency_lock, false) as emergency_lock, whitelisted_addresses, created_at, updated_at FROM user_protection_settings WHERE LOWER(wallet_address) = LOWER($1)",
         )
-        .bind(wallet_address)
+        .bind(wallet_address_normalized)
         .fetch_optional(pool)
         .await
     }
@@ -1829,6 +1830,7 @@ impl SenseiguardRepository {
         emergency_lock: Option<bool>,
         whitelisted_addresses: Option<serde_json::Value>,
     ) -> Result<UserProtectionSettings, Error> {
+        let wallet_address_normalized = wallet_address.to_lowercase();
         let (em_lock, whitelist) = match (emergency_lock, whitelisted_addresses) {
             (Some(el), Some(w)) => (el, w),
             (Some(el), None) => (el, serde_json::json!([])),
@@ -1860,7 +1862,7 @@ impl SenseiguardRepository {
             RETURNING wallet_address, auto_security_scan, high_risk_tx_warnings, new_approval_alerts, new_dapp_connection_alerts, auto_block_high_risk, emergency_lock, whitelisted_addresses, created_at, updated_at
             "#,
         )
-        .bind(wallet_address)
+        .bind(wallet_address_normalized)
         .bind(auto_security_scan)
         .bind(high_risk_tx_warnings)
         .bind(new_approval_alerts)
@@ -1877,10 +1879,11 @@ impl SenseiguardRepository {
         pool: &DbPool,
         wallet_address: &str,
     ) -> Result<Option<ProtectionAutoScan>, Error> {
+        let wallet_address_normalized = wallet_address.to_lowercase();
         sqlx::query_as(
-            "SELECT wallet_address, auto_scan_enabled, last_scan_at, scan_interval_seconds, updated_at FROM protection_auto_scan WHERE wallet_address = $1",
+            "SELECT wallet_address, auto_scan_enabled, last_scan_at, scan_interval_seconds, updated_at FROM protection_auto_scan WHERE LOWER(wallet_address) = LOWER($1)",
         )
-        .bind(wallet_address)
+        .bind(wallet_address_normalized)
         .fetch_optional(pool)
         .await
     }
@@ -1891,6 +1894,7 @@ impl SenseiguardRepository {
         auto_scan_enabled: bool,
         scan_interval_seconds: i32,
     ) -> Result<ProtectionAutoScan, Error> {
+        let wallet_address_normalized = wallet_address.to_lowercase();
         sqlx::query_as(
             r#"
             INSERT INTO protection_auto_scan (wallet_address, auto_scan_enabled, scan_interval_seconds, updated_at)
@@ -1902,7 +1906,7 @@ impl SenseiguardRepository {
             RETURNING *
             "#,
         )
-        .bind(wallet_address)
+        .bind(wallet_address_normalized)
         .bind(auto_scan_enabled)
         .bind(scan_interval_seconds)
         .fetch_one(pool)
@@ -1921,10 +1925,11 @@ impl SenseiguardRepository {
         pool: &DbPool,
         wallet_address: &str,
     ) -> Result<u64, Error> {
+        let wallet_address_normalized = wallet_address.to_lowercase();
         let r = sqlx::query(
-            "UPDATE protection_auto_scan SET last_scan_at = NOW(), updated_at = NOW() WHERE wallet_address = $1",
+            "UPDATE protection_auto_scan SET last_scan_at = NOW(), updated_at = NOW() WHERE LOWER(wallet_address) = LOWER($1)",
         )
-        .bind(wallet_address)
+        .bind(wallet_address_normalized)
         .execute(pool)
         .await?;
         Ok(r.rows_affected())

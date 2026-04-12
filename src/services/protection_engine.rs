@@ -622,6 +622,17 @@ pub fn build_dapp_check_response(
     }
 }
 
+pub fn build_dapp_check_skipped_with_reason(reason: &str) -> DappConnectionCheckResponse {
+    DappConnectionCheckResponse {
+        skipped: true,
+        risk_score: None,
+        phishing_risk: None,
+        safety: None,
+        website_scan: None,
+        reason: Some(reason.to_string()),
+    }
+}
+
 /// Full analyze-tx flow: settings check, evaluate, persist threat/alert when needed, return response.
 /// Used by both POST /api/protection/transaction/analyze and POST /api/dashboard/{address}/analyze-tx.
 pub async fn analyze_tx_and_respond(
