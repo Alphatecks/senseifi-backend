@@ -30,6 +30,7 @@ use crate::services::protection_engine::{
     analyze_tx_and_respond, build_dapp_check_response, build_dapp_check_skipped_with_reason,
     evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
 };
+use crate::services::scan_service::ScanService;
 use axum::extract::Path;
 use uuid::Uuid;
 
@@ -97,9 +98,44 @@ fn derive_dapp_name(domain: &str) -> String {
     }
 }
 
+fn normalize_contract_input(input: &str) -> String {
+    let s = input.trim();
+    if s.is_empty() {
+        return String::new();
+    }
+    if s.len() >= 42 && s.starts_with("0x") && s[2..42].chars().all(|c| c.is_ascii_hexdigit()) {
+        return s[..42].to_string();
+    }
+    if let Some(start) = s.find("0x") {
+        let rest = &s[start..];
+        let addr: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit() || *c == 'x')
+            .collect();
+        if addr.len() == 42 && addr.starts_with("0x") {
+            return addr;
+        }
+    }
+    s.to_string()
+}
+
 pub fn protection_routes() -> Router<DbPool> {
     Router::new()
         .route("/settings", get(get_settings).put(update_settings))
+        .route(
+            "/extension/scan-smart-contract",
+            post(extension_scan_smart_contract),
+        )
+        .route(
+            "/extension/analyze-transaction-screen",
+            post(extension_analyze_transaction_screen),
+        )
+        .route("/extension/risk-panel", post(extension_risk_panel))
+        .route(
+            "/extension/scam-token-detected",
+            post(extension_scam_token_detected),
+        )
+        .route("/extension/screen-action", post(extension_screen_action))
         .route("/transaction/analyze", post(transaction_analyze))
         .route("/threat-feed", get(get_threat_feed))
         .route("/domain-threat-feed", get(domain_threat_feed))
@@ -177,6 +213,65 @@ struct ExtensionAnalyzeRequest {
     value: Option<String>,
     #[serde(default)]
     data: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionScanSmartContractRequest {
+    wallet_address: String,
+    contract_link: String,
+    #[serde(default)]
+    chain_id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionAnalyzeTxScreenRequest {
+    wallet_address: String,
+    #[serde(default)]
+    method: Option<String>,
+    #[serde(default)]
+    params: Option<Vec<Value>>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    value: Option<String>,
+    #[serde(default)]
+    data: Option<String>,
+    #[serde(default)]
+    chain_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionRiskPanelRequest {
+    wallet_address: String,
+    #[serde(default)]
+    contract_address: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionScamTokenDetectedRequest {
+    wallet_address: String,
+    #[serde(default)]
+    token_symbol: Option<String>,
+    #[serde(default)]
+    token_address: Option<String>,
+    #[serde(default)]
+    contract_address: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtensionScreenActionRequest {
+    wallet_address: String,
+    action: String,
+    #[serde(default)]
+    token_symbol: Option<String>,
+    #[serde(default)]
+    token_address: Option<String>,
+    #[serde(default)]
+    contract_address: Option<String>,
+    #[serde(default)]
+    chain_id: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -443,6 +538,339 @@ async fn update_settings(
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e.to_string() })),
+        )),
+    }
+}
+
+async fn extension_scan_smart_contract(
+    State(pool): State<DbPool>,
+    axum::Json(req): axum::Json<ExtensionScanSmartContractRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&req.wallet_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format",
+        ));
+    }
+    let contract_address = normalize_contract_input(&req.contract_link);
+    if !is_valid_eth_address(&contract_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid contract link/address",
+        ));
+    }
+
+    let scan = ScanService::scan_contract(
+        &pool,
+        &contract_address,
+        Some(req.wallet_address.as_str()),
+        req.chain_id,
+    )
+    .await
+    .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    let (contract_reputation_risk, trust_score, scam_reports, wallets_affected) =
+        compute_contract_reputation_risk(&pool, &contract_address).await;
+
+    let scan_risk = (100 - scan.trust_score).clamp(0, 100);
+    let final_risk = (scan_risk + contract_reputation_risk).clamp(0, 100);
+    let risk_level_10 = ((final_risk as f64) / 10.0 * 10.0).round() / 10.0;
+    let malicious = final_risk >= 75 || scam_reports > 0 || scan.critical_risk_flags > 0;
+
+    Ok(Json(json!({
+        "screen": if malicious { "malicious_contract_detected" } else { "sensei_risk_panel" },
+        "title": if malicious { "Malicious Contract Detected" } else { "Scan Smart Contract" },
+        "contract_address": contract_address,
+        "contract_name": scan.contract_name,
+        "network": scan.network,
+        "risk_score": final_risk,
+        "risk_level_10": risk_level_10,
+        "reported_incidents": scam_reports,
+        "wallets_drained_estimate": wallets_affected,
+        "critical_warning": malicious,
+        "findings": {
+            "trust_score": trust_score.unwrap_or(scan.trust_score),
+            "critical_risk_flags": scan.critical_risk_flags,
+            "token_controlled": scan.token_controlled,
+            "owner_admin_count": scan.owner_admin_count,
+            "details": scan.details
+        },
+        "actions": if malicious {
+            vec!["see_more_results", "proceed_at_your_own_risk"]
+        } else {
+            vec!["view_risk_panel", "done"]
+        }
+    })))
+}
+
+async fn extension_analyze_transaction_screen(
+    State(pool): State<DbPool>,
+    axum::Json(req): axum::Json<ExtensionAnalyzeTxScreenRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&req.wallet_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format",
+        ));
+    }
+
+    let result = analyze_tx_and_respond(
+        &pool,
+        &req.wallet_address,
+        req.to.as_deref(),
+        req.value.as_deref(),
+        req.data.as_deref(),
+    )
+    .await
+    .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+
+    let score = result.risk_score.unwrap_or(0).clamp(0, 100);
+    let risk_level = if score >= 80 {
+        "Critical"
+    } else if score >= 50 {
+        "High"
+    } else if score >= 30 {
+        "Medium"
+    } else {
+        "Safe"
+    };
+
+    let tx_details = if req.method.as_deref() == Some("eth_signTypedData_v4")
+        || req.method.as_deref() == Some("eth_signTypedData")
+    {
+        "Typed-data signature request detected."
+    } else if req.method.as_deref() == Some("eth_sign")
+        || req.method.as_deref() == Some("personal_sign")
+    {
+        "Raw signature request detected."
+    } else if result
+        .threat_types
+        .as_ref()
+        .map(|v| v.iter().any(|t| t == "unlimited_approval"))
+        .unwrap_or(false)
+    {
+        "This transaction grants unlimited access to your assets."
+    } else {
+        "Transaction analyzed for approvals, destination, and malicious patterns."
+    };
+
+    Ok(Json(json!({
+        "screen": "sensei_analysis_engine",
+        "title": "Sensei Analysis Engine",
+        "risk_score": score,
+        "risk_level": risk_level,
+        "recommendation": result.recommended_action.unwrap_or_else(|| "Review before signing".to_string()),
+        "transaction_details": tx_details,
+        "threat_types": result.threat_types.unwrap_or_default(),
+        "findings": result.explanation,
+        "risk_breakdown": result.risk_breakdown,
+        "chain_id": req.chain_id,
+        "has_backend": true,
+        "actions": {
+            "cancel_transaction": true,
+            "proceed_anyway": score < 90
+        }
+    })))
+}
+
+async fn extension_risk_panel(
+    State(pool): State<DbPool>,
+    axum::Json(req): axum::Json<ExtensionRiskPanelRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&req.wallet_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format",
+        ));
+    }
+
+    let mut site_reputation = "Unknown".to_string();
+    if let Some(domain) = req.domain.as_deref() {
+        if !domain.trim().is_empty() {
+            if let Ok(r) =
+                evaluate_dapp_connection(&pool, &req.wallet_address, domain, Some(2)).await
+            {
+                site_reputation = r.safety;
+            }
+        }
+    }
+
+    let mut contract_risk = "Unknown".to_string();
+    let mut user_reports: i64 = 0;
+    if let Some(addr) = req.contract_address.as_deref() {
+        let address = normalize_contract_input(addr);
+        if is_valid_eth_address(&address) {
+            let (risk, _trust, reports, _wallets) =
+                compute_contract_reputation_risk(&pool, &address).await;
+            user_reports = reports;
+            contract_risk = if risk >= 35 {
+                "High".to_string()
+            } else if risk >= 15 {
+                "Medium".to_string()
+            } else {
+                "Low".to_string()
+            };
+        }
+    }
+
+    Ok(Json(json!({
+        "screen": "sensei_risk_panel",
+        "title": "Sensei Risk Panel",
+        "status": "live",
+        "findings": {
+            "site_reputation": site_reputation,
+            "contract_risk": contract_risk,
+            "user_reports": if user_reports > 0 { user_reports.to_string() } else { "None".to_string() }
+        },
+        "actions": ["done"]
+    })))
+}
+
+async fn extension_scam_token_detected(
+    State(pool): State<DbPool>,
+    axum::Json(req): axum::Json<ExtensionScamTokenDetectedRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&req.wallet_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format",
+        ));
+    }
+    let contract_address = req
+        .contract_address
+        .clone()
+        .or(req.token_address.clone())
+        .map(|s| normalize_contract_input(&s));
+
+    let mut risk_score = 85;
+    let mut user_reports = 0i64;
+    if let Some(addr) = contract_address.as_deref() {
+        if is_valid_eth_address(addr) {
+            let (risk, _trust, reports, _wallets) =
+                compute_contract_reputation_risk(&pool, addr).await;
+            risk_score = (60 + risk).clamp(0, 100);
+            user_reports = reports;
+        }
+    }
+
+    let token = req
+        .token_symbol
+        .clone()
+        .unwrap_or_else(|| "Unknown Token".to_string());
+    Ok(Json(json!({
+        "screen": "scam_token_detected",
+        "title": "Scam Token Detected",
+        "token": token,
+        "risk_level": format!("{}/10", ((risk_score as f64) / 10.0).round()),
+        "critical_warning": true,
+        "reported_incidents": user_reports,
+        "actions": {
+            "hide_token": true,
+            "analyze_contract": contract_address.is_some(),
+            "report_scam": contract_address.is_some(),
+            "proceed_at_your_own_risk": true
+        }
+    })))
+}
+
+async fn extension_screen_action(
+    State(pool): State<DbPool>,
+    axum::Json(req): axum::Json<ExtensionScreenActionRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&req.wallet_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format",
+        ));
+    }
+    let action = req.action.trim().to_lowercase();
+    match action.as_str() {
+        "hide_token" => {
+            let metadata = json!({
+                "token_symbol": req.token_symbol,
+                "token_address": req.token_address,
+                "action": "hide_token"
+            });
+            let _ = crate::services::senseiguard_service::SenseiguardService::ingest_activity(
+                &pool,
+                &req.wallet_address,
+                IngestActivityRequest {
+                    activity_type: "blocked_interaction".to_string(),
+                    title: "Token hidden from extension panel".to_string(),
+                    description: Some(
+                        "User hid a suspicious token from the extension view.".to_string(),
+                    ),
+                    metadata: Some(metadata),
+                },
+            )
+            .await;
+            Ok(Json(json!({ "success": true, "action": action })))
+        }
+        "report_scam" => {
+            let Some(contract) = req.contract_address.as_deref() else {
+                return Err(extension_error(
+                    StatusCode::BAD_REQUEST,
+                    "contract_address is required for report_scam",
+                ));
+            };
+            let address = normalize_contract_input(contract);
+            if !is_valid_eth_address(&address) {
+                return Err(extension_error(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid contract_address",
+                ));
+            }
+            let row = SenseiguardRepository::create_scam_report(
+                &pool,
+                &address,
+                Some(&req.wallet_address),
+            )
+            .await
+            .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            Ok(Json(json!({
+                "success": true,
+                "action": action,
+                "report_id": row.id,
+                "contract_address": row.contract_address
+            })))
+        }
+        "analyze_contract" => {
+            let Some(contract) = req.contract_address.as_deref() else {
+                return Err(extension_error(
+                    StatusCode::BAD_REQUEST,
+                    "contract_address is required for analyze_contract",
+                ));
+            };
+            let address = normalize_contract_input(contract);
+            if !is_valid_eth_address(&address) {
+                return Err(extension_error(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid contract_address",
+                ));
+            }
+            let scan = ScanService::scan_contract(
+                &pool,
+                &address,
+                Some(req.wallet_address.as_str()),
+                req.chain_id.map(|v| v as u64),
+            )
+            .await
+            .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            Ok(Json(json!({
+                "success": true,
+                "action": action,
+                "scan_id": scan.scan_id,
+                "trust_score": scan.trust_score,
+                "critical_risk_flags": scan.critical_risk_flags
+            })))
+        }
+        "proceed_anyway" | "cancel_transaction" | "done" | "go_back" => Ok(Json(json!({
+            "success": true,
+            "action": action
+        }))),
+        _ => Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Unsupported action",
         )),
     }
 }
