@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
 
+use crate::clients::moralis_wallet;
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     BlockContractRequest, CreateSecurityRuleRequest, DappConnectionCheckRequest,
@@ -258,6 +259,8 @@ struct ExtensionScamTokenDetectedRequest {
     token_address: Option<String>,
     #[serde(default)]
     contract_address: Option<String>,
+    #[serde(default)]
+    chain_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -776,10 +779,27 @@ async fn extension_scam_token_detected(
         }
     }
 
-    let token = req
+    let token = if let Some(sym) = req
         .token_symbol
-        .clone()
-        .unwrap_or_else(|| "Unknown Token".to_string());
+        .as_ref()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        sym
+    } else if let (Some(token_addr), Some(chain_id)) = (req.token_address.as_ref(), req.chain_id) {
+        let token_addr_l = token_addr.to_lowercase();
+        match moralis_wallet::fetch_wallet_tokens(&req.wallet_address, chain_id).await {
+            Ok(tokens) => tokens
+                .into_iter()
+                .find(|t| t.contract_address.eq_ignore_ascii_case(&token_addr_l))
+                .map(|t| t.symbol)
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "Unknown Token".to_string()),
+            Err(_) => "Unknown Token".to_string(),
+        }
+    } else {
+        "Unknown Token".to_string()
+    };
     Ok(Json(json!({
         "screen": "scam_token_detected",
         "title": "Scam Token Detected",
