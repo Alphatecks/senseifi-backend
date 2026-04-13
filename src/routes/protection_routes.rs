@@ -584,6 +584,10 @@ async fn extension_scan_smart_contract(
         "contract_name": scan.contract_name,
         "network": scan.network,
         "risk_score": final_risk,
+        "contract_risk_score": final_risk,
+        "transaction_risk_score": Value::Null,
+        "final_decision_score": final_risk,
+        "decision_context": "contract_baseline_only",
         "risk_level_10": risk_level_10,
         "reported_incidents": scam_reports,
         "wallets_drained_estimate": wallets_affected,
@@ -624,12 +628,27 @@ async fn extension_analyze_transaction_screen(
     .await
     .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
 
-    let score = result.risk_score.unwrap_or(0).clamp(0, 100);
-    let risk_level = if score >= 80 {
+    let transaction_risk_score = result.risk_score.unwrap_or(0).clamp(0, 100);
+    let contract_risk_score = if let Some(to) = req.to.as_deref() {
+        if is_valid_eth_address(to) {
+            let (contract_reputation_risk, trust_score, _reports, _wallets) =
+                compute_contract_reputation_risk(&pool, to).await;
+            let trust_based = trust_score.map(|t| (100 - t).clamp(0, 100)).unwrap_or(0);
+            Some((trust_based + contract_reputation_risk).clamp(0, 100))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let final_decision_score = contract_risk_score
+        .map(|c| c.max(transaction_risk_score))
+        .unwrap_or(transaction_risk_score);
+    let risk_level = if final_decision_score >= 80 {
         "Critical"
-    } else if score >= 50 {
+    } else if final_decision_score >= 50 {
         "High"
-    } else if score >= 30 {
+    } else if final_decision_score >= 30 {
         "Medium"
     } else {
         "Safe"
@@ -657,7 +676,11 @@ async fn extension_analyze_transaction_screen(
     Ok(Json(json!({
         "screen": "sensei_analysis_engine",
         "title": "Sensei Analysis Engine",
-        "risk_score": score,
+        "risk_score": final_decision_score,
+        "contract_risk_score": contract_risk_score,
+        "transaction_risk_score": transaction_risk_score,
+        "final_decision_score": final_decision_score,
+        "decision_context": "transaction_intent_with_contract_context",
         "risk_level": risk_level,
         "recommendation": result.recommended_action.unwrap_or_else(|| "Review before signing".to_string()),
         "transaction_details": tx_details,
@@ -668,7 +691,7 @@ async fn extension_analyze_transaction_screen(
         "has_backend": true,
         "actions": {
             "cancel_transaction": true,
-            "proceed_anyway": score < 90
+            "proceed_anyway": final_decision_score < 90
         }
     })))
 }
