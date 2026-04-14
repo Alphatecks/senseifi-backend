@@ -364,6 +364,10 @@ impl SenseiguardService {
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
         let assets = SenseiguardRepository::list_assets(pool, wallet_id).await?;
         let activity = SenseiguardRepository::list_activity(pool, wallet_id, 10).await?;
+        let recent_threats = SenseiguardRepository::list_threats(pool, wallet_id, 12).await?;
+        let approval_alerts = SenseiguardRepository::list_approval_alerts(pool, address, 12).await?;
+        let blocked_contracts =
+            SenseiguardRepository::list_blocked_contracts(pool, address).await?;
 
         let mut observations: Vec<ScanObservation> = Vec::new();
 
@@ -438,17 +442,115 @@ impl SenseiguardService {
             })),
         });
 
+        if !recent_threats.is_empty() {
+            let causes: Vec<serde_json::Value> = recent_threats
+                .iter()
+                .map(Self::threat_to_cause)
+                .collect();
+            observations.push(ScanObservation {
+                observation_type: "threat_causes".to_string(),
+                title: "Detected threat causes".to_string(),
+                description: Some(format!(
+                    "{} concrete threat cause(s) found in recent detections.",
+                    causes.len()
+                )),
+                severity: Some(
+                    if recent_threats
+                        .iter()
+                        .any(|t| t.severity.eq_ignore_ascii_case("high"))
+                    {
+                        "critical".to_string()
+                    } else {
+                        "warning".to_string()
+                    },
+                ),
+                detail: Some(serde_json::json!({ "causes": causes })),
+            });
+        }
+
+        if !approval_alerts.is_empty() {
+            let causes: Vec<serde_json::Value> = approval_alerts
+                .iter()
+                .map(|a| {
+                    serde_json::json!({
+                        "type": "approval_alert",
+                        "title": "High-risk approval detected",
+                        "reason": format!(
+                            "Approval to {} scored {} risk.",
+                            Self::short_address(&a.spender_address),
+                            a.risk_score
+                        ),
+                        "severity": if a.risk_score >= 80 { "high" } else { "medium" },
+                        "contract": a.spender_address,
+                        "detected_at": a.created_at,
+                    })
+                })
+                .collect();
+            observations.push(ScanObservation {
+                observation_type: "approval_causes".to_string(),
+                title: "Approval-based risk causes".to_string(),
+                description: Some("High-risk approvals can allow token draining.".to_string()),
+                severity: Some("warning".to_string()),
+                detail: Some(serde_json::json!({ "causes": causes })),
+            });
+        }
+
+        if !blocked_contracts.is_empty() {
+            observations.push(ScanObservation {
+                observation_type: "blocked_contracts".to_string(),
+                title: "Blocked contract interactions".to_string(),
+                description: Some(format!(
+                    "{} contract(s) are blocked by protection settings.",
+                    blocked_contracts.len()
+                )),
+                severity: Some("info".to_string()),
+                detail: Some(serde_json::json!({
+                    "contracts": blocked_contracts
+                        .iter()
+                        .take(8)
+                        .map(|c| c.contract_address.clone())
+                        .collect::<Vec<_>>()
+                })),
+            });
+        }
+
         observations.push(ScanObservation {
             observation_type: "summary".to_string(),
             title: "Scan complete".to_string(),
-            description: Some("Wallet scanned. No on-chain data fetched in this version; integrate RPC/indexer for full analysis.".to_string()),
+            description: Some(
+                "Wallet scanned with exact threat-cause extraction from recent detections and approval alerts."
+                    .to_string(),
+            ),
             severity: Some("info".to_string()),
             detail: None,
         });
 
+        let threat_penalty: i32 = recent_threats
+            .iter()
+            .map(|t| match t.severity.to_lowercase().as_str() {
+                "high" => 12,
+                "medium" => 7,
+                _ => 3,
+            })
+            .sum();
+        let approval_penalty: i32 = approval_alerts
+            .iter()
+            .map(|a| {
+                if a.risk_score >= 85 {
+                    10
+                } else if a.risk_score >= 60 {
+                    6
+                } else {
+                    3
+                }
+            })
+            .sum();
+
         let score = (100i32)
-            .saturating_sub(threats_count as i32 * 5)
-            .saturating_sub(high_risk_alerts as i32 * 10)
+            .saturating_sub(threat_penalty)
+            .saturating_sub(approval_penalty)
+            .saturating_sub((suspicious_activity as i32).saturating_mul(4))
+            .saturating_sub((high_risk_alerts as i32).saturating_mul(4))
             .clamp(0, 100);
 
         let observations_json =
@@ -464,6 +566,28 @@ impl SenseiguardService {
             scanned_at: scan.scanned_at,
             observations,
         })
+    }
+
+    fn threat_to_cause(t: &Threat) -> serde_json::Value {
+        serde_json::json!({
+            "type": t.threat_type.clone().unwrap_or_else(|| "unknown".to_string()),
+            "title": t.title,
+            "reason": t
+                .explanation
+                .clone()
+                .unwrap_or_else(|| "Threat detected by security engine signals.".to_string()),
+            "severity": t.severity,
+            "contract": t.source_contract,
+            "detected_at": t.detected_at,
+            "surface": t.surface,
+        })
+    }
+
+    fn short_address(addr: &str) -> String {
+        if addr.len() < 12 {
+            return addr.to_string();
+        }
+        format!("{}...{}", &addr[..6], &addr[addr.len() - 4..])
     }
 
     pub async fn dashboard_summary(
