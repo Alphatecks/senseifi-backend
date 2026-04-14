@@ -126,6 +126,94 @@ pub async fn fetch_balance_wei(
     parse_jsonrpc_string_result(&text)
 }
 
+/// ERC-20 symbol() via eth_call (0x95d89b41). Returns decoded symbol string.
+pub async fn fetch_erc20_symbol(
+    token_address: &str,
+    request_chain_id: Option<u64>,
+) -> Result<String, String> {
+    let cid = request_chain_id.unwrap_or(1);
+    let url = rpc_url_for_chain(request_chain_id).ok_or_else(|| rpc_missing_msg(cid))?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "eth_call",
+        "params": [
+            {
+                "to": token_address,
+                "data": "0x95d89b41"
+            },
+            "latest"
+        ]
+    });
+    let res = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let text = res.text().await.map_err(|e| e.to_string())?;
+    let hex = parse_jsonrpc_string_result(&text)?;
+    decode_symbol_result(&hex).ok_or_else(|| "Failed to decode ERC-20 symbol() result".to_string())
+}
+
+fn decode_symbol_result(hex: &str) -> Option<String> {
+    let bytes = hex::decode(hex.strip_prefix("0x").unwrap_or(hex)).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+
+    // ABI dynamic string: offset(32) + len(32) + data
+    if bytes.len() >= 96 {
+        let offset = word_to_usize(&bytes[0..32])?;
+        if offset == 32 && bytes.len() >= 64 {
+            let len = word_to_usize(&bytes[32..64])?;
+            let start = 64usize;
+            let end = start.saturating_add(len).min(bytes.len());
+            if start < end {
+                let s = String::from_utf8_lossy(&bytes[start..end])
+                    .trim()
+                    .to_string();
+                if !s.is_empty() {
+                    return Some(s);
+                }
+            }
+        }
+    }
+
+    // Some contracts return bytes32; trim trailing zero bytes.
+    let take = bytes.len().min(32);
+    let mut raw = bytes[..take].to_vec();
+    while raw.last().copied() == Some(0) {
+        raw.pop();
+    }
+    let s = String::from_utf8_lossy(&raw).trim().to_string();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
+fn word_to_usize(word: &[u8]) -> Option<usize> {
+    if word.len() != 32 {
+        return None;
+    }
+    let usize_bytes = std::mem::size_of::<usize>();
+    if word[..(32 - usize_bytes)].iter().any(|b| *b != 0) {
+        return None;
+    }
+    let mut out: usize = 0;
+    for b in &word[(32 - usize_bytes)..] {
+        out = (out << 8) | (*b as usize);
+    }
+    Some(out)
+}
+
 fn rpc_missing_msg(chain_id: u64) -> String {
     format!(
         "No RPC URL for chain_id {}. Set the matching env (e.g. OPTIMISM_RPC_URL for 10, BASE_RPC_URL for 8453) or RPC_URL_{}.",
