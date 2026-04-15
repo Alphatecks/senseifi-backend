@@ -1073,6 +1073,29 @@ impl SenseiguardRepository {
         Ok(row.0)
     }
 
+    /// Contract-call activity count in the last 24h across wallets for one user.
+    pub async fn activity_contract_calls_count_since_global_for_user(
+        pool: &DbPool,
+        user_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true
+              AND w.user_id = $1
+              AND af.created_at >= $2
+              AND af.activity_type IN ('contract_call', 'contract')
+            "#,
+        )
+        .bind(user_id)
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
     /// Transaction monitoring totals across all wallets: (total_rows, high_risk_count).
     pub async fn transaction_monitoring_global_totals(pool: &DbPool) -> Result<(i64, i64), Error> {
         let total: (i64,) = sqlx::query_as(

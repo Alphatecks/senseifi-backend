@@ -1072,10 +1072,19 @@ impl SenseiguardService {
                 pool, user_id, since_24h,
             )
             .await?;
+        let contract_calls_24h =
+            SenseiguardRepository::activity_contract_calls_count_since_global_for_user(
+                pool, user_id, since_24h,
+            )
+            .await?;
 
-        let (total_risk_items, high_risk_connections) =
+        let (total_risk_items_raw, high_risk_connections_raw) =
             SenseiguardRepository::transaction_monitoring_global_totals_for_user(pool, user_id)
                 .await?;
+        // Fallback to detected threats when transaction_monitoring rows are missing/stale.
+        let threat_total = threats_high + threats_medium + threats_low;
+        let total_risk_items = total_risk_items_raw.max(threat_total);
+        let high_risk_connections = high_risk_connections_raw.max(threats_high);
         let active_dapps = SenseiguardRepository::count_dapp_connections_for_user(pool, user_id)
             .await
             .unwrap_or(0);
@@ -1095,7 +1104,7 @@ impl SenseiguardService {
             activity_timeline,
             recent_activity: RecentActivityOverview {
                 transactions_24h,
-                contract_calls_24h: 0, // not tracked in DB; use ingest or external API to populate
+                contract_calls_24h,
                 suspicious_events_24h,
             },
             connected_risk: ConnectedRiskOverview {
