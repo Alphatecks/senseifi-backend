@@ -1076,6 +1076,9 @@ impl SenseiguardService {
         let (total_risk_items, high_risk_connections) =
             SenseiguardRepository::transaction_monitoring_global_totals_for_user(pool, user_id)
                 .await?;
+        let active_dapps = SenseiguardRepository::count_dapp_connections_for_user(pool, user_id)
+            .await
+            .unwrap_or(0);
 
         Ok(DashboardOverviewResponse {
             wallet_status: WalletStatusOverview {
@@ -1098,7 +1101,7 @@ impl SenseiguardService {
             connected_risk: ConnectedRiskOverview {
                 total_risk_items,
                 high_risk_connections,
-                active_dapps: 0, // no dApp table; use ingest or external API to populate
+                active_dapps,
             },
         })
     }

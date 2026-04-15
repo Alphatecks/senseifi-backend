@@ -2226,7 +2226,7 @@ impl SenseiguardRepository {
             SELECT dc.wallet_address, dc.domain, dc.dapp_name, dc.description, dc.tokens,
                    dc.connected_at, dc.last_activity_at
             FROM dapp_connections dc
-            JOIN wallets w ON w.address = dc.wallet_address AND w.is_active = true
+            JOIN wallets w ON LOWER(w.address) = LOWER(dc.wallet_address) AND w.is_active = true
             WHERE w.user_id = $1
             ORDER BY dc.last_activity_at DESC
             "#,
@@ -2234,6 +2234,25 @@ impl SenseiguardRepository {
         .bind(user_id)
         .fetch_all(pool)
         .await
+    }
+
+    /// Count connected dApps across a user's active wallets for dashboard overview.
+    pub async fn count_dapp_connections_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM dapp_connections dc
+            JOIN wallets w ON LOWER(w.address) = LOWER(dc.wallet_address) AND w.is_active = true
+            WHERE w.user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
     }
 
     /// List all dApp connections (when no user_id; fallback for activity monitor).
