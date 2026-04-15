@@ -1047,8 +1047,15 @@ impl SenseiguardService {
 
         let last_scan_at =
             SenseiguardRepository::global_last_scan_at_for_user(pool, user_id).await?;
-        let (alerts_high, alerts_medium, alerts_low) =
+        let (alerts_high_raw, alerts_medium_raw, alerts_low_raw) =
             SenseiguardRepository::alerts_count_by_severity_global_for_user(pool, user_id).await?;
+        let (threats_high, threats_medium, threats_low) =
+            SenseiguardRepository::threat_count_by_severity_global_for_user(pool, user_id).await?;
+        // Some detection paths write `threats` without creating `alerts`; take the max per bucket
+        // so Active Alerts does not incorrectly show zero for flagged wallets.
+        let alerts_high = alerts_high_raw.max(threats_high);
+        let alerts_medium = alerts_medium_raw.max(threats_medium);
+        let alerts_low = alerts_low_raw.max(threats_low);
         let activity_timeline = SenseiguardRepository::list_activity_across_wallets_for_user(
             pool,
             user_id,

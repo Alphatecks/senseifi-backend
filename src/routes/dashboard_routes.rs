@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::clients::moralis_wallet;
 use crate::db::DbPool;
@@ -83,6 +84,12 @@ fn default_live_signals_limit() -> i64 {
     10
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct LiveScamSignalDetailQuery {
+    user_id: Option<String>,
+    wallet_address: Option<String>,
+}
+
 /// Body for POST /api/dashboard/{address}/analyze-tx (doc: to, value, data, gas, chainId).
 #[derive(Debug, serde::Deserialize)]
 struct DashboardAnalyzeTxBody {
@@ -126,11 +133,32 @@ struct LiveScamSignalSummaryItem {
     source_contract: Option<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct LiveScamSignalDetailItem {
+    id: String,
+    wallet_address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_contract: Option<String>,
+    threat_type: String,
+    risk_level: String,
+    title: String,
+    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    explanation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    surface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    risk_breakdown: Option<Value>,
+    detected_at: String,
+    created_at: String,
+}
+
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
         .route("/security-overview", get(security_overview))
         .route("/live-scam-signals/summary", get(live_scam_signals_summary))
+        .route("/live-scam-signals/{signal_id}", get(live_scam_signal_detail))
         .route(
             "/community-reported-threats",
             get(community_reported_threats),
@@ -388,6 +416,64 @@ async fn live_scam_signals_summary(
     Ok(Json(json!({
         "success": true,
         "data": items
+    })))
+}
+
+/// GET /api/dashboard/live-scam-signals/{signal_id} — full detail for one live scam signal item.
+async fn live_scam_signal_detail(
+    State(pool): State<DbPool>,
+    Path(signal_id): Path<String>,
+    Query(q): Query<LiveScamSignalDetailQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let id = Uuid::parse_str(signal_id.trim()).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "Invalid signal_id format" })),
+        )
+    })?;
+    let user_id =
+        resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref())
+            .await;
+    let user_id_opt = if user_id.trim().is_empty() {
+        None
+    } else {
+        Some(user_id.as_str())
+    };
+    let row = SenseiguardRepository::get_threat_for_dashboard_by_id(&pool, id, user_id_opt)
+        .await
+        .map_err(|e| {
+            eprintln!("live_scam_signal_detail: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load live scam signal detail" })),
+            )
+        })?;
+
+    let Some(r) = row else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Live scam signal not found" })),
+        ));
+    };
+
+    let item = LiveScamSignalDetailItem {
+        id: r.id.to_string(),
+        wallet_address: r.wallet_address,
+        source_contract: r.source_contract.clone(),
+        threat_type: dashboard_threat_type_label(r.threat_type.as_deref(), &r.title),
+        risk_level: dashboard_risk_level_label(&r.severity),
+        title: r.title.clone(),
+        summary: build_signal_summary(r.explanation.as_deref(), &r.title),
+        explanation: r.explanation,
+        surface: r.surface,
+        risk_breakdown: r.risk_breakdown,
+        detected_at: r.detected_at.to_rfc3339(),
+        created_at: r.created_at.to_rfc3339(),
+    };
+
+    Ok(Json(json!({
+        "success": true,
+        "data": item
     })))
 }
 

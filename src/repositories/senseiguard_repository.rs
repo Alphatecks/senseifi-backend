@@ -61,6 +61,22 @@ pub struct ThreatDetectionRow {
     pub source_contract: Option<String>,
 }
 
+/// Detailed threat row for per-live-signal detail endpoint.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ThreatDetectionDetailRow {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub threat_type: Option<String>,
+    pub title: String,
+    pub severity: String,
+    pub explanation: Option<String>,
+    pub detected_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub source_contract: Option<String>,
+    pub surface: Option<String>,
+    pub risk_breakdown: Option<serde_json::Value>,
+}
+
 /// Row for Activity Monitor "Connected wallet" list: wallet + security_score + last_scan_at.
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ActivityMonitorWalletRow {
@@ -441,6 +457,47 @@ impl SenseiguardRepository {
                 )
                 .bind(limit)
                 .fetch_all(pool)
+                .await
+            }
+        }
+    }
+
+    /// Fetch one threat detection by id for live-signal detail view. Optional user_id scopes access.
+    pub async fn get_threat_for_dashboard_by_id(
+        pool: &DbPool,
+        id: Uuid,
+        user_id: Option<&str>,
+    ) -> Result<Option<ThreatDetectionDetailRow>, Error> {
+        match user_id {
+            Some(uid) if !uid.trim().is_empty() => {
+                sqlx::query_as(
+                    r#"
+                    SELECT t.id, w.address AS wallet_address, t.threat_type, t.title, t.severity,
+                           t.explanation, t.detected_at, t.created_at, t.source_contract, t.surface, t.risk_breakdown
+                    FROM threats t
+                    JOIN wallets w ON w.id = t.wallet_id
+                    WHERE t.id = $1 AND w.is_active = true AND w.user_id = $2
+                    LIMIT 1
+                    "#,
+                )
+                .bind(id)
+                .bind(uid)
+                .fetch_optional(pool)
+                .await
+            }
+            _ => {
+                sqlx::query_as(
+                    r#"
+                    SELECT t.id, w.address AS wallet_address, t.threat_type, t.title, t.severity,
+                           t.explanation, t.detected_at, t.created_at, t.source_contract, t.surface, t.risk_breakdown
+                    FROM threats t
+                    JOIN wallets w ON w.id = t.wallet_id
+                    WHERE t.id = $1 AND w.is_active = true
+                    LIMIT 1
+                    "#,
+                )
+                .bind(id)
+                .fetch_optional(pool)
                 .await
             }
         }
@@ -871,6 +928,31 @@ impl SenseiguardRepository {
         .fetch_one(pool)
         .await?;
         Ok((high.0, medium.0, low.0))
+    }
+
+    /// Threat detections by severity across active wallets for one user (last 30 days).
+    /// Used as a fallback source for Active Alerts when alert rows are missing.
+    pub async fn threat_count_by_severity_global_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<(i64, i64, i64), Error> {
+        let row: (i64, i64, i64) = sqlx::query_as(
+            r#"
+            SELECT
+                COALESCE(SUM(CASE WHEN LOWER(t.severity) IN ('critical', 'high') THEN 1 ELSE 0 END), 0)::bigint AS high_count,
+                COALESCE(SUM(CASE WHEN LOWER(t.severity) IN ('medium', 'warning') THEN 1 ELSE 0 END), 0)::bigint AS medium_count,
+                COALESCE(SUM(CASE WHEN LOWER(t.severity) IN ('low', 'info') OR t.severity IS NULL OR t.severity = '' THEN 1 ELSE 0 END), 0)::bigint AS low_count
+            FROM threats t
+            JOIN wallets w ON w.id = t.wallet_id
+            WHERE w.is_active = true
+              AND w.user_id = $1
+              AND t.detected_at >= (NOW() - INTERVAL '30 days')
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row)
     }
 
     /// Activity feed across all active wallets, most recent first.
