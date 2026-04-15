@@ -72,6 +72,17 @@ struct ThreatIntelligenceQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct LiveScamSignalsSummaryQuery {
+    user_id: Option<String>,
+    wallet_address: Option<String>,
+    #[serde(default = "default_live_signals_limit")]
+    limit: i64,
+}
+fn default_live_signals_limit() -> i64 {
+    10
+}
+
 /// Body for POST /api/dashboard/{address}/analyze-tx (doc: to, value, data, gas, chainId).
 #[derive(Debug, serde::Deserialize)]
 struct DashboardAnalyzeTxBody {
@@ -102,10 +113,24 @@ struct ThreatIntelligenceItem {
     source_contract: Option<String>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct LiveScamSignalSummaryItem {
+    id: String,
+    address: String,
+    threat_type: String,
+    risk_level: String,
+    detected_at: String,
+    title: String,
+    summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_contract: Option<String>,
+}
+
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
         .route("/security-overview", get(security_overview))
+        .route("/live-scam-signals/summary", get(live_scam_signals_summary))
         .route(
             "/community-reported-threats",
             get(community_reported_threats),
@@ -322,6 +347,50 @@ async fn security_overview(
     }
 }
 
+/// GET /api/dashboard/live-scam-signals/summary — concise summary payload for each live scam signal.
+async fn live_scam_signals_summary(
+    State(pool): State<DbPool>,
+    Query(q): Query<LiveScamSignalsSummaryQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id =
+        resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref())
+            .await;
+    let limit = q.limit.clamp(1, 100);
+    let user_id_opt = if user_id.trim().is_empty() {
+        None
+    } else {
+        Some(user_id.as_str())
+    };
+    let rows = SenseiguardRepository::list_threats_for_dashboard(&pool, user_id_opt, limit)
+        .await
+        .map_err(|e| {
+            eprintln!("live_scam_signals_summary: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load live scam signal summaries" })),
+            )
+        })?;
+
+    let items: Vec<LiveScamSignalSummaryItem> = rows
+        .into_iter()
+        .map(|r| LiveScamSignalSummaryItem {
+            id: r.id.to_string(),
+            address: short_address(r.source_contract.as_deref().unwrap_or(&r.wallet_address)),
+            threat_type: dashboard_threat_type_label(r.threat_type.as_deref(), &r.title),
+            risk_level: dashboard_risk_level_label(&r.severity),
+            detected_at: r.detected_at.to_rfc3339(),
+            title: r.title.clone(),
+            summary: build_signal_summary(r.explanation.as_deref(), &r.title),
+            source_contract: r.source_contract,
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "success": true,
+        "data": items
+    })))
+}
+
 /// GET /api/dashboard/community-reported-threats — table data: threat type, description, network, risk level, reports, status, last seen.
 async fn community_reported_threats(
     State(pool): State<DbPool>,
@@ -422,6 +491,48 @@ fn chain_id_to_network_name(chain_id: i64) -> String {
         43114 => "Avalanche".to_string(),
         101 => "Solana".to_string(),
         _ => format!("Chain {}", chain_id),
+    }
+}
+
+fn short_address(address: &str) -> String {
+    if address.len() >= 10 {
+        format!("{}...{}", &address[..6], &address[address.len() - 4..])
+    } else {
+        address.to_string()
+    }
+}
+
+fn dashboard_risk_level_label(severity: &str) -> String {
+    match severity.to_lowercase().as_str() {
+        "critical" => "Critical".to_string(),
+        "high" => "High Risk".to_string(),
+        "medium" => "Medium".to_string(),
+        _ => "Low".to_string(),
+    }
+}
+
+fn dashboard_threat_type_label(threat_type: Option<&str>, fallback_title: &str) -> String {
+    match threat_type.unwrap_or("").to_lowercase().as_str() {
+        "phishing_indicator" | "frontend_phishing" => "Phishing".to_string(),
+        "malicious_transaction" => "Malware".to_string(),
+        "unlimited_approval" => "Approval".to_string(),
+        "risky_token" => "Risky Token".to_string(),
+        _ => fallback_title
+            .split_whitespace()
+            .next()
+            .map(str::to_string)
+            .unwrap_or_else(|| "Threat".to_string()),
+    }
+}
+
+fn build_signal_summary(explanation: Option<&str>, title: &str) -> String {
+    let raw = explanation.unwrap_or(title).trim();
+    let mut chars = raw.chars();
+    let summary: String = chars.by_ref().take(160).collect();
+    if chars.next().is_some() {
+        format!("{}...", summary)
+    } else {
+        summary
     }
 }
 
