@@ -179,6 +179,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
             post(run_full_scan).get(get_latest_scan_report),
         )
         .route("/{address}/threats", get(list_threats))
+        .route("/{address}/where-to-fix", get(where_to_fix))
         .route("/{address}/risky-tokens", get(list_risky_tokens))
         .route("/{address}/scans", get(list_scans))
         .route("/{address}/alerts/unread", get(list_unread_alerts))
@@ -1152,10 +1153,16 @@ async fn list_threats(
     }
     let limit = q.limit.clamp(1, 100);
     match SenseiguardService::list_threats(&pool, &address, limit).await {
-        Ok(list) => Ok(Json(json!({
+        Ok(list) => {
+            let enriched: Vec<Value> = list
+                .iter()
+                .map(SenseiguardService::threat_with_guidance)
+                .collect();
+            Ok(Json(json!({
             "success": true,
-            "data": list
-        }))),
+            "data": enriched
+        })))
+        }
         Err(sqlx::Error::RowNotFound) => Err((
             StatusCode::NOT_FOUND,
             Json(json!({ "success": false, "error": "Wallet not found" })),
@@ -1165,6 +1172,66 @@ async fn list_threats(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list threats" })),
+            ))
+        }
+    }
+}
+
+async fn where_to_fix(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let limit = q.limit.clamp(1, 100);
+    match SenseiguardService::list_threats(&pool, &address, limit).await {
+        Ok(list) => {
+            let items: Vec<Value> = list
+                .iter()
+                .map(|t| {
+                    json!({
+                        "id": t.id,
+                        "title": t.title,
+                        "severity": t.severity,
+                        "threat_type": t.threat_type,
+                        "surface": t.surface,
+                        "source_contract": t.source_contract,
+                        "detected_at": t.detected_at,
+                        "where_to_fix": SenseiguardService::threat_fix_location(t),
+                        "recommended_action": SenseiguardService::threat_recommended_action(t),
+                        "fix_steps": SenseiguardService::threat_fix_steps(t),
+                    })
+                })
+                .collect();
+            let high_priority = items
+                .iter()
+                .filter(|x| {
+                    x.get("severity")
+                        .and_then(Value::as_str)
+                        .map(|s| matches!(s.to_lowercase().as_str(), "high" | "critical"))
+                        .unwrap_or(false)
+                })
+                .count();
+            Ok(Json(json!({
+                "success": true,
+                "data": items,
+                "meta": {
+                    "count": list.len(),
+                    "high_priority_count": high_priority
+                }
+            })))
+        }
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("where_to_fix: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load where-to-fix guidance" })),
             ))
         }
     }

@@ -44,6 +44,25 @@ struct MultiChainNativeAggregate {
 }
 
 impl SenseiguardService {
+    pub fn threat_with_guidance(t: &Threat) -> serde_json::Value {
+        serde_json::json!({
+            "id": t.id,
+            "wallet_id": t.wallet_id,
+            "severity": t.severity,
+            "title": t.title,
+            "source_contract": t.source_contract,
+            "detected_at": t.detected_at,
+            "created_at": t.created_at,
+            "threat_type": t.threat_type,
+            "surface": t.surface,
+            "explanation": t.explanation,
+            "risk_breakdown": t.risk_breakdown,
+            "where_to_fix": Self::threat_fix_location(t),
+            "recommended_action": Self::threat_recommended_action(t),
+            "fix_steps": Self::threat_fix_steps(t),
+        })
+    }
+
     async fn wallet_id_by_address(pool: &DbPool, address: &str) -> Result<Uuid, Error> {
         let wallet = WalletRepository::get_wallet_by_address(pool, address)
             .await?
@@ -580,7 +599,95 @@ impl SenseiguardService {
             "contract": t.source_contract,
             "detected_at": t.detected_at,
             "surface": t.surface,
+            "where_to_fix": Self::threat_fix_location(t),
+            "recommended_action": Self::threat_recommended_action(t),
+            "fix_steps": Self::threat_fix_steps(t),
         })
+    }
+
+    pub fn threat_fix_location(t: &Threat) -> String {
+        match t.surface.as_deref().unwrap_or("").to_lowercase().as_str() {
+            "tx_intent" => "Pending transaction in wallet confirmation".to_string(),
+            "wallet_state" => "Wallet approvals and connected contracts".to_string(),
+            "contract" => "Contract interaction target".to_string(),
+            "off_chain" => "Website/domain or dApp connection".to_string(),
+            _ => {
+                if t.source_contract.is_some() {
+                    "Flagged contract interaction".to_string()
+                } else {
+                    "Wallet security activity".to_string()
+                }
+            }
+        }
+    }
+
+    pub fn threat_recommended_action(t: &Threat) -> String {
+        let threat_type = t.threat_type.as_deref().unwrap_or("").to_lowercase();
+        match threat_type.as_str() {
+            "malicious_transaction" | "signature_phishing" | "drainer_pattern" => {
+                "Reject/Cancel this interaction immediately".to_string()
+            }
+            "unlimited_approval" => "Revoke the approval and limit future allowances".to_string(),
+            "phishing_indicator" | "frontend_phishing" => {
+                "Disconnect and avoid this website/domain".to_string()
+            }
+            "risky_token" => "Avoid approvals or swaps involving this token".to_string(),
+            "behavioral_anomaly" => "Review recent activity and lock down wallet permissions".to_string(),
+            _ => "Review threat details and apply wallet protection controls".to_string(),
+        }
+    }
+
+    pub fn threat_fix_steps(t: &Threat) -> Vec<String> {
+        let mut steps = Vec::new();
+        let threat_type = t.threat_type.as_deref().unwrap_or("").to_lowercase();
+        let source_contract = t.source_contract.clone();
+
+        match threat_type.as_str() {
+            "malicious_transaction" | "signature_phishing" | "drainer_pattern" => {
+                steps.push("Cancel or reject the pending transaction/signature request.".to_string());
+                if let Some(contract) = source_contract.as_deref() {
+                    steps.push(format!(
+                        "Block contract {} in protection settings.",
+                        contract
+                    ));
+                }
+                steps.push("Enable high-risk transaction warnings and auto-block high-risk interactions.".to_string());
+            }
+            "unlimited_approval" => {
+                if let Some(contract) = source_contract.as_deref() {
+                    steps.push(format!(
+                        "Revoke token approval for spender {}.",
+                        contract
+                    ));
+                } else {
+                    steps.push("Revoke unlimited token approvals from your wallet.".to_string());
+                }
+                steps.push("Re-approve with exact amount only when needed.".to_string());
+                steps.push("Turn on New Approval Alerts for instant warning on risky approvals.".to_string());
+            }
+            "phishing_indicator" | "frontend_phishing" => {
+                steps.push("Disconnect the wallet from the suspicious dApp/domain.".to_string());
+                steps.push("Do not sign messages or transactions from that domain.".to_string());
+                steps.push("Report the domain and add it to blocklist/watchlist.".to_string());
+            }
+            "risky_token" => {
+                steps.push("Do not grant new approvals to this token/contract.".to_string());
+                steps.push("Avoid swapping or bridging this asset until verified.".to_string());
+                steps.push("Cross-check contract source, liquidity lock, and community abuse reports.".to_string());
+            }
+            "behavioral_anomaly" => {
+                steps.push("Review last 24h wallet activity for unknown interactions.".to_string());
+                steps.push("Enable emergency lock and whitelist trusted addresses only.".to_string());
+                steps.push("Rotate to a clean wallet if suspicious outgoing actions continue.".to_string());
+            }
+            _ => {
+                steps.push("Review the threat explanation and source contract.".to_string());
+                steps.push("Block or watchlist suspicious contracts/domains.".to_string());
+                steps.push("Re-scan wallet after applying protections.".to_string());
+            }
+        }
+
+        steps
     }
 
     fn short_address(addr: &str) -> String {
