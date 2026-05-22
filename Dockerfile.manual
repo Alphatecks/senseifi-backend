@@ -1,7 +1,8 @@
 # Manual caching approach (backup option)
 # Use this if cargo-chef doesn't work for some reason
 
-FROM rust:1.76-slim as builder
+# Rust ≥1.78 required for Cargo.lock v4 in this workspace
+FROM rust:1.82-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

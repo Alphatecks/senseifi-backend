@@ -1,8 +1,10 @@
 use crate::db::DbPool;
-use crate::models::onchain_payment::{OnchainSubscribeResponse, OnchainSubscribeRequest};
+use crate::models::onchain_payment::{OnchainSubscribeRequest, OnchainSubscribeResponse};
 use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
-use crate::repositories::subscription_repository::{SubscriptionRepository, UpsertSubscriptionInput};
+use crate::repositories::subscription_repository::{
+    SubscriptionRepository, UpsertSubscriptionInput,
+};
 use crate::services::onchain_payment_webhook_service::OnchainPaymentWebhookService;
 use crate::services::plan_catalog::{
     normalize_billing_cycle, normalize_plan, subscription_id_bytes32_hex, OnchainPriceTable,
@@ -67,7 +69,9 @@ impl OnchainSubscribeService {
                     .map(|v| v.trim().to_string())
                     .filter(|v| !v.is_empty())
             })
-            .ok_or_else(|| "token_contract is required (or set ONCHAIN_USDC_CONTRACT)".to_string())?;
+            .ok_or_else(|| {
+                "token_contract is required (or set ONCHAIN_USDC_CONTRACT)".to_string()
+            })?;
 
         let payment_contract = req
             .payment_contract
@@ -153,5 +157,10 @@ impl OnchainSubscribeService {
 fn usdc_decimal_to_base_units_string(d: Decimal) -> String {
     let factor = Decimal::from(1_000_000u32);
     let scaled = (d * factor).trunc();
-    scaled.to_string().split('.').next().unwrap_or("0").to_string()
+    scaled
+        .to_string()
+        .split('.')
+        .next()
+        .unwrap_or("0")
+        .to_string()
 }
