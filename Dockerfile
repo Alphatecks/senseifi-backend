@@ -1,8 +1,8 @@
 # Multi-stage Dockerfile using cargo-chef for optimal caching
 # This is the FASTEST build option - recommended for Render
 
-# Rust ≥1.85 required: edition2024 support for cargo-chef dependency graph
-FROM rust:1.85-slim AS chef
+# Rust ≥1.88 required by cargo-chef's current dependency graph
+FROM rust:1.88-slim AS chef
 WORKDIR /app
 RUN apt-get update && apt-get install -y \
     pkg-config \

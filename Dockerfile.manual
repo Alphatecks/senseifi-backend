@@ -1,8 +1,8 @@
 # Manual caching approach (backup option)
 # Use this if cargo-chef doesn't work for some reason
 
-# Rust ≥1.85 required for edition2024-compatible Cargo toolchain
-FROM rust:1.85-slim AS builder
+# Rust ≥1.88 required by cargo-chef's current dependency graph
+FROM rust:1.88-slim AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
