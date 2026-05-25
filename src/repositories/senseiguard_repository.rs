@@ -2,8 +2,8 @@ use crate::db::DbPool;
 use crate::models::senseiguard::{
     ActivityFeedItem, ActivityFeedItemWithAddress, Alert, ContractFingerprint, ContractScan,
     MonitoredTransaction, ProtectionAutoScan, ScamReport, SecurityScan, Threat,
-    UserBlockedContract, UserContractWatchlist, UserProtectionSettings, WalletApproval,
-    WalletApprovalAlert, WalletAsset, WalletSecurityRule,
+    ThreatRemediationAction, UserBlockedContract, UserContractWatchlist, UserProtectionSettings,
+    WalletApproval, WalletApprovalAlert, WalletAsset, WalletSecurityRule,
 };
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use sqlx::Error;
@@ -313,6 +313,21 @@ impl SenseiguardRepository {
         Ok(row.0)
     }
 
+    pub async fn count_recent_high_risk_alerts(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        since: DateTime<Utc>,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM alerts WHERE wallet_id = $1 AND severity = 'high' AND created_at >= $2",
+        )
+        .bind(wallet_id)
+        .bind(since)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
     pub async fn get_threat_by_id_for_wallet(
         pool: &DbPool,
         wallet_id: Uuid,
@@ -323,6 +338,36 @@ impl SenseiguardRepository {
             .bind(wallet_id)
             .fetch_optional(pool)
             .await
+    }
+
+    pub async fn update_threat_verification(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_id: Uuid,
+        verification_status: &str,
+        verification_method: Option<&str>,
+        verification_message: Option<&str>,
+        verified_at: Option<DateTime<Utc>>,
+    ) -> Result<Option<Threat>, Error> {
+        sqlx::query_as(
+            r#"
+            UPDATE threats
+            SET verification_status = $3,
+                verification_method = $4,
+                verification_message = $5,
+                verified_at = $6
+            WHERE id = $1 AND wallet_id = $2
+            RETURNING *
+            "#,
+        )
+        .bind(threat_id)
+        .bind(wallet_id)
+        .bind(verification_status)
+        .bind(verification_method)
+        .bind(verification_message)
+        .bind(verified_at)
+        .fetch_optional(pool)
+        .await
     }
 
     pub async fn resolve_threat(
@@ -368,6 +413,44 @@ impl SenseiguardRepository {
         .bind(wallet_id)
         .bind(dismiss_reason)
         .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn create_threat_remediation_action(
+        pool: &DbPool,
+        threat_id: Uuid,
+        wallet_id: Uuid,
+        action: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<ThreatRemediationAction, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO threat_remediation_actions (threat_id, wallet_id, action, metadata)
+            VALUES ($1, $2, $3, COALESCE($4, '{}'::jsonb))
+            RETURNING *
+            "#,
+        )
+        .bind(threat_id)
+        .bind(wallet_id)
+        .bind(action)
+        .bind(metadata)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn list_threat_remediation_actions(
+        pool: &DbPool,
+        threat_id: Uuid,
+        wallet_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<ThreatRemediationAction>, Error> {
+        sqlx::query_as(
+            "SELECT * FROM threat_remediation_actions WHERE threat_id = $1 AND wallet_id = $2 ORDER BY created_at DESC LIMIT $3",
+        )
+        .bind(threat_id)
+        .bind(wallet_id)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(pool)
         .await
     }
 

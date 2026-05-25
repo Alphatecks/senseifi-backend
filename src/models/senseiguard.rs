@@ -84,10 +84,32 @@ pub struct Threat {
     pub resolution_note: Option<String>,
     #[serde(default)]
     pub dismiss_reason: Option<String>,
+    #[serde(default = "default_verification_status")]
+    pub verification_status: String,
+    #[serde(default)]
+    pub verified_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub verification_method: Option<String>,
+    #[serde(default)]
+    pub verification_message: Option<String>,
 }
 
 fn default_threat_status() -> String {
     "open".to_string()
+}
+
+fn default_verification_status() -> String {
+    "pending".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ThreatRemediationAction {
+    pub id: Uuid,
+    pub threat_id: Uuid,
+    pub wallet_id: Uuid,
+    pub action: String,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

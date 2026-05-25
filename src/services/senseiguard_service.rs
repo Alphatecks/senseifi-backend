@@ -10,7 +10,7 @@ use crate::models::senseiguard::{
     MetricCard, MonitoredTransaction, NativeChainBalance, OverallRiskCard, RecentActivityOverview,
     ReportedThreatsCard, ScamFrequencyDay, ScamPatternInsightsCard, ScamPatternsCard,
     ScanObservation, SecurityOverviewResponse, SecurityScan, SecurityStatusResponse, Threat,
-    ThreatLevelCard, WalletApproval, WalletAsset, WalletStatusOverview,
+    ThreatLevelCard, ThreatRemediationAction, WalletApproval, WalletAsset, WalletStatusOverview,
 };
 use crate::repositories::senseiguard_repository::{
     ActivityFeedRowLive, SenseiguardRepository, ThreatDetectionRow,
@@ -30,6 +30,22 @@ pub struct WalletHealthRefresh {
     pub risk_score: i32,
     pub risk_level: String,
     pub open_threats: i64,
+}
+
+pub struct ThreatVerificationResult {
+    pub threat: Threat,
+    pub verified: bool,
+    pub verification_status: String,
+    pub verification_method: Option<String>,
+    pub verification_message: String,
+}
+
+pub struct VerifyAllThreatsResult {
+    pub verified_count: i64,
+    pub failed_count: i64,
+    pub not_applicable_count: i64,
+    pub results: Vec<ThreatVerificationResult>,
+    pub health: WalletHealthRefresh,
 }
 
 #[derive(Debug, Default)]
@@ -70,6 +86,10 @@ impl SenseiguardService {
             "dismissed_at": t.dismissed_at,
             "resolution_note": t.resolution_note,
             "dismiss_reason": t.dismiss_reason,
+            "verification_status": t.verification_status,
+            "verified_at": t.verified_at,
+            "verification_method": t.verification_method,
+            "verification_message": t.verification_message,
             "where_to_fix": Self::threat_fix_location(t),
             "recommended_action": Self::threat_recommended_action(t),
             "fix_steps": Self::threat_fix_steps(t),
@@ -873,6 +893,265 @@ impl SenseiguardService {
     ) -> Result<Option<Threat>, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
         SenseiguardRepository::dismiss_threat(pool, wallet_id, threat_id, dismiss_reason).await
+    }
+
+    pub async fn record_threat_action(
+        pool: &DbPool,
+        address: &str,
+        threat_id: Uuid,
+        action: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<Option<ThreatRemediationAction>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let Some(_threat) =
+            SenseiguardRepository::get_threat_by_id_for_wallet(pool, wallet_id, threat_id).await?
+        else {
+            return Ok(None);
+        };
+        let row = SenseiguardRepository::create_threat_remediation_action(
+            pool, threat_id, wallet_id, action, metadata,
+        )
+        .await?;
+        Ok(Some(row))
+    }
+
+    fn has_action(actions: &[ThreatRemediationAction], names: &[&str]) -> bool {
+        actions
+            .iter()
+            .any(|a| names.iter().any(|n| a.action.eq_ignore_ascii_case(n)))
+    }
+
+    async fn verify_single_open_threat(
+        pool: &DbPool,
+        address: &str,
+        wallet_id: Uuid,
+        threat: Threat,
+    ) -> Result<ThreatVerificationResult, Error> {
+        let actions =
+            SenseiguardRepository::list_threat_remediation_actions(pool, threat.id, wallet_id, 100)
+                .await
+                .unwrap_or_default();
+        let threat_type = threat
+            .threat_type
+            .clone()
+            .unwrap_or_default()
+            .to_lowercase();
+        let mut status = "not_applicable".to_string();
+        let mut method: Option<String> = None;
+        let mut message = "No applicable verification strategy for this threat.".to_string();
+        let mut verified = false;
+
+        match threat_type.as_str() {
+            threat_types::UNLIMITED_APPROVAL => {
+                if Self::has_action(&actions, &["revoke_approval", "limit_approval"]) {
+                    status = "verified".to_string();
+                    method = Some("action_log_revoke_approval".to_string());
+                    message = "Approval mitigation action was recorded.".to_string();
+                    verified = true;
+                } else {
+                    status = "not_applicable".to_string();
+                    method = Some("insufficient_allowance_context".to_string());
+                    message =
+                        "No approval-revocation evidence found. Record a revoke action to verify."
+                            .to_string();
+                }
+            }
+            threat_types::MALICIOUS_TRANSACTION
+            | threat_types::DRAINER_PATTERN
+            | threat_types::SIGNATURE_PHISHING => {
+                let blocked = if let Some(contract) = threat.source_contract.as_deref() {
+                    SenseiguardRepository::is_contract_blocked(pool, address, contract)
+                        .await
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if blocked {
+                    status = "verified".to_string();
+                    method = Some("blocked_contract_check".to_string());
+                    message = "Threat source contract is blocked for this wallet.".to_string();
+                    verified = true;
+                } else if Self::has_action(
+                    &actions,
+                    &[
+                        "block_contract",
+                        "reject_tx",
+                        "cancel_transaction",
+                        "proceed_anyway",
+                    ],
+                ) {
+                    status = "verified".to_string();
+                    method = Some("action_log_tx_mitigation".to_string());
+                    message = "Protective transaction action was recorded.".to_string();
+                    verified = true;
+                } else {
+                    status = "failed".to_string();
+                    method = Some("no_mitigation_signal".to_string());
+                    message =
+                        "No blocked-contract or transaction mitigation signal found.".to_string();
+                }
+            }
+            threat_types::PHISHING_INDICATOR | threat_types::FRONTEND_PHISHING => {
+                if Self::has_action(
+                    &actions,
+                    &[
+                        "disconnect_dapp",
+                        "block_domain",
+                        "report_scam",
+                        "block_contract",
+                    ],
+                ) {
+                    status = "verified".to_string();
+                    method = Some("action_log_domain_mitigation".to_string());
+                    message = "Phishing mitigation action was recorded.".to_string();
+                    verified = true;
+                } else {
+                    status = "failed".to_string();
+                    method = Some("no_domain_mitigation".to_string());
+                    message = "No phishing mitigation action found for this threat.".to_string();
+                }
+            }
+            threat_types::RISKY_TOKEN => {
+                if Self::has_action(
+                    &actions,
+                    &[
+                        "hide_token",
+                        "revoke_approval",
+                        "block_contract",
+                        "analyze_contract",
+                    ],
+                ) {
+                    status = "verified".to_string();
+                    method = Some("action_log_token_mitigation".to_string());
+                    message = "Risky-token mitigation action was recorded.".to_string();
+                    verified = true;
+                } else {
+                    status = "failed".to_string();
+                    method = Some("no_token_mitigation".to_string());
+                    message = "No risky-token mitigation action found for this threat.".to_string();
+                }
+            }
+            threat_types::BEHAVIORAL_ANOMALY => {
+                let has_action = Self::has_action(
+                    &actions,
+                    &[
+                        "enable_emergency_lock",
+                        "freeze_wallet",
+                        "block_contract",
+                        "revoke_approval",
+                    ],
+                );
+                if !has_action {
+                    status = "not_applicable".to_string();
+                    method = Some("requires_explicit_user_action".to_string());
+                    message = "Record a protective action to verify behavioral anomaly mitigation."
+                        .to_string();
+                } else {
+                    let recent_high = SenseiguardRepository::count_recent_high_risk_alerts(
+                        pool,
+                        wallet_id,
+                        Utc::now() - Duration::hours(24),
+                    )
+                    .await
+                    .unwrap_or(0);
+                    if recent_high == 0 {
+                        status = "verified".to_string();
+                        method = Some("action_log_plus_recent_alert_window".to_string());
+                        message =
+                            "Protective action recorded and no recent high-risk alerts observed."
+                                .to_string();
+                        verified = true;
+                    } else {
+                        status = "failed".to_string();
+                        method = Some("recent_high_alerts_present".to_string());
+                        message =
+                            "Recent high-risk alerts still present; mitigation not yet confirmed."
+                                .to_string();
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        let verified_at = if verified { Some(Utc::now()) } else { None };
+        let updated = SenseiguardRepository::update_threat_verification(
+            pool,
+            wallet_id,
+            threat.id,
+            &status,
+            method.as_deref(),
+            Some(&message),
+            verified_at,
+        )
+        .await?;
+        let mut out_threat = updated.unwrap_or(threat);
+        if verified {
+            if let Some(resolved) = SenseiguardRepository::resolve_threat(
+                pool,
+                wallet_id,
+                out_threat.id,
+                Some("Auto-resolved after successful threat verification."),
+            )
+            .await?
+            {
+                out_threat = resolved;
+            }
+        }
+        Ok(ThreatVerificationResult {
+            threat: out_threat,
+            verified,
+            verification_status: status,
+            verification_method: method,
+            verification_message: message,
+        })
+    }
+
+    pub async fn verify_threat_for_wallet(
+        pool: &DbPool,
+        address: &str,
+        threat_id: Uuid,
+    ) -> Result<Option<(ThreatVerificationResult, WalletHealthRefresh)>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let Some(threat) =
+            SenseiguardRepository::get_threat_by_id_for_wallet(pool, wallet_id, threat_id).await?
+        else {
+            return Ok(None);
+        };
+        let verification =
+            Self::verify_single_open_threat(pool, address, wallet_id, threat).await?;
+        let health = Self::refresh_wallet_health(pool, address).await?;
+        Ok(Some((verification, health)))
+    }
+
+    pub async fn verify_all_open_threats_for_wallet(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<VerifyAllThreatsResult, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let open = SenseiguardRepository::list_active_threats(pool, wallet_id, 500).await?;
+        let mut results = Vec::with_capacity(open.len());
+        let mut verified_count = 0i64;
+        let mut failed_count = 0i64;
+        let mut not_applicable_count = 0i64;
+
+        for threat in open {
+            let item = Self::verify_single_open_threat(pool, address, wallet_id, threat).await?;
+            match item.verification_status.as_str() {
+                "verified" => verified_count += 1,
+                "failed" => failed_count += 1,
+                _ => not_applicable_count += 1,
+            }
+            results.push(item);
+        }
+
+        let health = Self::refresh_wallet_health(pool, address).await?;
+        Ok(VerifyAllThreatsResult {
+            verified_count,
+            failed_count,
+            not_applicable_count,
+            results,
+            health,
+        })
     }
 
     /// List risky-token threats for a wallet (threat_type = risky_token).

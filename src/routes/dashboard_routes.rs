@@ -191,6 +191,12 @@ pub fn dashboard_routes() -> Router<DbPool> {
             "/{address}/threats/{threat_id}/dismiss",
             post(dismiss_threat),
         )
+        .route("/{address}/threats/{threat_id}/verify", post(verify_threat))
+        .route("/{address}/threats/verify-all", post(verify_all_threats))
+        .route(
+            "/{address}/threats/{threat_id}/actions",
+            post(record_threat_action),
+        )
         .route("/{address}/threats", get(list_threats))
         .route("/{address}/where-to-fix", get(where_to_fix))
         .route("/{address}/risky-tokens", get(list_risky_tokens))
@@ -1160,6 +1166,13 @@ struct DismissThreatRequest {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct ThreatActionRequest {
+    action: String,
+    #[serde(default)]
+    metadata: Option<Value>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct ApprovalsQuery {
     #[serde(default)]
     period: Option<String>,
@@ -1363,6 +1376,136 @@ async fn dismiss_threat(
     }
 }
 
+async fn verify_threat(
+    State(pool): State<DbPool>,
+    Path((address, threat_id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::verify_threat_for_wallet(&pool, &address, threat_id).await {
+        Ok(Some((result, health))) => Ok(Json(json!({
+            "success": true,
+            "data": {
+                "verified": result.verified,
+                "verification_status": result.verification_status,
+                "verification_method": result.verification_method,
+                "verification_message": result.verification_message,
+                "threat": SenseiguardService::threat_with_guidance(&result.threat),
+                "health": {
+                    "previous_score": health.previous_score,
+                    "score": health.score,
+                    "risk_score": health.risk_score,
+                    "risk_level": health.risk_level,
+                    "open_threats": health.open_threats
+                }
+            }
+        }))),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Threat not found" })),
+        )),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("verify_threat: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to verify threat" })),
+            ))
+        }
+    }
+}
+
+async fn verify_all_threats(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::verify_all_open_threats_for_wallet(&pool, &address).await {
+        Ok(out) => Ok(Json(json!({
+            "success": true,
+            "data": {
+                "verified_count": out.verified_count,
+                "failed_count": out.failed_count,
+                "not_applicable_count": out.not_applicable_count,
+                "results": out.results.into_iter().map(|r| json!({
+                    "verified": r.verified,
+                    "verification_status": r.verification_status,
+                    "verification_method": r.verification_method,
+                    "verification_message": r.verification_message,
+                    "threat": SenseiguardService::threat_with_guidance(&r.threat)
+                })).collect::<Vec<_>>(),
+                "health": {
+                    "previous_score": out.health.previous_score,
+                    "score": out.health.score,
+                    "risk_score": out.health.risk_score,
+                    "risk_level": out.health.risk_level,
+                    "open_threats": out.health.open_threats
+                }
+            }
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("verify_all_threats: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to verify threats" })),
+            ))
+        }
+    }
+}
+
+async fn record_threat_action(
+    State(pool): State<DbPool>,
+    Path((address, threat_id)): Path<(String, Uuid)>,
+    Json(req): Json<ThreatActionRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let action = req.action.trim().to_lowercase();
+    if action.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "action is required" })),
+        ));
+    }
+    match SenseiguardService::record_threat_action(
+        &pool,
+        &address,
+        threat_id,
+        &action,
+        req.metadata,
+    )
+    .await
+    {
+        Ok(Some(row)) => Ok(Json(json!({ "success": true, "data": row }))),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Threat not found" })),
+        )),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("record_threat_action: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to record threat action" })),
+            ))
+        }
+    }
+}
+
 async fn where_to_fix(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
@@ -1372,7 +1515,7 @@ async fn where_to_fix(
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
-    match SenseiguardService::list_threats(&pool, &address, limit).await {
+    match SenseiguardService::list_active_threats(&pool, &address, limit).await {
         Ok(list) => {
             let items: Vec<Value> = list
                 .iter()
