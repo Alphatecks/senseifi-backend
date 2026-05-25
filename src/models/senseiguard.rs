@@ -55,6 +55,7 @@ pub mod threat_types {
     pub const DRAINER_PATTERN: &str = "drainer_pattern";
     pub const BEHAVIORAL_ANOMALY: &str = "behavioral_anomaly";
     pub const FRONTEND_PHISHING: &str = "frontend_phishing";
+    pub const POLICY_ENFORCEMENT: &str = "policy_enforcement";
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

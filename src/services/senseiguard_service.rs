@@ -68,6 +68,22 @@ struct MultiChainNativeAggregate {
 }
 
 impl SenseiguardService {
+    fn is_policy_enforcement_threat(t: &Threat) -> bool {
+        if t.threat_type
+            .as_deref()
+            .map(|s| s.eq_ignore_ascii_case(threat_types::POLICY_ENFORCEMENT))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        let title = t.title.to_lowercase();
+        let explanation = t.explanation.as_deref().unwrap_or("").to_lowercase();
+        title.contains("emergency lock is on")
+            || explanation.contains("emergency lock is on")
+            || title.contains("whitelisted addresses are allowed")
+            || explanation.contains("whitelisted addresses are allowed")
+    }
+
     pub fn threat_with_guidance(t: &Threat) -> serde_json::Value {
         serde_json::json!({
             "id": t.id,
@@ -638,6 +654,9 @@ impl SenseiguardService {
     }
 
     pub fn threat_fix_location(t: &Threat) -> String {
+        if Self::is_policy_enforcement_threat(t) {
+            return "Protection settings (Emergency lock whitelist)".to_string();
+        }
         match t.surface.as_deref().unwrap_or("").to_lowercase().as_str() {
             "tx_intent" => "Pending transaction in wallet confirmation".to_string(),
             "wallet_state" => "Wallet approvals and connected contracts".to_string(),
@@ -654,6 +673,9 @@ impl SenseiguardService {
     }
 
     pub fn threat_recommended_action(t: &Threat) -> String {
+        if Self::is_policy_enforcement_threat(t) {
+            return "Add trusted destination to whitelist or keep transaction blocked".to_string();
+        }
         let threat_type = t.threat_type.as_deref().unwrap_or("").to_lowercase();
         match threat_type.as_str() {
             "malicious_transaction" | "signature_phishing" | "drainer_pattern" => {
@@ -672,6 +694,13 @@ impl SenseiguardService {
     }
 
     pub fn threat_fix_steps(t: &Threat) -> Vec<String> {
+        if Self::is_policy_enforcement_threat(t) {
+            return vec![
+                "Open protection settings and review Emergency lock configuration.".to_string(),
+                "If destination is trusted, add it to the whitelist.".to_string(),
+                "If destination is not trusted, keep it blocked and ignore this event.".to_string(),
+            ];
+        }
         let mut steps = Vec::new();
         let threat_type = t.threat_type.as_deref().unwrap_or("").to_lowercase();
         let source_contract = t.source_contract.clone();
@@ -941,136 +970,159 @@ impl SenseiguardService {
         let mut message = "No applicable verification strategy for this threat.".to_string();
         let mut verified = false;
 
-        match threat_type.as_str() {
-            threat_types::UNLIMITED_APPROVAL => {
-                if Self::has_action(&actions, &["revoke_approval", "limit_approval"]) {
-                    status = "verified".to_string();
-                    method = Some("action_log_revoke_approval".to_string());
-                    message = "Approval mitigation action was recorded.".to_string();
-                    verified = true;
-                } else {
-                    status = "not_applicable".to_string();
-                    method = Some("insufficient_allowance_context".to_string());
-                    message =
+        if Self::is_policy_enforcement_threat(&threat) {
+            if Self::has_action(
+                &actions,
+                &[
+                    "whitelist_address",
+                    "allow_address",
+                    "disable_emergency_lock",
+                ],
+            ) {
+                status = "verified".to_string();
+                method = Some("policy_action_log".to_string());
+                message = "Emergency-lock policy adjustment was recorded.".to_string();
+                verified = true;
+            } else {
+                status = "not_applicable".to_string();
+                method = Some("policy_enforcement_event".to_string());
+                message = "This is a policy enforcement event, not a malware incident. Adjust whitelist settings if needed.".to_string();
+            }
+        } else {
+            match threat_type.as_str() {
+                threat_types::UNLIMITED_APPROVAL => {
+                    if Self::has_action(&actions, &["revoke_approval", "limit_approval"]) {
+                        status = "verified".to_string();
+                        method = Some("action_log_revoke_approval".to_string());
+                        message = "Approval mitigation action was recorded.".to_string();
+                        verified = true;
+                    } else {
+                        status = "not_applicable".to_string();
+                        method = Some("insufficient_allowance_context".to_string());
+                        message =
                         "No approval-revocation evidence found. Record a revoke action to verify."
                             .to_string();
+                    }
                 }
-            }
-            threat_types::MALICIOUS_TRANSACTION
-            | threat_types::DRAINER_PATTERN
-            | threat_types::SIGNATURE_PHISHING => {
-                let blocked = if let Some(contract) = threat.source_contract.as_deref() {
-                    SenseiguardRepository::is_contract_blocked(pool, address, contract)
-                        .await
-                        .unwrap_or(false)
-                } else {
-                    false
-                };
-                if blocked {
-                    status = "verified".to_string();
-                    method = Some("blocked_contract_check".to_string());
-                    message = "Threat source contract is blocked for this wallet.".to_string();
-                    verified = true;
-                } else if Self::has_action(
-                    &actions,
-                    &[
-                        "block_contract",
-                        "reject_tx",
-                        "cancel_transaction",
-                        "proceed_anyway",
-                    ],
-                ) {
-                    status = "verified".to_string();
-                    method = Some("action_log_tx_mitigation".to_string());
-                    message = "Protective transaction action was recorded.".to_string();
-                    verified = true;
-                } else {
-                    status = "failed".to_string();
-                    method = Some("no_mitigation_signal".to_string());
-                    message =
-                        "No blocked-contract or transaction mitigation signal found.".to_string();
-                }
-            }
-            threat_types::PHISHING_INDICATOR | threat_types::FRONTEND_PHISHING => {
-                if Self::has_action(
-                    &actions,
-                    &[
-                        "disconnect_dapp",
-                        "block_domain",
-                        "report_scam",
-                        "block_contract",
-                    ],
-                ) {
-                    status = "verified".to_string();
-                    method = Some("action_log_domain_mitigation".to_string());
-                    message = "Phishing mitigation action was recorded.".to_string();
-                    verified = true;
-                } else {
-                    status = "failed".to_string();
-                    method = Some("no_domain_mitigation".to_string());
-                    message = "No phishing mitigation action found for this threat.".to_string();
-                }
-            }
-            threat_types::RISKY_TOKEN => {
-                if Self::has_action(
-                    &actions,
-                    &[
-                        "hide_token",
-                        "revoke_approval",
-                        "block_contract",
-                        "analyze_contract",
-                    ],
-                ) {
-                    status = "verified".to_string();
-                    method = Some("action_log_token_mitigation".to_string());
-                    message = "Risky-token mitigation action was recorded.".to_string();
-                    verified = true;
-                } else {
-                    status = "failed".to_string();
-                    method = Some("no_token_mitigation".to_string());
-                    message = "No risky-token mitigation action found for this threat.".to_string();
-                }
-            }
-            threat_types::BEHAVIORAL_ANOMALY => {
-                let has_action = Self::has_action(
-                    &actions,
-                    &[
-                        "enable_emergency_lock",
-                        "freeze_wallet",
-                        "block_contract",
-                        "revoke_approval",
-                    ],
-                );
-                if !has_action {
-                    status = "not_applicable".to_string();
-                    method = Some("requires_explicit_user_action".to_string());
-                    message = "Record a protective action to verify behavioral anomaly mitigation."
-                        .to_string();
-                } else {
-                    let recent_high = SenseiguardRepository::count_recent_high_risk_alerts(
-                        pool,
-                        wallet_id,
-                        Utc::now() - Duration::hours(24),
-                    )
-                    .await
-                    .unwrap_or(0);
-                    if recent_high == 0 {
+                threat_types::MALICIOUS_TRANSACTION
+                | threat_types::DRAINER_PATTERN
+                | threat_types::SIGNATURE_PHISHING => {
+                    let blocked = if let Some(contract) = threat.source_contract.as_deref() {
+                        SenseiguardRepository::is_contract_blocked(pool, address, contract)
+                            .await
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    if blocked {
                         status = "verified".to_string();
-                        method = Some("action_log_plus_recent_alert_window".to_string());
-                        message =
-                            "Protective action recorded and no recent high-risk alerts observed."
-                                .to_string();
+                        method = Some("blocked_contract_check".to_string());
+                        message = "Threat source contract is blocked for this wallet.".to_string();
+                        verified = true;
+                    } else if Self::has_action(
+                        &actions,
+                        &[
+                            "block_contract",
+                            "reject_tx",
+                            "cancel_transaction",
+                            "proceed_anyway",
+                        ],
+                    ) {
+                        status = "verified".to_string();
+                        method = Some("action_log_tx_mitigation".to_string());
+                        message = "Protective transaction action was recorded.".to_string();
                         verified = true;
                     } else {
                         status = "failed".to_string();
-                        method = Some("recent_high_alerts_present".to_string());
-                        message =
-                            "Recent high-risk alerts still present; mitigation not yet confirmed."
-                                .to_string();
+                        method = Some("no_mitigation_signal".to_string());
+                        message = "No blocked-contract or transaction mitigation signal found."
+                            .to_string();
                     }
                 }
+                threat_types::PHISHING_INDICATOR | threat_types::FRONTEND_PHISHING => {
+                    if Self::has_action(
+                        &actions,
+                        &[
+                            "disconnect_dapp",
+                            "block_domain",
+                            "report_scam",
+                            "block_contract",
+                        ],
+                    ) {
+                        status = "verified".to_string();
+                        method = Some("action_log_domain_mitigation".to_string());
+                        message = "Phishing mitigation action was recorded.".to_string();
+                        verified = true;
+                    } else {
+                        status = "failed".to_string();
+                        method = Some("no_domain_mitigation".to_string());
+                        message =
+                            "No phishing mitigation action found for this threat.".to_string();
+                    }
+                }
+                threat_types::RISKY_TOKEN => {
+                    if Self::has_action(
+                        &actions,
+                        &[
+                            "hide_token",
+                            "revoke_approval",
+                            "block_contract",
+                            "analyze_contract",
+                        ],
+                    ) {
+                        status = "verified".to_string();
+                        method = Some("action_log_token_mitigation".to_string());
+                        message = "Risky-token mitigation action was recorded.".to_string();
+                        verified = true;
+                    } else {
+                        status = "failed".to_string();
+                        method = Some("no_token_mitigation".to_string());
+                        message =
+                            "No risky-token mitigation action found for this threat.".to_string();
+                    }
+                }
+                threat_types::BEHAVIORAL_ANOMALY => {
+                    let has_action = Self::has_action(
+                        &actions,
+                        &[
+                            "enable_emergency_lock",
+                            "freeze_wallet",
+                            "block_contract",
+                            "revoke_approval",
+                        ],
+                    );
+                    if !has_action {
+                        status = "not_applicable".to_string();
+                        method = Some("requires_explicit_user_action".to_string());
+                        message =
+                            "Record a protective action to verify behavioral anomaly mitigation."
+                                .to_string();
+                    } else {
+                        let recent_high = SenseiguardRepository::count_recent_high_risk_alerts(
+                            pool,
+                            wallet_id,
+                            Utc::now() - Duration::hours(24),
+                        )
+                        .await
+                        .unwrap_or(0);
+                        if recent_high == 0 {
+                            status = "verified".to_string();
+                            method = Some("action_log_plus_recent_alert_window".to_string());
+                            message =
+                            "Protective action recorded and no recent high-risk alerts observed."
+                                .to_string();
+                            verified = true;
+                        } else {
+                            status = "failed".to_string();
+                            method = Some("recent_high_alerts_present".to_string());
+                            message =
+                            "Recent high-risk alerts still present; mitigation not yet confirmed."
+                                .to_string();
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         }
 
         let verified_at = if verified { Some(Utc::now()) } else { None };
@@ -1221,6 +1273,9 @@ impl SenseiguardService {
         let open = SenseiguardRepository::list_active_threats(pool, wallet_id, 500).await?;
         let mut threat_penalty: i32 = 0;
         for t in &open {
+            if Self::is_policy_enforcement_threat(t) {
+                continue;
+            }
             threat_penalty += match t.severity.to_lowercase().as_str() {
                 "critical" => 14,
                 "high" => 12,

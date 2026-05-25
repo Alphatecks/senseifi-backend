@@ -89,7 +89,9 @@ pub async fn evaluate_transaction(
                 recommended_action: "Reject transaction".to_string(),
                 blocked: true,
                 band: "Block".to_string(),
-                threat_types: vec![],
+                threat_types: vec![
+                    crate::models::senseiguard::threat_types::POLICY_ENFORCEMENT.to_string()
+                ],
                 explanation: Some(msg.to_string()),
                 risk_breakdown: Some(
                     serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 }),
@@ -654,7 +656,15 @@ pub async fn analyze_tx_and_respond(
         return Ok(build_analyze_tx_response(true, None));
     }
     let r = evaluate_transaction(pool, wallet_address, to, value, data).await?;
-    if (r.risk_score >= 60 || !r.threat_types.is_empty()) && r.risk_score > 0 {
+    let threat_type = r.threat_types.first().map(String::as_str);
+    let is_policy_enforcement = matches!(
+        threat_type,
+        Some(crate::models::senseiguard::threat_types::POLICY_ENFORCEMENT)
+    );
+    if !is_policy_enforcement
+        && (r.risk_score >= 60 || !r.threat_types.is_empty())
+        && r.risk_score > 0
+    {
         if let Ok(Some(wallet)) =
             WalletRepository::get_wallet_by_address(pool, wallet_address).await
         {
@@ -667,7 +677,6 @@ pub async fn analyze_tx_and_respond(
                 .explanation
                 .as_deref()
                 .unwrap_or("Pre-sign transaction risk detected");
-            let threat_type = r.threat_types.first().map(String::as_str);
             let _ = SenseiguardRepository::create_threat_with_surface(
                 pool,
                 wallet.id,
