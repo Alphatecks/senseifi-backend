@@ -643,7 +643,10 @@ impl SenseiguardRepository {
                            t.explanation, t.detected_at, t.source_contract
                     FROM threats t
                     JOIN wallets w ON w.id = t.wallet_id
-                    WHERE w.is_active = true AND w.user_id = $1
+                    WHERE w.is_active = true
+                      AND w.user_id = $1
+                      AND t.status = 'open'
+                      AND COALESCE(LOWER(t.threat_type), '') <> 'policy_enforcement'
                     ORDER BY t.detected_at DESC
                     LIMIT $2
                     "#,
@@ -661,6 +664,8 @@ impl SenseiguardRepository {
                     FROM threats t
                     JOIN wallets w ON w.id = t.wallet_id
                     WHERE w.is_active = true
+                      AND t.status = 'open'
+                      AND COALESCE(LOWER(t.threat_type), '') <> 'policy_enforcement'
                     ORDER BY t.detected_at DESC
                     LIMIT $1
                     "#,
@@ -686,7 +691,11 @@ impl SenseiguardRepository {
                            t.explanation, t.detected_at, t.created_at, t.source_contract, t.surface, t.risk_breakdown
                     FROM threats t
                     JOIN wallets w ON w.id = t.wallet_id
-                    WHERE t.id = $1 AND w.is_active = true AND w.user_id = $2
+                    WHERE t.id = $1
+                      AND w.is_active = true
+                      AND w.user_id = $2
+                      AND t.status = 'open'
+                      AND COALESCE(LOWER(t.threat_type), '') <> 'policy_enforcement'
                     LIMIT 1
                     "#,
                 )
@@ -702,7 +711,10 @@ impl SenseiguardRepository {
                            t.explanation, t.detected_at, t.created_at, t.source_contract, t.surface, t.risk_breakdown
                     FROM threats t
                     JOIN wallets w ON w.id = t.wallet_id
-                    WHERE t.id = $1 AND w.is_active = true
+                    WHERE t.id = $1
+                      AND w.is_active = true
+                      AND t.status = 'open'
+                      AND COALESCE(LOWER(t.threat_type), '') <> 'policy_enforcement'
                     LIMIT 1
                     "#,
                 )
