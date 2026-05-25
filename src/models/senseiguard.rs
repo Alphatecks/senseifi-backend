@@ -74,6 +74,20 @@ pub struct Threat {
     pub explanation: Option<String>,
     #[serde(default)]
     pub risk_breakdown: Option<serde_json::Value>,
+    #[serde(default = "default_threat_status")]
+    pub status: String,
+    #[serde(default)]
+    pub resolved_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub dismissed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub resolution_note: Option<String>,
+    #[serde(default)]
+    pub dismiss_reason: Option<String>,
+}
+
+fn default_threat_status() -> String {
+    "open".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

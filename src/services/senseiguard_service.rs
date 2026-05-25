@@ -24,6 +24,14 @@ use uuid::Uuid;
 
 pub struct SenseiguardService;
 
+pub struct WalletHealthRefresh {
+    pub previous_score: i32,
+    pub score: i32,
+    pub risk_score: i32,
+    pub risk_level: String,
+    pub open_threats: i64,
+}
+
 #[derive(Debug, Default)]
 struct LiveNativeBalanceBreakdown {
     native_balance_wei: String,
@@ -57,6 +65,11 @@ impl SenseiguardService {
             "surface": t.surface,
             "explanation": t.explanation,
             "risk_breakdown": t.risk_breakdown,
+            "status": t.status,
+            "resolved_at": t.resolved_at,
+            "dismissed_at": t.dismissed_at,
+            "resolution_note": t.resolution_note,
+            "dismiss_reason": t.dismiss_reason,
             "where_to_fix": Self::threat_fix_location(t),
             "recommended_action": Self::threat_recommended_action(t),
             "fix_steps": Self::threat_fix_steps(t),
@@ -384,7 +397,8 @@ impl SenseiguardService {
         let assets = SenseiguardRepository::list_assets(pool, wallet_id).await?;
         let activity = SenseiguardRepository::list_activity(pool, wallet_id, 10).await?;
         let recent_threats = SenseiguardRepository::list_threats(pool, wallet_id, 12).await?;
-        let approval_alerts = SenseiguardRepository::list_approval_alerts(pool, address, 12).await?;
+        let approval_alerts =
+            SenseiguardRepository::list_approval_alerts(pool, address, 12).await?;
         let blocked_contracts =
             SenseiguardRepository::list_blocked_contracts(pool, address).await?;
 
@@ -462,10 +476,8 @@ impl SenseiguardService {
         });
 
         if !recent_threats.is_empty() {
-            let causes: Vec<serde_json::Value> = recent_threats
-                .iter()
-                .map(Self::threat_to_cause)
-                .collect();
+            let causes: Vec<serde_json::Value> =
+                recent_threats.iter().map(Self::threat_to_cause).collect();
             observations.push(ScanObservation {
                 observation_type: "threat_causes".to_string(),
                 title: "Detected threat causes".to_string(),
@@ -632,7 +644,9 @@ impl SenseiguardService {
                 "Disconnect and avoid this website/domain".to_string()
             }
             "risky_token" => "Avoid approvals or swaps involving this token".to_string(),
-            "behavioral_anomaly" => "Review recent activity and lock down wallet permissions".to_string(),
+            "behavioral_anomaly" => {
+                "Review recent activity and lock down wallet permissions".to_string()
+            }
             _ => "Review threat details and apply wallet protection controls".to_string(),
         }
     }
@@ -644,26 +658,31 @@ impl SenseiguardService {
 
         match threat_type.as_str() {
             "malicious_transaction" | "signature_phishing" | "drainer_pattern" => {
-                steps.push("Cancel or reject the pending transaction/signature request.".to_string());
+                steps.push(
+                    "Cancel or reject the pending transaction/signature request.".to_string(),
+                );
                 if let Some(contract) = source_contract.as_deref() {
                     steps.push(format!(
                         "Block contract {} in protection settings.",
                         contract
                     ));
                 }
-                steps.push("Enable high-risk transaction warnings and auto-block high-risk interactions.".to_string());
+                steps.push(
+                    "Enable high-risk transaction warnings and auto-block high-risk interactions."
+                        .to_string(),
+                );
             }
             "unlimited_approval" => {
                 if let Some(contract) = source_contract.as_deref() {
-                    steps.push(format!(
-                        "Revoke token approval for spender {}.",
-                        contract
-                    ));
+                    steps.push(format!("Revoke token approval for spender {}.", contract));
                 } else {
                     steps.push("Revoke unlimited token approvals from your wallet.".to_string());
                 }
                 steps.push("Re-approve with exact amount only when needed.".to_string());
-                steps.push("Turn on New Approval Alerts for instant warning on risky approvals.".to_string());
+                steps.push(
+                    "Turn on New Approval Alerts for instant warning on risky approvals."
+                        .to_string(),
+                );
             }
             "phishing_indicator" | "frontend_phishing" => {
                 steps.push("Disconnect the wallet from the suspicious dApp/domain.".to_string());
@@ -673,12 +692,19 @@ impl SenseiguardService {
             "risky_token" => {
                 steps.push("Do not grant new approvals to this token/contract.".to_string());
                 steps.push("Avoid swapping or bridging this asset until verified.".to_string());
-                steps.push("Cross-check contract source, liquidity lock, and community abuse reports.".to_string());
+                steps.push(
+                    "Cross-check contract source, liquidity lock, and community abuse reports."
+                        .to_string(),
+                );
             }
             "behavioral_anomaly" => {
                 steps.push("Review last 24h wallet activity for unknown interactions.".to_string());
-                steps.push("Enable emergency lock and whitelist trusted addresses only.".to_string());
-                steps.push("Rotate to a clean wallet if suspicious outgoing actions continue.".to_string());
+                steps.push(
+                    "Enable emergency lock and whitelist trusted addresses only.".to_string(),
+                );
+                steps.push(
+                    "Rotate to a clean wallet if suspicious outgoing actions continue.".to_string(),
+                );
             }
             _ => {
                 steps.push("Review the threat explanation and source contract.".to_string());
@@ -804,6 +830,51 @@ impl SenseiguardService {
         SenseiguardRepository::list_threats(pool, wallet_id, limit).await
     }
 
+    pub async fn list_active_threats(
+        pool: &DbPool,
+        address: &str,
+        limit: i64,
+    ) -> Result<Vec<Threat>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::list_active_threats(pool, wallet_id, limit).await
+    }
+
+    pub async fn list_threat_history(
+        pool: &DbPool,
+        address: &str,
+        page: u32,
+        per_page: u32,
+    ) -> Result<(Vec<Threat>, i64), Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let p = page.max(1);
+        let pp = per_page.clamp(1, 100);
+        let offset = ((p - 1) as i64) * (pp as i64);
+        let rows =
+            SenseiguardRepository::list_threat_history(pool, wallet_id, pp as i64, offset).await?;
+        let total = SenseiguardRepository::count_threat_history(pool, wallet_id).await?;
+        Ok((rows, total))
+    }
+
+    pub async fn resolve_threat(
+        pool: &DbPool,
+        address: &str,
+        threat_id: Uuid,
+        resolution_note: Option<&str>,
+    ) -> Result<Option<Threat>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::resolve_threat(pool, wallet_id, threat_id, resolution_note).await
+    }
+
+    pub async fn dismiss_threat(
+        pool: &DbPool,
+        address: &str,
+        threat_id: Uuid,
+        dismiss_reason: Option<&str>,
+    ) -> Result<Option<Threat>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::dismiss_threat(pool, wallet_id, threat_id, dismiss_reason).await
+    }
+
     /// List risky-token threats for a wallet (threat_type = risky_token).
     pub async fn list_risky_tokens(
         pool: &DbPool,
@@ -846,6 +917,53 @@ impl SenseiguardService {
     ) -> Result<Vec<Alert>, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
         SenseiguardRepository::list_unread_alerts(pool, wallet_id, limit).await
+    }
+
+    pub async fn mark_alert_read(
+        pool: &DbPool,
+        address: &str,
+        alert_id: Uuid,
+    ) -> Result<Option<Alert>, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::mark_alert_read(pool, wallet_id, alert_id).await
+    }
+
+    pub async fn mark_all_alerts_read(pool: &DbPool, address: &str) -> Result<i64, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        SenseiguardRepository::mark_all_alerts_read(pool, wallet_id).await
+    }
+
+    pub async fn refresh_wallet_health(
+        pool: &DbPool,
+        address: &str,
+    ) -> Result<WalletHealthRefresh, Error> {
+        let wallet_id = Self::wallet_id_by_address(pool, address).await?;
+        let previous = Self::get_security_status(pool, address).await?.score;
+        let open = SenseiguardRepository::list_active_threats(pool, wallet_id, 500).await?;
+        let mut threat_penalty: i32 = 0;
+        for t in &open {
+            threat_penalty += match t.severity.to_lowercase().as_str() {
+                "critical" => 14,
+                "high" => 12,
+                "medium" => 7,
+                _ => 3,
+            };
+        }
+        let unread_high = SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
+        let score = 100_i32
+            .saturating_sub(threat_penalty)
+            .saturating_sub((unread_high as i32).saturating_mul(3))
+            .clamp(0, 100);
+        SenseiguardRepository::update_wallet_security_score(pool, wallet_id, score).await?;
+        let risk_score = 100 - score;
+        let risk_level = protection_engine::score_to_band(risk_score).to_string();
+        Ok(WalletHealthRefresh {
+            previous_score: previous,
+            score,
+            risk_score,
+            risk_level,
+            open_threats: open.len() as i64,
+        })
     }
 
     pub async fn list_activity(

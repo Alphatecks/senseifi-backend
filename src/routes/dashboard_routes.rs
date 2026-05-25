@@ -158,7 +158,10 @@ pub fn dashboard_routes() -> Router<DbPool> {
         .route("/overview", get(dashboard_overview))
         .route("/security-overview", get(security_overview))
         .route("/live-scam-signals/summary", get(live_scam_signals_summary))
-        .route("/live-scam-signals/{signal_id}", get(live_scam_signal_detail))
+        .route(
+            "/live-scam-signals/{signal_id}",
+            get(live_scam_signal_detail),
+        )
         .route(
             "/community-reported-threats",
             get(community_reported_threats),
@@ -178,12 +181,25 @@ pub fn dashboard_routes() -> Router<DbPool> {
             "/{address}/scan",
             post(run_full_scan).get(get_latest_scan_report),
         )
+        .route("/{address}/threats/active", get(list_active_threats))
+        .route("/{address}/threats/history", get(list_threat_history))
+        .route(
+            "/{address}/threats/{threat_id}/resolve",
+            post(resolve_threat),
+        )
+        .route(
+            "/{address}/threats/{threat_id}/dismiss",
+            post(dismiss_threat),
+        )
         .route("/{address}/threats", get(list_threats))
         .route("/{address}/where-to-fix", get(where_to_fix))
         .route("/{address}/risky-tokens", get(list_risky_tokens))
         .route("/{address}/scans", get(list_scans))
+        .route("/{address}/alerts/read-all", post(mark_all_alerts_read))
+        .route("/{address}/alerts/{alert_id}/read", post(mark_alert_read))
         .route("/{address}/alerts/unread", get(list_unread_alerts))
         .route("/{address}/alerts", get(list_alerts))
+        .route("/{address}/health/refresh", post(refresh_health))
         .route(
             "/{address}/activity",
             get(list_activity).post(ingest_activity),
@@ -446,7 +462,9 @@ async fn live_scam_signal_detail(
             eprintln!("live_scam_signal_detail: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "success": false, "error": "Failed to load live scam signal detail" })),
+                Json(
+                    json!({ "success": false, "error": "Failed to load live scam signal detail" }),
+                ),
             )
         })?;
 
@@ -1122,6 +1140,26 @@ fn default_limit() -> i64 {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct ThreatHistoryQuery {
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page_10")]
+    per_page: u32,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ResolveThreatRequest {
+    #[serde(default)]
+    resolution_note: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DismissThreatRequest {
+    #[serde(default)]
+    dismiss_reason: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct ApprovalsQuery {
     #[serde(default)]
     period: Option<String>,
@@ -1152,16 +1190,16 @@ async fn list_threats(
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
-    match SenseiguardService::list_threats(&pool, &address, limit).await {
+    match SenseiguardService::list_active_threats(&pool, &address, limit).await {
         Ok(list) => {
             let enriched: Vec<Value> = list
                 .iter()
                 .map(SenseiguardService::threat_with_guidance)
                 .collect();
             Ok(Json(json!({
-            "success": true,
-            "data": enriched
-        })))
+                "success": true,
+                "data": enriched
+            })))
         }
         Err(sqlx::Error::RowNotFound) => Err((
             StatusCode::NOT_FOUND,
@@ -1172,6 +1210,154 @@ async fn list_threats(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list threats" })),
+            ))
+        }
+    }
+}
+
+async fn list_active_threats(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<LimitQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    let limit = q.limit.clamp(1, 100);
+    match SenseiguardService::list_active_threats(&pool, &address, limit).await {
+        Ok(list) => {
+            let enriched: Vec<Value> = list
+                .iter()
+                .map(SenseiguardService::threat_with_guidance)
+                .collect();
+            Ok(Json(json!({
+                "success": true,
+                "data": enriched
+            })))
+        }
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("list_active_threats: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to list active threats" })),
+            ))
+        }
+    }
+}
+
+async fn list_threat_history(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+    Query(q): Query<ThreatHistoryQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::list_threat_history(&pool, &address, q.page, q.per_page).await {
+        Ok((rows, total)) => {
+            let enriched: Vec<Value> = rows
+                .iter()
+                .map(SenseiguardService::threat_with_guidance)
+                .collect();
+            Ok(Json(json!({
+                "success": true,
+                "data": enriched,
+                "pagination": {
+                    "page": q.page.max(1),
+                    "per_page": q.per_page.clamp(1, 100),
+                    "total": total
+                }
+            })))
+        }
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("list_threat_history: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to list threat history" })),
+            ))
+        }
+    }
+}
+
+async fn resolve_threat(
+    State(pool): State<DbPool>,
+    Path((address, threat_id)): Path<(String, Uuid)>,
+    Json(req): Json<ResolveThreatRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::resolve_threat(
+        &pool,
+        &address,
+        threat_id,
+        req.resolution_note.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(threat)) => Ok(Json(json!({
+            "success": true,
+            "data": SenseiguardService::threat_with_guidance(&threat)
+        }))),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Threat not found" })),
+        )),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("resolve_threat: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to resolve threat" })),
+            ))
+        }
+    }
+}
+
+async fn dismiss_threat(
+    State(pool): State<DbPool>,
+    Path((address, threat_id)): Path<(String, Uuid)>,
+    Json(req): Json<DismissThreatRequest>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::dismiss_threat(
+        &pool,
+        &address,
+        threat_id,
+        req.dismiss_reason.as_deref(),
+    )
+    .await
+    {
+        Ok(Some(threat)) => Ok(Json(json!({
+            "success": true,
+            "data": SenseiguardService::threat_with_guidance(&threat)
+        }))),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Threat not found" })),
+        )),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("dismiss_threat: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to dismiss threat" })),
             ))
         }
     }
@@ -1362,6 +1548,95 @@ async fn list_alerts(
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "success": false, "error": "Failed to list alerts" })),
+            ))
+        }
+    }
+}
+
+async fn mark_alert_read(
+    State(pool): State<DbPool>,
+    Path((address, alert_id)): Path<(String, Uuid)>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::mark_alert_read(&pool, &address, alert_id).await {
+        Ok(Some(alert)) => Ok(Json(json!({
+            "success": true,
+            "data": alert
+        }))),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Alert not found" })),
+        )),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("mark_alert_read: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to update alert read status" })),
+            ))
+        }
+    }
+}
+
+async fn mark_all_alerts_read(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::mark_all_alerts_read(&pool, &address).await {
+        Ok(updated) => Ok(Json(json!({
+            "success": true,
+            "updated": updated
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("mark_all_alerts_read: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to update alerts read status" })),
+            ))
+        }
+    }
+}
+
+async fn refresh_health(
+    State(pool): State<DbPool>,
+    Path(address): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !is_valid_eth_address(&address) {
+        return Err(bad_address());
+    }
+    match SenseiguardService::refresh_wallet_health(&pool, &address).await {
+        Ok(out) => Ok(Json(json!({
+            "success": true,
+            "data": {
+                "previous_score": out.previous_score,
+                "score": out.score,
+                "previous_risk_score": 100 - out.previous_score,
+                "risk_score": out.risk_score,
+                "risk_level": out.risk_level,
+                "open_threats": out.open_threats
+            }
+        }))),
+        Err(sqlx::Error::RowNotFound) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({ "success": false, "error": "Wallet not found" })),
+        )),
+        Err(e) => {
+            eprintln!("refresh_health: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to refresh wallet health" })),
             ))
         }
     }

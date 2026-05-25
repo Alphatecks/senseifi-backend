@@ -171,6 +171,25 @@ impl SenseiguardRepository {
         Ok(row)
     }
 
+    pub async fn update_wallet_security_score(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        score: i32,
+    ) -> Result<(), Error> {
+        sqlx::query(
+            r#"
+            UPDATE wallet_monitoring
+            SET security_score = $1, last_scan_at = NOW(), updated_at = NOW()
+            WHERE wallet_id = $2
+            "#,
+        )
+        .bind(score)
+        .bind(wallet_id)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn count_threats_this_month(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
         let start: DateTime<Utc> = Utc::now() - chrono::Duration::days(30);
         let row: (i64,) = sqlx::query_as(
@@ -241,6 +260,114 @@ impl SenseiguardRepository {
         .bind(wallet_id)
         .bind(limit)
         .fetch_all(pool)
+        .await
+    }
+
+    pub async fn list_active_threats(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Threat>, Error> {
+        sqlx::query_as(
+            "SELECT * FROM threats WHERE wallet_id = $1 AND status = 'open' ORDER BY detected_at DESC LIMIT $2",
+        )
+        .bind(wallet_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn list_threat_history(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<Threat>, Error> {
+        sqlx::query_as(
+            "SELECT * FROM threats WHERE wallet_id = $1 AND status IN ('resolved','dismissed') ORDER BY detected_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(wallet_id)
+        .bind(limit)
+        .bind(offset.max(0))
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn count_threat_history(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threats WHERE wallet_id = $1 AND status IN ('resolved','dismissed')",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    pub async fn count_open_threats(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threats WHERE wallet_id = $1 AND status = 'open'",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    pub async fn get_threat_by_id_for_wallet(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_id: Uuid,
+    ) -> Result<Option<Threat>, Error> {
+        sqlx::query_as("SELECT * FROM threats WHERE id = $1 AND wallet_id = $2")
+            .bind(threat_id)
+            .bind(wallet_id)
+            .fetch_optional(pool)
+            .await
+    }
+
+    pub async fn resolve_threat(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_id: Uuid,
+        resolution_note: Option<&str>,
+    ) -> Result<Option<Threat>, Error> {
+        sqlx::query_as(
+            r#"
+            UPDATE threats
+            SET status = 'resolved',
+                resolved_at = COALESCE(resolved_at, NOW()),
+                resolution_note = COALESCE($3, resolution_note)
+            WHERE id = $1 AND wallet_id = $2
+            RETURNING *
+            "#,
+        )
+        .bind(threat_id)
+        .bind(wallet_id)
+        .bind(resolution_note)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn dismiss_threat(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_id: Uuid,
+        dismiss_reason: Option<&str>,
+    ) -> Result<Option<Threat>, Error> {
+        sqlx::query_as(
+            r#"
+            UPDATE threats
+            SET status = 'dismissed',
+                dismissed_at = COALESCE(dismissed_at, NOW()),
+                dismiss_reason = COALESCE($3, dismiss_reason)
+            WHERE id = $1 AND wallet_id = $2
+            RETURNING *
+            "#,
+        )
+        .bind(threat_id)
+        .bind(wallet_id)
+        .bind(dismiss_reason)
+        .fetch_optional(pool)
         .await
     }
 
@@ -1192,6 +1319,39 @@ impl SenseiguardRepository {
         .bind(limit)
         .fetch_all(pool)
         .await
+    }
+
+    pub async fn mark_alert_read(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        alert_id: Uuid,
+    ) -> Result<Option<Alert>, Error> {
+        sqlx::query_as(
+            r#"
+            UPDATE alerts
+            SET read_at = COALESCE(read_at, NOW())
+            WHERE id = $1 AND wallet_id = $2
+            RETURNING *
+            "#,
+        )
+        .bind(alert_id)
+        .bind(wallet_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn mark_all_alerts_read(pool: &DbPool, wallet_id: Uuid) -> Result<i64, Error> {
+        let result = sqlx::query(
+            r#"
+            UPDATE alerts
+            SET read_at = COALESCE(read_at, NOW())
+            WHERE wallet_id = $1
+            "#,
+        )
+        .bind(wallet_id)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() as i64)
     }
 
     pub async fn list_activity(
