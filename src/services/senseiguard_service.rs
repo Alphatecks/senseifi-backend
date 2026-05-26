@@ -384,17 +384,23 @@ impl SenseiguardService {
                 .fetch_optional(pool)
                 .await?
                 .unwrap_or((None,));
-                (sc.0, Self::status_from_score(sc.0), at.0)
+                // Default DB security_score is 0; without a scan that is "unknown", not weak.
+                if at.0.is_none() {
+                    (100, "unscanned".to_string(), None)
+                } else {
+                    (sc.0, Self::status_from_score(sc.0), at.0)
+                }
             }
         };
         let message = match status.as_str() {
             "strong" => "Your wallet is well protected. A few settings can be improved for stronger security.",
             "moderate" => "Your wallet has moderate protection. Run a scan and address the findings.",
             "weak" => "Your wallet needs attention. Run a full scan and fix critical issues.",
+            "unscanned" => "Run a full scan to see your security score and findings.",
             _ => "Run a full scan to see your security status.",
         };
         let level = match status.as_str() {
-            "strong" => "safe",
+            "strong" | "unscanned" => "safe",
             "moderate" => "moderate",
             _ => "dangerous",
         };
@@ -2050,6 +2056,7 @@ impl SenseiguardService {
         let security_status = match security.status.as_str() {
             "strong" => "Secured",
             "moderate" => "Moderate",
+            "unscanned" => "Not scanned",
             _ => "At risk",
         };
         let last_scan_ago = security
