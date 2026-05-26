@@ -15,7 +15,7 @@ use url::Url;
 use crate::clients::{moralis_wallet, rpc};
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    BlockContractRequest, CreateSecurityRuleRequest, DappConnectionCheckRequest,
+    kill_chain, BlockContractRequest, CreateSecurityRuleRequest, DappConnectionCheckRequest,
     EmergencyLockRequest, IngestActivityRequest, ReportScamRequest, SimulateTxRequest,
     SimulateTxResponse, UpdateProtectionSettingsRequest, UpdateSecurityRuleRequest,
     UserRiskProfile, WatchlistContractRequest,
@@ -628,6 +628,9 @@ async fn extension_analyze_transaction_screen(
         req.to.as_deref(),
         req.value.as_deref(),
         req.data.as_deref(),
+        req.method.as_deref(),
+        req.params.as_ref(),
+        None,
     )
     .await
     .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
@@ -980,12 +983,21 @@ async fn transaction_analyze(
 
     let (to, value, data) = extract_tx_fields(&req);
 
+    let domain_owned = req
+        .domain
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| req.url.as_deref().and_then(normalize_dapp_domain));
+
     match analyze_tx_and_respond(
         &pool,
         &wallet_address,
         to.as_deref(),
         value.as_deref(),
         data.as_deref(),
+        req.method.as_deref(),
+        req.params.as_ref(),
+        domain_owned.as_deref(),
     )
     .await
     {
@@ -1229,6 +1241,7 @@ async fn dapp_connection_check(
                                 "website_scan": r.website_scan.clone()
                             }),
                             event_time: None,
+                            kill_chain_stage: Some(kill_chain::LURE.to_string()),
                         },
                     )
                     .await
@@ -1361,6 +1374,7 @@ async fn approvals_ingest(
                                 "should_alert": r.should_alert
                             }),
                             event_time: None,
+                            kill_chain_stage: Some(kill_chain::EXECUTE.to_string()),
                         },
                     )
                     .await

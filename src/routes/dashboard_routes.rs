@@ -1111,6 +1111,9 @@ async fn dashboard_analyze_tx(
         body.to.as_deref(),
         body.value.as_deref(),
         body.data.as_deref(),
+        None,
+        None,
+        None,
     )
     .await
     {

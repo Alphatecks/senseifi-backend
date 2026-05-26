@@ -18,6 +18,7 @@ use crate::repositories::senseiguard_repository::{
 };
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::protection_engine;
+use crate::services::threat_scoring_v2::{ThreatScoringV2, SCORING_MODEL_V2};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use sqlx::Error;
 use std::collections::HashMap;
@@ -107,6 +108,8 @@ impl SenseiguardService {
             "verified_at": t.verified_at,
             "verification_method": t.verification_method,
             "verification_message": t.verification_message,
+            "kill_chain_stage": t.kill_chain_stage,
+            "campaign_id": t.campaign_id,
             "where_to_fix": Self::threat_fix_location(t),
             "recommended_action": Self::threat_recommended_action(t),
             "fix_steps": Self::threat_fix_steps(t),
@@ -389,11 +392,23 @@ impl SenseiguardService {
                 level: "safe".to_string(),
                 risk_breakdown: None,
                 last_updated: None,
+                scoring_model: None,
+                open_campaign_count: None,
             });
         }
 
         // Live score from open threats + unread high alerts — not a stale security_scans row.
         let (score, _, _) = Self::compute_live_security_score(pool, wallet_id).await?;
+        let v2 = ThreatScoringV2::enabled();
+        let open_campaign_count = if v2 {
+            Some(
+                SenseiguardRepository::count_open_campaigns_for_wallet(pool, wallet_id)
+                    .await
+                    .unwrap_or(0),
+            )
+        } else {
+            None
+        };
         let status = Self::status_from_score(score);
         let last_scan_at = latest_scan
             .as_ref()
@@ -418,14 +433,42 @@ impl SenseiguardService {
             level: level.to_string(),
             risk_breakdown: None,
             last_updated: last_scan_at,
+            scoring_model: if v2 {
+                Some(SCORING_MODEL_V2.to_string())
+            } else {
+                None
+            },
+            open_campaign_count,
         })
     }
 
-    /// Current security score from open threats and unread high alerts (ignores stale scan history).
+    /// Current security score from open threats/campaigns and unread high alerts (ignores stale scan history).
     async fn compute_live_security_score(
         pool: &DbPool,
         wallet_id: Uuid,
     ) -> Result<(i32, i64, i64), Error> {
+        let unread_high = SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
+
+        if ThreatScoringV2::enabled() {
+            let campaigns =
+                SenseiguardRepository::list_open_campaigns_for_wallet(pool, wallet_id, 500)
+                    .await?;
+            let mut campaign_penalty: i32 = 0;
+            for c in &campaigns {
+                campaign_penalty += match c.risk_score {
+                    r if r >= 80 => 14,
+                    r if r >= 50 => 10,
+                    r if r >= 30 => 6,
+                    _ => 3,
+                };
+            }
+            let score = 100_i32
+                .saturating_sub(campaign_penalty)
+                .saturating_sub((unread_high as i32).saturating_mul(3))
+                .clamp(0, 100);
+            return Ok((score, campaigns.len() as i64, unread_high));
+        }
+
         let open = SenseiguardRepository::list_active_threats(pool, wallet_id, 500).await?;
         let mut threat_penalty: i32 = 0;
         for t in &open {

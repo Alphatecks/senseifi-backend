@@ -1,6 +1,7 @@
 use crate::db::DbPool;
-use crate::models::senseiguard::{ThreatCorrelationSummary, ThreatEvent};
+use crate::models::senseiguard::{kill_chain, ThreatCorrelationSummary, ThreatEvent};
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
+use crate::services::threat_scoring_v2::ThreatScoringV2;
 use chrono::{DateTime, Duration, Utc};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
@@ -24,12 +25,16 @@ pub struct ThreatSignalInput {
     pub domain: Option<String>,
     pub metadata: serde_json::Value,
     pub event_time: Option<DateTime<Utc>>,
+    pub kill_chain_stage: Option<String>,
 }
 
 pub struct ThreatCorrelationService;
 
 impl ThreatCorrelationService {
     pub fn shadow_mode() -> bool {
+        if ThreatScoringV2::enabled() {
+            return false;
+        }
         std::env::var("THREAT_CORRELATION_SHADOW_MODE")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(true)
@@ -44,6 +49,9 @@ impl ThreatCorrelationService {
         let mut event_metadata = input.metadata.clone();
         if let Some(obj) = event_metadata.as_object_mut() {
             obj.insert("shadow_mode".to_string(), json!(shadow_mode));
+            if let Some(ref stage) = input.kill_chain_stage {
+                obj.insert("kill_chain_stage".to_string(), json!(stage));
+            }
         }
         let event = SenseiguardRepository::create_threat_event(
             pool,
@@ -59,6 +67,7 @@ impl ThreatCorrelationService {
             input.domain.as_deref(),
             Some(event_metadata),
             Some(now),
+            input.kill_chain_stage.as_deref(),
         )
         .await?;
 
@@ -133,7 +142,7 @@ impl ThreatCorrelationService {
             }
             None => {
                 if result.confidence_score < CORRELATION_CREATE_THRESHOLD
-                    || result.categories.len() < 2
+                    && result.categories.len() < 2
                 {
                     return Ok(None);
                 }
@@ -184,8 +193,11 @@ impl ThreatCorrelationService {
                 None,
                 "sequence",
                 1,
-                Some("Ordered multi-stage pattern detected inside sliding window."),
-                Some(json!({"window_hours": CORRELATION_LOOKBACK_HOURS})),
+                Some("Kill-chain progression detected inside sliding window."),
+                Some(json!({
+                    "window_hours": CORRELATION_LOOKBACK_HOURS,
+                    "kill_chain_stages": result.kill_chain_stages,
+                })),
             )
             .await;
         }
@@ -213,6 +225,11 @@ impl ThreatCorrelationService {
             narrative: campaign.narrative,
             evidence_count,
             last_seen_at: campaign.last_seen_at,
+            kill_chain_stages: if result.kill_chain_stages.is_empty() {
+                None
+            } else {
+                Some(result.kill_chain_stages.clone())
+            },
         }))
     }
 
@@ -253,6 +270,7 @@ impl ThreatCorrelationService {
         }
         let categories_vec = categories.into_iter().collect::<Vec<String>>();
 
+        let kill_chain_stages = Self::collect_kill_chain_stages(events);
         let sequence_detected = Self::detect_sequence(events);
         let repeated_contract = contract_hits.values().any(|count| *count >= 2);
         let repeated_domain = domain_hits.values().any(|count| *count >= 2);
@@ -286,6 +304,7 @@ impl ThreatCorrelationService {
         let narrative = Self::build_narrative(
             &campaign_type,
             &categories_vec,
+            &kill_chain_stages,
             current_event,
             sequence_detected,
             repeated_contract || repeated_domain,
@@ -300,7 +319,45 @@ impl ThreatCorrelationService {
             narrative,
             categories: categories_vec,
             sequence_detected,
+            kill_chain_stages,
         })
+    }
+
+    fn collect_kill_chain_stages(events: &[ThreatEvent]) -> Vec<String> {
+        let order = [
+            kill_chain::LURE,
+            kill_chain::HOOK,
+            kill_chain::EXECUTE,
+            kill_chain::EXFILTRATE,
+        ];
+        let mut seen = HashSet::new();
+        let mut stages = Vec::new();
+        for stage in order {
+            let present = events.iter().any(|e| {
+                e.kill_chain_stage
+                    .as_deref()
+                    .map(|s| s == stage)
+                    .unwrap_or_else(|| Self::infer_kill_chain_stage(e) == stage)
+            });
+            if present && seen.insert(stage) {
+                stages.push(stage.to_string());
+            }
+        }
+        stages
+    }
+
+    fn infer_kill_chain_stage(event: &ThreatEvent) -> &'static str {
+        let cat = event.signal_category.to_lowercase();
+        let et = event.event_type.to_lowercase();
+        if cat.contains("domain") || cat.contains("phishing") || cat.contains("temporal") {
+            kill_chain::LURE
+        } else if cat.contains("signature") {
+            kill_chain::HOOK
+        } else if cat.contains("liquidity") || et.contains("liquidity") || et.contains("exfil") {
+            kill_chain::EXFILTRATE
+        } else {
+            kill_chain::EXECUTE
+        }
     }
 
     fn campaign_type(
@@ -308,6 +365,14 @@ impl ThreatCorrelationService {
         repeated_contract: bool,
         repeated_domain: bool,
     ) -> String {
+        let stages = Self::collect_kill_chain_stages(events);
+        if stages.contains(&kill_chain::LURE.to_string())
+            && (stages.contains(&kill_chain::HOOK.to_string())
+                || stages.contains(&kill_chain::EXECUTE.to_string()))
+        {
+            return "phishing_kill_chain".to_string();
+        }
+
         let mut has_domain = false;
         let mut has_approval = false;
         let mut has_reputation = false;
@@ -334,30 +399,23 @@ impl ThreatCorrelationService {
         }
     }
 
+    /// Kill-chain progression: Lure → Hook → Execute → Exfiltrate (strict order, no skipping).
     fn detect_sequence(events: &[ThreatEvent]) -> bool {
         let mut ordered = events.iter().collect::<Vec<&ThreatEvent>>();
         ordered.sort_by_key(|e| e.event_time);
         let mut stage = 0u8;
         for ev in ordered {
-            let et = ev.event_type.to_lowercase();
-            let tt = ev.threat_type.as_deref().unwrap_or_default().to_lowercase();
-            let sig = ev.signal_category.to_lowercase();
-            if stage == 0 && (et.contains("contract") || sig.contains("temporal")) {
-                stage = 1;
-                continue;
-            }
-            if stage <= 1 && (tt.contains("unlimited_approval") || sig.contains("approval")) {
-                stage = 2;
-                continue;
-            }
-            if stage <= 2 && (sig.contains("behavior") || sig.contains("volume")) {
-                stage = 3;
-                continue;
-            }
-            if stage <= 3 && (sig.contains("liquidity") || et.contains("liquidity")) {
-                stage = 4;
-                break;
-            }
+            let kcs = ev
+                .kill_chain_stage
+                .as_deref()
+                .unwrap_or_else(|| Self::infer_kill_chain_stage(ev));
+            stage = match (stage, kcs) {
+                (0, kill_chain::LURE) => 1,
+                (1, kill_chain::HOOK) => 2,
+                (2, kill_chain::EXECUTE) => 3,
+                (3, kill_chain::EXFILTRATE) => 4,
+                _ => stage,
+            };
         }
         stage >= 3
     }
@@ -365,6 +423,7 @@ impl ThreatCorrelationService {
     fn build_narrative(
         campaign_type: &str,
         categories: &[String],
+        kill_chain_stages: &[String],
         current_event: &ThreatEvent,
         sequence_detected: bool,
         linked_entities: bool,
@@ -377,8 +436,16 @@ impl ThreatCorrelationService {
             campaign_type.replace('_', " "),
             categories.len()
         ));
+        if !kill_chain_stages.is_empty() {
+            parts.push(format!(
+                "Kill-chain stages observed: {}.",
+                kill_chain_stages.join(" → ")
+            ));
+        }
         if sequence_detected {
-            parts.push("Event timeline matches a multi-stage threat progression.".to_string());
+            parts.push(
+                "Event timeline matches Lure → Hook → Execute kill-chain progression.".to_string(),
+            );
         }
         if linked_entities {
             parts.push(
@@ -405,4 +472,49 @@ struct CorrelationComputation {
     narrative: String,
     categories: Vec<String>,
     sequence_detected: bool,
+    kill_chain_stages: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::senseiguard::{kill_chain, ThreatEvent};
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn event(stage: &str, category: &str, minutes_ago: i64) -> ThreatEvent {
+        ThreatEvent {
+            id: Uuid::new_v4(),
+            wallet_id: Uuid::new_v4(),
+            threat_id: None,
+            event_type: "test".to_string(),
+            signal_category: category.to_string(),
+            threat_type: None,
+            surface: None,
+            risk_score: 50,
+            confidence_score: 60,
+            source_contract: None,
+            domain: None,
+            metadata: json!({}),
+            event_time: Utc::now() - Duration::minutes(minutes_ago),
+            created_at: Utc::now(),
+            kill_chain_stage: Some(stage.to_string()),
+        }
+    }
+
+    #[test]
+    fn detect_sequence_follows_kill_chain_order() {
+        let events = vec![
+            event(kill_chain::LURE, "domain", 30),
+            event(kill_chain::HOOK, "signature", 20),
+            event(kill_chain::EXECUTE, "approval", 10),
+        ];
+        assert!(ThreatCorrelationService::detect_sequence(&events));
+    }
+
+    #[test]
+    fn detect_sequence_false_for_execute_only() {
+        let events = vec![event(kill_chain::EXECUTE, "transaction", 5)];
+        assert!(!ThreatCorrelationService::detect_sequence(&events));
+    }
 }

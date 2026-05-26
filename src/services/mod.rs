@@ -15,6 +15,7 @@ pub mod senseiguard_service;
 pub mod simulation_service;
 pub mod subscription_charge_service;
 pub mod subscription_service;
+pub mod threat_scoring_v2;
 pub mod threat_correlation_service;
 pub mod wallet_service;
 pub mod website_scan_service;

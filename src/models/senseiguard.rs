@@ -45,6 +45,14 @@ pub const SURFACE_TX_INTENT: &str = "tx_intent";
 pub const SURFACE_CONTRACT: &str = "contract";
 pub const SURFACE_OFF_CHAIN: &str = "off_chain";
 
+/// Kill-chain stages (Web3 Phishing Threat Model v2).
+pub mod kill_chain {
+    pub const LURE: &str = "lure";
+    pub const HOOK: &str = "hook";
+    pub const EXECUTE: &str = "execute";
+    pub const EXFILTRATE: &str = "exfiltrate";
+}
+
 /// Threat types we detect and store for dashboard metrics.
 pub mod threat_types {
     pub const MALICIOUS_TRANSACTION: &str = "malicious_transaction";
@@ -93,6 +101,10 @@ pub struct Threat {
     pub verification_method: Option<String>,
     #[serde(default)]
     pub verification_message: Option<String>,
+    #[serde(default)]
+    pub kill_chain_stage: Option<String>,
+    #[serde(default)]
+    pub campaign_id: Option<Uuid>,
 }
 
 fn default_threat_status() -> String {
@@ -129,6 +141,8 @@ pub struct ThreatEvent {
     pub metadata: serde_json::Value,
     pub event_time: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    #[serde(default)]
+    pub kill_chain_stage: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -176,6 +190,15 @@ pub struct ThreatCampaignEvidence {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalGroupSummary {
+    pub campaign_key: String,
+    pub stage: String,
+    pub max_risk: i32,
+    pub max_confidence: i32,
+    pub threat_types: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThreatCorrelationSummary {
     pub campaign_id: String,
     pub campaign_type: String,
@@ -184,6 +207,8 @@ pub struct ThreatCorrelationSummary {
     pub narrative: String,
     pub evidence_count: i64,
     pub last_seen_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kill_chain_stages: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
@@ -325,6 +350,10 @@ pub struct SecurityStatusResponse {
     /// Doc: last_updated (same as last_scan_at or wallet_monitoring update).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_updated: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scoring_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_campaign_count: Option<i64>,
 }
 
 /// Response for GET /api/wallets/{address}/modal — real data for connected-wallet modal (Details, Balance, Security, Activity).
@@ -975,6 +1004,12 @@ pub struct AnalyzeTxResponse {
     pub elite_assessment: Option<EliteRiskAssessment>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correlation: Option<ThreatCorrelationSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scoring_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kill_chain_stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signal_groups: Option<Vec<SignalGroupSummary>>,
 }
 
 /// User policy level for personalized risk thresholds.

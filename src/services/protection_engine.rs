@@ -3,14 +3,17 @@
 
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    AnalyzeTxResponse, DappConnectionCheckResponse, ThreatCorrelationSummary,
-    UserProtectionSettings, WebsiteScanSummary,
+    kill_chain, AnalyzeTxResponse, DappConnectionCheckResponse, SignalGroupSummary,
+    ThreatCorrelationSummary, UserProtectionSettings, WebsiteScanSummary,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::domain_intel_service;
 use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
+use crate::services::threat_scoring_v2::{ThreatScoringV2, ThreatSignal, SCORING_MODEL_V2};
 use crate::services::website_scan_service;
+use chrono::{Duration, Utc};
+use serde_json::{json, Value};
 use strsim::levenshtein;
 
 // --- Production risk bands (aligned with PHISHING_DETECTION_ROADMAP) ---
@@ -47,6 +50,10 @@ pub struct TxEvalResult {
     pub explanation: Option<String>,
     pub risk_breakdown: Option<serde_json::Value>,
     pub correlation: Option<ThreatCorrelationSummary>,
+    pub scoring_model: Option<String>,
+    pub kill_chain_stage: Option<String>,
+    pub signal_groups: Option<Vec<SignalGroupSummary>>,
+    pub should_persist_threat: bool,
 }
 
 /// Result of evaluating an approval event.
@@ -101,6 +108,10 @@ pub async fn evaluate_transaction(
                     serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 }),
                 ),
                 correlation: None,
+                scoring_model: None,
+                kill_chain_stage: None,
+                signal_groups: None,
+                should_persist_threat: true,
             });
         }
     }
@@ -116,6 +127,10 @@ pub async fn evaluate_transaction(
             explanation: None,
             risk_breakdown: None,
             correlation: None,
+            scoring_model: None,
+            kill_chain_stage: None,
+            signal_groups: None,
+            should_persist_threat: false,
         });
     }
 
@@ -137,6 +152,10 @@ pub async fn evaluate_transaction(
             explanation: Some(msg.to_string()),
             risk_breakdown: Some(serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 })),
             correlation: None,
+            scoring_model: None,
+            kill_chain_stage: None,
+            signal_groups: None,
+            should_persist_threat: true,
         });
     }
 
@@ -163,6 +182,7 @@ pub async fn evaluate_transaction(
     }
     let band = score_to_band(risk_score).to_string();
     let explanation = warning.clone();
+    let should_persist = !threat_types.is_empty() || risk_score >= 60;
 
     Ok(TxEvalResult {
         risk_score,
@@ -174,6 +194,196 @@ pub async fn evaluate_transaction(
         explanation,
         risk_breakdown: Some(risk_breakdown),
         correlation: None,
+        scoring_model: None,
+        kill_chain_stage: None,
+        signal_groups: None,
+        should_persist_threat: should_persist,
+    })
+}
+
+/// Map calldata heuristics to v2 Execute-stage signals.
+pub fn collect_tx_signals(to: Option<&str>, value: Option<&str>, data: Option<&str>) -> Vec<ThreatSignal> {
+    use crate::models::senseiguard::threat_types;
+    let mut signals = Vec::new();
+    let data = data.unwrap_or("");
+    let to_addr = to.unwrap_or("").to_lowercase();
+    let campaign = if to_addr.is_empty() {
+        ThreatScoringV2::campaign_key_generic("unknown_destination")
+    } else {
+        ThreatScoringV2::campaign_key_contract(&to_addr)
+    };
+
+    if to_addr.is_empty() || to_addr == "0x0000000000000000000000000000000000000000" {
+        signals.push(ThreatSignal::new(
+            kill_chain::EXECUTE,
+            "transaction",
+            Some(threat_types::MALICIOUS_TRANSACTION),
+            WEIGHT_UNKNOWN_DESTINATION,
+            62,
+            &campaign,
+        ));
+    }
+
+    if data.starts_with("0x") && data.len() >= 10 {
+        let sig = &data[2..10].to_lowercase();
+        if sig == "095ea7b3" || sig == "a22cb465" {
+            signals.push(ThreatSignal::new(
+                kill_chain::EXECUTE,
+                "approval",
+                Some(threat_types::UNLIMITED_APPROVAL),
+                WEIGHT_UNLIMITED_APPROVAL,
+                68,
+                &campaign,
+            ));
+        }
+        if sig == "3659cfe6" {
+            signals.push(ThreatSignal::new(
+                kill_chain::EXECUTE,
+                "transaction",
+                Some(threat_types::MALICIOUS_TRANSACTION),
+                WEIGHT_DELEGATECALL_PATTERN,
+                65,
+                &campaign,
+            ));
+        }
+    }
+
+    if let Some(v) = value {
+        if let Some(hex) = v.strip_prefix("0x") {
+            if let Ok(value_wei) = u128::from_str_radix(hex, 16) {
+                if value_wei > 0 {
+                    signals.push(ThreatSignal::new(
+                        kill_chain::EXECUTE,
+                        "value_exposure",
+                        None,
+                        10,
+                        45,
+                        &campaign,
+                    ));
+                }
+            }
+        }
+    }
+
+    signals
+}
+
+async fn collect_temporal_signals(
+    pool: &DbPool,
+    wallet_id: uuid::Uuid,
+    domain: Option<&str>,
+) -> Vec<ThreatSignal> {
+    let mut signals = Vec::new();
+    if let Some(domain) = domain.filter(|d| !d.trim().is_empty()) {
+        if let Ok(Some(first_seen)) =
+            SenseiguardRepository::first_threat_event_time_for_domain(pool, wallet_id, domain).await
+        {
+            let age = Utc::now().signed_duration_since(first_seen);
+            if age < Duration::days(7) {
+                signals.push(ThreatSignal::new(
+                    kill_chain::LURE,
+                    "temporal",
+                    Some(crate::models::senseiguard::threat_types::FRONTEND_PHISHING),
+                    12,
+                    58,
+                    &ThreatScoringV2::campaign_key_domain(domain),
+                ).with_metadata(json!({ "domain_first_seen_days": age.num_days() })));
+            }
+        }
+    }
+    signals
+}
+
+async fn collect_dapp_signals_v2(
+    pool: &DbPool,
+    wallet_address: &str,
+    domain: &str,
+) -> Result<Vec<ThreatSignal>, String> {
+    let eval = evaluate_dapp_connection(pool, wallet_address, domain, None).await?;
+    let threat_type = if eval.phishing_risk {
+        Some(crate::models::senseiguard::threat_types::FRONTEND_PHISHING)
+    } else {
+        Some(crate::models::senseiguard::threat_types::PHISHING_INDICATOR)
+    };
+    if eval.risk_score <= 0 {
+        return Ok(vec![]);
+    }
+    Ok(vec![ThreatSignal::new(
+        kill_chain::LURE,
+        "domain",
+        threat_type,
+        eval.risk_score,
+        if eval.phishing_risk { 72 } else { 58 },
+        &ThreatScoringV2::campaign_key_domain(domain),
+    )])
+}
+
+async fn evaluate_transaction_v2(
+    pool: &DbPool,
+    wallet_address: &str,
+    to: Option<&str>,
+    value: Option<&str>,
+    data: Option<&str>,
+    sign_method: Option<&str>,
+    sign_params: Option<&Vec<Value>>,
+    domain: Option<&str>,
+) -> Result<TxEvalResult, String> {
+    let settings = SenseiguardRepository::get_protection_settings(pool, wallet_address)
+        .await
+        .map_err(|e| e.to_string())?
+        .unwrap_or(default_settings());
+
+    let base = evaluate_transaction(pool, wallet_address, to, value, data).await?;
+    if base.threat_types.first().map(String::as_str)
+        == Some(crate::models::senseiguard::threat_types::POLICY_ENFORCEMENT)
+    {
+        return Ok(base);
+    }
+    if !settings.high_risk_tx_warnings {
+        return Ok(base);
+    }
+
+    let mut signals = collect_tx_signals(to, value, data);
+    signals.extend(ThreatScoringV2::collect_signature_signals(sign_method, sign_params));
+
+    if let Some(domain) = domain.filter(|d| !d.trim().is_empty()) {
+        signals.extend(collect_dapp_signals_v2(pool, wallet_address, domain).await?);
+    }
+
+    if let Ok(Some(wallet)) = WalletRepository::get_wallet_by_address(pool, wallet_address).await {
+        signals.extend(collect_temporal_signals(pool, wallet.id, domain).await);
+    }
+
+    let mut verdict = ThreatScoringV2::evaluate_signals(&signals);
+    let rules_block = apply_security_rules_tx(pool, wallet_address, to, value, data).await;
+    let blocked = base.blocked
+        || rules_block.unwrap_or(false)
+        || (settings.auto_block_high_risk && verdict.risk_score >= BLOCK_THRESHOLD);
+
+    if blocked && verdict.band != "Block" {
+        verdict.band = "Block".to_string();
+        verdict.recommended_action = "Reject transaction".to_string();
+    }
+
+    let warning = verdict.explanation.clone().or(base.warning);
+    Ok(TxEvalResult {
+        risk_score: verdict.risk_score,
+        warning,
+        recommended_action: if blocked {
+            "Reject transaction".to_string()
+        } else {
+            verdict.recommended_action
+        },
+        blocked,
+        band: verdict.band,
+        threat_types: verdict.threat_types,
+        explanation: verdict.explanation,
+        risk_breakdown: Some(verdict.risk_breakdown),
+        correlation: None,
+        scoring_model: Some(SCORING_MODEL_V2.to_string()),
+        kill_chain_stage: verdict.kill_chain_stage,
+        signal_groups: Some(verdict.signal_groups),
+        should_persist_threat: verdict.should_persist_threat,
     })
 }
 
@@ -567,6 +777,9 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
             reason: Some("High-risk transaction warnings are disabled.".to_string()),
             elite_assessment: None,
             correlation: None,
+            scoring_model: None,
+            kill_chain_stage: None,
+            signal_groups: None,
         };
     }
     let Some(r) = result else {
@@ -583,6 +796,9 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
             reason: None,
             elite_assessment: None,
             correlation: None,
+            scoring_model: None,
+            kill_chain_stage: None,
+            signal_groups: None,
         };
     };
     let recommendation = r.recommended_action.clone();
@@ -599,6 +815,9 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
         reason: None,
         elite_assessment: None,
         correlation: r.correlation,
+        scoring_model: r.scoring_model,
+        kill_chain_stage: r.kill_chain_stage,
+        signal_groups: r.signal_groups,
     }
 }
 
@@ -659,6 +878,9 @@ pub async fn analyze_tx_and_respond(
     to: Option<&str>,
     value: Option<&str>,
     data: Option<&str>,
+    sign_method: Option<&str>,
+    sign_params: Option<&Vec<Value>>,
+    domain: Option<&str>,
 ) -> Result<AnalyzeTxResponse, String> {
     let settings = match SenseiguardRepository::get_protection_settings(pool, wallet_address).await
     {
@@ -671,52 +893,29 @@ pub async fn analyze_tx_and_respond(
     if !settings.high_risk_tx_warnings {
         return Ok(build_analyze_tx_response(true, None));
     }
-    let mut r = evaluate_transaction(pool, wallet_address, to, value, data).await?;
+
+    let mut r = if ThreatScoringV2::enabled() {
+        evaluate_transaction_v2(
+            pool,
+            wallet_address,
+            to,
+            value,
+            data,
+            sign_method,
+            sign_params,
+            domain,
+        )
+        .await?
+    } else {
+        evaluate_transaction(pool, wallet_address, to, value, data).await?
+    };
+
     let threat_type = r.threat_types.first().map(String::as_str);
     let is_policy_enforcement = matches!(
         threat_type,
         Some(crate::models::senseiguard::threat_types::POLICY_ENFORCEMENT)
     );
-    if !is_policy_enforcement
-        && (r.risk_score >= 60 || !r.threat_types.is_empty())
-        && r.risk_score > 0
-    {
-        if let Ok(Some(wallet)) =
-            WalletRepository::get_wallet_by_address(pool, wallet_address).await
-        {
-            let severity = match r.band.as_str() {
-                "Block" | "Dangerous" => "high",
-                "Warning" => "medium",
-                _ => "low",
-            };
-            let title = r
-                .explanation
-                .as_deref()
-                .unwrap_or("Pre-sign transaction risk detected");
-            let _ = SenseiguardRepository::create_threat_with_surface(
-                pool,
-                wallet.id,
-                severity,
-                title,
-                to,
-                threat_type,
-                Some("tx_intent"),
-                r.explanation.as_deref(),
-            )
-            .await;
-            if r.risk_score >= 85 {
-                let _ = SenseiguardRepository::create_alert(
-                    pool,
-                    wallet.id,
-                    None,
-                    severity,
-                    title,
-                    r.explanation.as_deref(),
-                )
-                .await;
-            }
-        }
-    }
+
     if !is_policy_enforcement && r.risk_score > 0 {
         if let Ok(Some(wallet)) =
             WalletRepository::get_wallet_by_address(pool, wallet_address).await
@@ -736,10 +935,23 @@ pub async fn analyze_tx_and_respond(
                 .any(|t| t == crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL)
             {
                 "approval"
+            } else if r
+                .threat_types
+                .iter()
+                .any(|t| t == crate::models::senseiguard::threat_types::SIGNATURE_PHISHING)
+            {
+                "signature"
             } else {
                 "transaction"
             };
-            if let Ok(correlation) = ThreatCorrelationService::ingest_signal(
+            let kill_stage = r.kill_chain_stage.clone().or_else(|| {
+                if sign_method.is_some() {
+                    Some(kill_chain::HOOK.to_string())
+                } else {
+                    Some(kill_chain::EXECUTE.to_string())
+                }
+            });
+            if let Ok(Some(correlation)) = ThreatCorrelationService::ingest_signal(
                 pool,
                 ThreatSignalInput {
                     wallet_id: wallet.id,
@@ -751,21 +963,180 @@ pub async fn analyze_tx_and_respond(
                     risk_score: r.risk_score,
                     confidence_score: confidence_guess,
                     source_contract: to.map(|s| s.to_string()),
-                    domain: None,
-                    metadata: serde_json::json!({
+                    domain: domain.map(|s| s.to_string()),
+                    metadata: json!({
                         "band": r.band.clone(),
                         "recommended_action": r.recommended_action.clone(),
                         "threat_types": r.threat_types.clone(),
-                        "risk_breakdown": r.risk_breakdown.clone()
+                        "risk_breakdown": r.risk_breakdown.clone(),
+                        "scoring_model": r.scoring_model.clone(),
                     }),
                     event_time: None,
+                    kill_chain_stage: kill_stage,
                 },
             )
             .await
             {
-                r.correlation = correlation;
+                if ThreatScoringV2::enabled() {
+                    r.risk_score = r.risk_score.max(correlation.risk_score);
+                    r.band = score_to_band(r.risk_score).to_string();
+                    if correlation.confidence_score >= 80 {
+                        r.should_persist_threat = true;
+                    }
+                    if settings.auto_block_high_risk && r.risk_score >= BLOCK_THRESHOLD {
+                        r.blocked = true;
+                        r.recommended_action = "Reject transaction".to_string();
+                    }
+                }
+                r.correlation = Some(correlation);
             }
         }
     }
+
+    let should_persist = if is_policy_enforcement {
+        false
+    } else if ThreatScoringV2::enabled() {
+        r.should_persist_threat
+    } else {
+        (r.risk_score >= 60 || !r.threat_types.is_empty()) && r.risk_score > 0
+    };
+
+    if should_persist {
+        if let Ok(Some(wallet)) =
+            WalletRepository::get_wallet_by_address(pool, wallet_address).await
+        {
+            let severity = match r.band.as_str() {
+                "Block" | "Dangerous" => "high",
+                "Warning" => "medium",
+                _ => "low",
+            };
+            let title = r
+                .explanation
+                .as_deref()
+                .unwrap_or("Pre-sign transaction risk detected");
+            let campaign_uuid = r
+                .correlation
+                .as_ref()
+                .and_then(|c| uuid::Uuid::parse_str(&c.campaign_id).ok());
+            if ThreatScoringV2::enabled() {
+                let _ = SenseiguardRepository::upsert_open_threat_for_campaign(
+                    pool,
+                    wallet.id,
+                    severity,
+                    title,
+                    to,
+                    threat_type,
+                    Some("tx_intent"),
+                    r.explanation.as_deref(),
+                    r.kill_chain_stage.as_deref(),
+                    campaign_uuid,
+                )
+                .await;
+            } else {
+                let _ = SenseiguardRepository::create_threat_with_surface(
+                    pool,
+                    wallet.id,
+                    severity,
+                    title,
+                    to,
+                    threat_type,
+                    Some("tx_intent"),
+                    r.explanation.as_deref(),
+                )
+                .await;
+            }
+            if r.risk_score >= 85 {
+                let _ = SenseiguardRepository::create_alert(
+                    pool,
+                    wallet.id,
+                    None,
+                    severity,
+                    title,
+                    r.explanation.as_deref(),
+                )
+                .await;
+            }
+        }
+    }
+
     Ok(build_analyze_tx_response(false, Some(r)))
+}
+
+#[cfg(test)]
+mod threat_model_v2_tests {
+    use super::*;
+    use crate::models::senseiguard::threat_types;
+    use crate::services::threat_scoring_v2::ThreatScoringV2;
+
+    const APPROVE_DATA: &str =
+        "0x095ea7b3ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+    #[test]
+    fn v1_and_v2_both_flag_unlimited_approval_calldata() {
+        let (v1_score, _, _, v1_types, _) =
+            threat_analyze_tx_sync(Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"), None, Some(APPROVE_DATA));
+        assert!(v1_score >= MEDIUM_WARNING_THRESHOLD);
+        assert!(v1_types.iter().any(|t| t == threat_types::UNLIMITED_APPROVAL));
+
+        let signals = collect_tx_signals(
+            Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            None,
+            Some(APPROVE_DATA),
+        );
+        let v2 = ThreatScoringV2::evaluate_signals(&signals);
+        assert!(v2
+            .threat_types
+            .iter()
+            .any(|t| t == threat_types::UNLIMITED_APPROVAL));
+    }
+
+    #[test]
+    fn v2_standalone_approval_warn_only_no_persist() {
+        let signals = collect_tx_signals(
+            Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            None,
+            Some(APPROVE_DATA),
+        );
+        let v2 = ThreatScoringV2::evaluate_signals(&signals);
+        assert_eq!(v2.band, "Warning");
+        assert!(!v2.should_persist_threat);
+    }
+
+    #[test]
+    fn v2_signature_hook_adds_persist_when_confident() {
+        let mut signals = collect_tx_signals(
+            Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            None,
+            Some(APPROVE_DATA),
+        );
+        signals.extend(ThreatScoringV2::collect_signature_signals(
+            Some("eth_signTypedData_v4"),
+            Some(&vec![serde_json::json!({"types": {"Permit": []}})]),
+        ));
+        let v2 = ThreatScoringV2::evaluate_signals(&signals);
+        assert!(v2.should_persist_threat);
+        assert!(v2.stages_present.contains(&kill_chain::HOOK.to_string()));
+    }
+
+    #[test]
+    fn build_analyze_tx_response_includes_v2_fields() {
+        let result = TxEvalResult {
+            risk_score: 45,
+            warning: None,
+            recommended_action: "Review before signing".to_string(),
+            blocked: false,
+            band: "Warning".to_string(),
+            threat_types: vec![threat_types::UNLIMITED_APPROVAL.to_string()],
+            explanation: Some("test".to_string()),
+            risk_breakdown: Some(json!({})),
+            correlation: None,
+            scoring_model: Some(SCORING_MODEL_V2.to_string()),
+            kill_chain_stage: Some(kill_chain::EXECUTE.to_string()),
+            signal_groups: Some(vec![]),
+            should_persist_threat: false,
+        };
+        let resp = build_analyze_tx_response(false, Some(result));
+        assert_eq!(resp.scoring_model.as_deref(), Some(SCORING_MODEL_V2));
+        assert_eq!(resp.kill_chain_stage.as_deref(), Some(kill_chain::EXECUTE));
+    }
 }

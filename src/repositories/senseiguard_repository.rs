@@ -1779,11 +1779,41 @@ impl SenseiguardRepository {
         surface: Option<&str>,
         explanation: Option<&str>,
     ) -> Result<Threat, Error> {
+        Self::create_threat_with_surface_v2(
+            pool,
+            wallet_id,
+            severity,
+            title,
+            source_contract,
+            threat_type,
+            surface,
+            explanation,
+            None,
+            None,
+        )
+        .await
+    }
+
+    pub async fn create_threat_with_surface_v2(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        severity: &str,
+        title: &str,
+        source_contract: Option<&str>,
+        threat_type: Option<&str>,
+        surface: Option<&str>,
+        explanation: Option<&str>,
+        kill_chain_stage: Option<&str>,
+        campaign_id: Option<Uuid>,
+    ) -> Result<Threat, Error> {
         let risk_breakdown: Option<serde_json::Value> = None;
         sqlx::query_as(
             r#"
-            INSERT INTO threats (wallet_id, severity, title, source_contract, threat_type, surface, explanation, risk_breakdown, detected_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+            INSERT INTO threats (
+                wallet_id, severity, title, source_contract, threat_type, surface,
+                explanation, risk_breakdown, kill_chain_stage, campaign_id, detected_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
             RETURNING *
             "#,
         )
@@ -1795,8 +1825,166 @@ impl SenseiguardRepository {
         .bind(surface)
         .bind(explanation)
         .bind(risk_breakdown)
+        .bind(kill_chain_stage)
+        .bind(campaign_id)
         .fetch_one(pool)
         .await
+    }
+
+    /// Update an open threat in the 24h window or insert a new one (v2 dedupe).
+    pub async fn upsert_open_threat_for_campaign(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        severity: &str,
+        title: &str,
+        source_contract: Option<&str>,
+        threat_type: Option<&str>,
+        surface: Option<&str>,
+        explanation: Option<&str>,
+        kill_chain_stage: Option<&str>,
+        campaign_id: Option<Uuid>,
+    ) -> Result<Threat, Error> {
+        if let Some(cid) = campaign_id {
+            if let Some(existing) = sqlx::query_as::<_, Threat>(
+                r#"
+                SELECT * FROM threats
+                WHERE wallet_id = $1 AND status = 'open' AND campaign_id = $2
+                ORDER BY detected_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(wallet_id)
+            .bind(cid)
+            .fetch_optional(pool)
+            .await?
+            {
+                let updated = sqlx::query_as::<_, Threat>(
+                    r#"
+                    UPDATE threats
+                    SET severity = $2, title = $3, explanation = $4,
+                        kill_chain_stage = COALESCE($5, kill_chain_stage),
+                        detected_at = NOW()
+                    WHERE id = $1
+                    RETURNING *
+                    "#,
+                )
+                .bind(existing.id)
+                .bind(severity)
+                .bind(title)
+                .bind(explanation)
+                .bind(kill_chain_stage)
+                .fetch_one(pool)
+                .await?;
+                return Ok(updated);
+            }
+        }
+
+        if let (Some(tt), Some(contract)) = (threat_type, source_contract) {
+            if !contract.is_empty() {
+                if let Some(existing) = sqlx::query_as::<_, Threat>(
+                    r#"
+                    SELECT * FROM threats
+                    WHERE wallet_id = $1 AND status = 'open'
+                      AND threat_type = $2
+                      AND LOWER(COALESCE(source_contract, '')) = LOWER($3)
+                      AND detected_at >= NOW() - INTERVAL '24 hours'
+                    ORDER BY detected_at DESC
+                    LIMIT 1
+                    "#,
+                )
+                .bind(wallet_id)
+                .bind(tt)
+                .bind(contract)
+                .fetch_optional(pool)
+                .await?
+                {
+                    let updated = sqlx::query_as::<_, Threat>(
+                        r#"
+                        UPDATE threats
+                        SET severity = $2, title = $3, explanation = $4,
+                            kill_chain_stage = COALESCE($5, kill_chain_stage),
+                            campaign_id = COALESCE($6, campaign_id),
+                            detected_at = NOW()
+                        WHERE id = $1
+                        RETURNING *
+                        "#,
+                    )
+                    .bind(existing.id)
+                    .bind(severity)
+                    .bind(title)
+                    .bind(explanation)
+                    .bind(kill_chain_stage)
+                    .bind(campaign_id)
+                    .fetch_one(pool)
+                    .await?;
+                    return Ok(updated);
+                }
+            }
+        }
+
+        Self::create_threat_with_surface_v2(
+            pool,
+            wallet_id,
+            severity,
+            title,
+            source_contract,
+            threat_type,
+            surface,
+            explanation,
+            kill_chain_stage,
+            campaign_id,
+        )
+        .await
+    }
+
+    pub async fn list_open_campaigns_for_wallet(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<ThreatCampaign>, Error> {
+        sqlx::query_as(
+            r#"
+            SELECT * FROM threat_campaigns
+            WHERE wallet_id = $1 AND status = 'open'
+            ORDER BY last_seen_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(limit.clamp(1, 500))
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn count_open_campaigns_for_wallet(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threat_campaigns WHERE wallet_id = $1 AND status = 'open'",
+        )
+        .bind(wallet_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    pub async fn first_threat_event_time_for_domain(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        domain: &str,
+    ) -> Result<Option<DateTime<Utc>>, Error> {
+        let row: Option<(DateTime<Utc>,)> = sqlx::query_as(
+            r#"
+            SELECT MIN(event_time) FROM threat_events
+            WHERE wallet_id = $1 AND LOWER(domain) = LOWER($2)
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(domain)
+        .fetch_optional(pool)
+        .await?;
+        Ok(row.map(|r| r.0))
     }
 
     pub async fn create_threat_event(
@@ -1813,16 +2001,19 @@ impl SenseiguardRepository {
         domain: Option<&str>,
         metadata: Option<serde_json::Value>,
         event_time: Option<DateTime<Utc>>,
+        kill_chain_stage: Option<&str>,
     ) -> Result<ThreatEvent, Error> {
         sqlx::query_as(
             r#"
             INSERT INTO threat_events (
                 wallet_id, threat_id, event_type, signal_category, threat_type, surface,
-                risk_score, confidence_score, source_contract, domain, metadata, event_time
+                risk_score, confidence_score, source_contract, domain, metadata, event_time,
+                kill_chain_stage
             )
             VALUES (
                 $1, $2, $3, $4, $5, $6,
-                $7, $8, $9, $10, COALESCE($11, '{}'::jsonb), COALESCE($12, NOW())
+                $7, $8, $9, $10, COALESCE($11, '{}'::jsonb), COALESCE($12, NOW()),
+                $13
             )
             RETURNING *
             "#,
@@ -1839,6 +2030,7 @@ impl SenseiguardRepository {
         .bind(domain)
         .bind(metadata)
         .bind(event_time)
+        .bind(kill_chain_stage)
         .fetch_one(pool)
         .await
     }
