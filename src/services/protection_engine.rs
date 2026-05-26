@@ -3,11 +3,13 @@
 
 use crate::db::DbPool;
 use crate::models::senseiguard::{
-    AnalyzeTxResponse, DappConnectionCheckResponse, UserProtectionSettings, WebsiteScanSummary,
+    AnalyzeTxResponse, DappConnectionCheckResponse, ThreatCorrelationSummary,
+    UserProtectionSettings, WebsiteScanSummary,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::domain_intel_service;
+use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
 use crate::services::website_scan_service;
 use strsim::levenshtein;
 
@@ -44,6 +46,7 @@ pub struct TxEvalResult {
     pub threat_types: Vec<String>,
     pub explanation: Option<String>,
     pub risk_breakdown: Option<serde_json::Value>,
+    pub correlation: Option<ThreatCorrelationSummary>,
 }
 
 /// Result of evaluating an approval event.
@@ -59,6 +62,7 @@ pub struct DappEvalResult {
     pub phishing_risk: bool,
     pub safety: String,
     pub website_scan: Option<WebsiteScanSummary>,
+    pub correlation: Option<ThreatCorrelationSummary>,
 }
 
 /// When high_risk_tx_warnings is OFF we skip analysis. When ON we run threat analysis and apply rules + emergency lock.
@@ -96,6 +100,7 @@ pub async fn evaluate_transaction(
                 risk_breakdown: Some(
                     serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 }),
                 ),
+                correlation: None,
             });
         }
     }
@@ -110,6 +115,7 @@ pub async fn evaluate_transaction(
             threat_types: vec![],
             explanation: None,
             risk_breakdown: None,
+            correlation: None,
         });
     }
 
@@ -130,6 +136,7 @@ pub async fn evaluate_transaction(
             ],
             explanation: Some(msg.to_string()),
             risk_breakdown: Some(serde_json::json!({ "approval_risk": 0, "simulation_drain": 0 })),
+            correlation: None,
         });
     }
 
@@ -166,6 +173,7 @@ pub async fn evaluate_transaction(
         threat_types,
         explanation,
         risk_breakdown: Some(risk_breakdown),
+        correlation: None,
     })
 }
 
@@ -507,6 +515,7 @@ pub async fn evaluate_dapp_connection(
         phishing_risk,
         safety,
         website_scan: website_scan_summary,
+        correlation: None,
     })
 }
 
@@ -557,6 +566,7 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
             recommended_action: None,
             reason: Some("High-risk transaction warnings are disabled.".to_string()),
             elite_assessment: None,
+            correlation: None,
         };
     }
     let Some(r) = result else {
@@ -572,6 +582,7 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
             recommended_action: Some("Proceed".to_string()),
             reason: None,
             elite_assessment: None,
+            correlation: None,
         };
     };
     let recommendation = r.recommended_action.clone();
@@ -587,6 +598,7 @@ pub fn build_analyze_tx_response(skipped: bool, result: Option<TxEvalResult>) ->
         recommended_action: Some(recommendation),
         reason: None,
         elite_assessment: None,
+        correlation: r.correlation,
     }
 }
 
@@ -602,6 +614,7 @@ pub fn build_dapp_check_response(
             safety: None,
             website_scan: None,
             reason: Some("New dApp connection alerts are disabled.".to_string()),
+            correlation: None,
         };
     }
     let Some(r) = result else {
@@ -612,6 +625,7 @@ pub fn build_dapp_check_response(
             safety: Some("Safe".to_string()),
             website_scan: None,
             reason: None,
+            correlation: None,
         };
     };
     DappConnectionCheckResponse {
@@ -621,6 +635,7 @@ pub fn build_dapp_check_response(
         safety: Some(r.safety),
         website_scan: r.website_scan,
         reason: None,
+        correlation: r.correlation,
     }
 }
 
@@ -632,6 +647,7 @@ pub fn build_dapp_check_skipped_with_reason(reason: &str) -> DappConnectionCheck
         safety: None,
         website_scan: None,
         reason: Some(reason.to_string()),
+        correlation: None,
     }
 }
 
@@ -655,7 +671,7 @@ pub async fn analyze_tx_and_respond(
     if !settings.high_risk_tx_warnings {
         return Ok(build_analyze_tx_response(true, None));
     }
-    let r = evaluate_transaction(pool, wallet_address, to, value, data).await?;
+    let mut r = evaluate_transaction(pool, wallet_address, to, value, data).await?;
     let threat_type = r.threat_types.first().map(String::as_str);
     let is_policy_enforcement = matches!(
         threat_type,
@@ -698,6 +714,56 @@ pub async fn analyze_tx_and_respond(
                     r.explanation.as_deref(),
                 )
                 .await;
+            }
+        }
+    }
+    if !is_policy_enforcement && r.risk_score > 0 {
+        if let Ok(Some(wallet)) =
+            WalletRepository::get_wallet_by_address(pool, wallet_address).await
+        {
+            let confidence_guess = if r.risk_score >= 85 {
+                88
+            } else if r.risk_score >= 70 {
+                76
+            } else if r.risk_score >= 50 {
+                68
+            } else {
+                55
+            };
+            let signal_category = if r
+                .threat_types
+                .iter()
+                .any(|t| t == crate::models::senseiguard::threat_types::UNLIMITED_APPROVAL)
+            {
+                "approval"
+            } else {
+                "transaction"
+            };
+            if let Ok(correlation) = ThreatCorrelationService::ingest_signal(
+                pool,
+                ThreatSignalInput {
+                    wallet_id: wallet.id,
+                    threat_id: None,
+                    event_type: "tx_intent_analysis".to_string(),
+                    signal_category: signal_category.to_string(),
+                    threat_type: r.threat_types.first().cloned(),
+                    surface: Some("tx_intent".to_string()),
+                    risk_score: r.risk_score,
+                    confidence_score: confidence_guess,
+                    source_contract: to.map(|s| s.to_string()),
+                    domain: None,
+                    metadata: serde_json::json!({
+                        "band": r.band.clone(),
+                        "recommended_action": r.recommended_action.clone(),
+                        "threat_types": r.threat_types.clone(),
+                        "risk_breakdown": r.risk_breakdown.clone()
+                    }),
+                    event_time: None,
+                },
+            )
+            .await
+            {
+                r.correlation = correlation;
             }
         }
     }

@@ -74,6 +74,14 @@ struct ThreatIntelligenceQuery {
 }
 
 #[derive(Debug, serde::Deserialize)]
+struct ThreatCampaignsQuery {
+    user_id: Option<String>,
+    wallet_address: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
 struct LiveScamSignalsSummaryQuery {
     user_id: Option<String>,
     wallet_address: Option<String>,
@@ -153,6 +161,21 @@ struct LiveScamSignalDetailItem {
     created_at: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct ThreatCampaignItem {
+    id: String,
+    wallet_address: String,
+    campaign_type: String,
+    status: String,
+    confidence_score: i32,
+    risk_score: i32,
+    narrative: String,
+    signal_categories: Value,
+    evidence_count: i64,
+    first_seen_at: String,
+    last_seen_at: String,
+}
+
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
@@ -168,6 +191,7 @@ pub fn dashboard_routes() -> Router<DbPool> {
         )
         .route("/activity/recent", get(recent_activity_all_wallets))
         .route("/activity/feed", get(live_activity_feed))
+        .route("/threat-campaigns", get(threat_campaigns))
         .route("/threat-intelligence", get(threat_intelligence_catalog))
         .route("/activity-monitor/wallets", get(activity_monitor_wallets))
         .route("/activity-monitor/dapps", get(activity_monitor_dapps))
@@ -888,6 +912,50 @@ async fn threat_intelligence_catalog(
             ))
         }
     }
+}
+
+async fn threat_campaigns(
+    State(pool): State<DbPool>,
+    Query(q): Query<ThreatCampaignsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id =
+        resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref())
+            .await;
+    let user_id_opt = if user_id.trim().is_empty() {
+        None
+    } else {
+        Some(user_id.as_str())
+    };
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let rows = SenseiguardRepository::list_campaigns_for_dashboard(&pool, user_id_opt, limit)
+        .await
+        .map_err(|e| {
+            eprintln!("threat_campaigns: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Failed to load threat campaigns" })),
+            )
+        })?;
+    let items: Vec<ThreatCampaignItem> = rows
+        .into_iter()
+        .map(|r| ThreatCampaignItem {
+            id: r.id.to_string(),
+            wallet_address: r.wallet_address,
+            campaign_type: r.campaign_type,
+            status: r.status,
+            confidence_score: r.confidence_score,
+            risk_score: r.risk_score,
+            narrative: r.narrative,
+            signal_categories: r.signal_categories,
+            evidence_count: r.evidence_count,
+            first_seen_at: r.first_seen_at.to_rfc3339(),
+            last_seen_at: r.last_seen_at.to_rfc3339(),
+        })
+        .collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": items
+    })))
 }
 
 async fn dashboard_metrics(

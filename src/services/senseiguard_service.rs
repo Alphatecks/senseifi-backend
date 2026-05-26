@@ -1596,12 +1596,11 @@ impl SenseiguardService {
         let wallets = WalletRepository::get_all_active_wallets_by_user(pool, user_id).await?;
         let active_wallet_count = wallets.len() as i64;
 
-        let min_score =
-            SenseiguardRepository::min_security_score_active_wallets_for_user(pool, user_id)
-                .await?;
-        let status = match min_score {
-            None => "safe".to_string(),
-            Some(s) => Self::overview_status_from_score(s),
+        // Wallet status is operational (connected/monitoring), not derived from security score.
+        let status = if active_wallet_count > 0 {
+            "active".to_string()
+        } else {
+            "inactive".to_string()
         };
 
         let last_scan_at =
@@ -1882,14 +1881,6 @@ impl SenseiguardService {
             threat_type,
             detected_at: r.detected_at.format("%H:%M").to_string(),
             risk_level: risk_level.to_string(),
-        }
-    }
-
-    fn overview_status_from_score(score: i32) -> String {
-        match score {
-            0..=39 => "attention".to_string(),
-            40..=69 => "moderate".to_string(),
-            _ => "safe".to_string(),
         }
     }
 

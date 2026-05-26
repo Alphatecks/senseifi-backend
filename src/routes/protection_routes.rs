@@ -32,6 +32,7 @@ use crate::services::protection_engine::{
     evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
 };
 use crate::services::scan_service::ScanService;
+use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
 use axum::extract::Path;
 use uuid::Uuid;
 
@@ -1191,7 +1192,51 @@ async fn dapp_connection_check(
         })?;
 
     match evaluate_dapp_connection(&pool, &req.wallet_address, target, req.max_pages).await {
-        Ok(r) => {
+        Ok(mut r) => {
+            if r.risk_score > 0 {
+                if let Ok(Some(wallet)) =
+                    WalletRepository::get_wallet_by_address(&pool, &req.wallet_address).await
+                {
+                    let domain = normalize_dapp_domain(target);
+                    let confidence = if r.risk_score >= 75 {
+                        84
+                    } else if r.risk_score >= 50 {
+                        74
+                    } else {
+                        62
+                    };
+                    if let Ok(correlation) = ThreatCorrelationService::ingest_signal(
+                        &pool,
+                        ThreatSignalInput {
+                            wallet_id: wallet.id,
+                            threat_id: None,
+                            event_type: "dapp_connection_check".to_string(),
+                            signal_category: "domain".to_string(),
+                            threat_type: Some(if r.phishing_risk {
+                                "frontend_phishing".to_string()
+                            } else {
+                                "phishing_indicator".to_string()
+                            }),
+                            surface: Some("off_chain".to_string()),
+                            risk_score: r.risk_score,
+                            confidence_score: confidence,
+                            source_contract: None,
+                            domain: domain.clone(),
+                            metadata: json!({
+                                "target": target,
+                                "safety": r.safety.clone(),
+                                "phishing_risk": r.phishing_risk,
+                                "website_scan": r.website_scan.clone()
+                            }),
+                            event_time: None,
+                        },
+                    )
+                    .await
+                    {
+                        r.correlation = correlation;
+                    }
+                }
+            }
             if let Some(domain) = normalize_dapp_domain(target) {
                 let dapp_name = derive_dapp_name(&domain);
                 let description = r
@@ -1279,6 +1324,51 @@ async fn approvals_ingest(
     .await
     {
         Ok(r) => {
+            let mut correlation: Option<crate::models::senseiguard::ThreatCorrelationSummary> =
+                None;
+            if r.risk_score > 0 {
+                if let Ok(Some(wallet)) =
+                    WalletRepository::get_wallet_by_address(&pool, &req.wallet_address).await
+                {
+                    let confidence = if r.risk_score >= 85 {
+                        86
+                    } else if r.risk_score >= 65 {
+                        74
+                    } else {
+                        60
+                    };
+                    if let Ok(result) = ThreatCorrelationService::ingest_signal(
+                        &pool,
+                        ThreatSignalInput {
+                            wallet_id: wallet.id,
+                            threat_id: None,
+                            event_type: "approval_ingest".to_string(),
+                            signal_category: "approval".to_string(),
+                            threat_type: Some(if r.risk_score >= 70 {
+                                "unlimited_approval".to_string()
+                            } else {
+                                "malicious_transaction".to_string()
+                            }),
+                            surface: Some("wallet_state".to_string()),
+                            risk_score: r.risk_score,
+                            confidence_score: confidence,
+                            source_contract: Some(req.spender_address.clone()),
+                            domain: None,
+                            metadata: json!({
+                                "token_address": req.token_address.clone(),
+                                "spender_address": req.spender_address.clone(),
+                                "amount_raw": req.amount_raw.clone(),
+                                "should_alert": r.should_alert
+                            }),
+                            event_time: None,
+                        },
+                    )
+                    .await
+                    {
+                        correlation = result;
+                    }
+                }
+            }
             if r.should_alert {
                 let _ = SenseiguardRepository::create_approval_alert(
                     &pool,
@@ -1294,7 +1384,8 @@ async fn approvals_ingest(
                 "success": true,
                 "risk_score": r.risk_score,
                 "should_alert": r.should_alert,
-                "warning": r.warning
+                "warning": r.warning,
+                "correlation": correlation
             })))
         }
         Err(e) => Err((

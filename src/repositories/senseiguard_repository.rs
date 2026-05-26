@@ -1,9 +1,10 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     ActivityFeedItem, ActivityFeedItemWithAddress, Alert, ContractFingerprint, ContractScan,
-    MonitoredTransaction, ProtectionAutoScan, ScamReport, SecurityScan, Threat,
-    ThreatRemediationAction, UserBlockedContract, UserContractWatchlist, UserProtectionSettings,
-    WalletApproval, WalletApprovalAlert, WalletAsset, WalletSecurityRule,
+    MonitoredTransaction, ProtectionAutoScan, ScamReport, SecurityScan, Threat, ThreatCampaign,
+    ThreatCampaignEvidence, ThreatEntityEdge, ThreatEvent, ThreatRemediationAction,
+    UserBlockedContract, UserContractWatchlist, UserProtectionSettings, WalletApproval,
+    WalletApprovalAlert, WalletAsset, WalletSecurityRule,
 };
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use sqlx::Error;
@@ -75,6 +76,21 @@ pub struct ThreatDetectionDetailRow {
     pub source_contract: Option<String>,
     pub surface: Option<String>,
     pub risk_breakdown: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ThreatCampaignDashboardRow {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub campaign_type: String,
+    pub status: String,
+    pub confidence_score: i32,
+    pub risk_score: i32,
+    pub narrative: String,
+    pub signal_categories: serde_json::Value,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub evidence_count: i64,
 }
 
 /// Row for Activity Monitor "Connected wallet" list: wallet + security_score + last_scan_at.
@@ -1007,7 +1023,7 @@ impl SenseiguardRepository {
 
     // ---- Dashboard overview (aggregate across wallets; use _for_user to scope by one user) ----
 
-    /// Minimum security score among active wallets (for overview status).
+    /// Minimum security score among active wallets (for security-overview risk cards).
     pub async fn min_security_score_active_wallets(pool: &DbPool) -> Result<Option<i32>, Error> {
         let row: (Option<i32>,) = sqlx::query_as(
             "SELECT MIN(COALESCE(wm.security_score, 100)) FROM wallet_monitoring wm JOIN wallets w ON w.id = wm.wallet_id WHERE w.is_active = true",
@@ -1781,6 +1797,286 @@ impl SenseiguardRepository {
         .bind(risk_breakdown)
         .fetch_one(pool)
         .await
+    }
+
+    pub async fn create_threat_event(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        threat_id: Option<Uuid>,
+        event_type: &str,
+        signal_category: &str,
+        threat_type: Option<&str>,
+        surface: Option<&str>,
+        risk_score: i32,
+        confidence_score: i32,
+        source_contract: Option<&str>,
+        domain: Option<&str>,
+        metadata: Option<serde_json::Value>,
+        event_time: Option<DateTime<Utc>>,
+    ) -> Result<ThreatEvent, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO threat_events (
+                wallet_id, threat_id, event_type, signal_category, threat_type, surface,
+                risk_score, confidence_score, source_contract, domain, metadata, event_time
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, COALESCE($11, '{}'::jsonb), COALESCE($12, NOW())
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(threat_id)
+        .bind(event_type)
+        .bind(signal_category)
+        .bind(threat_type)
+        .bind(surface)
+        .bind(risk_score.clamp(0, 100))
+        .bind(confidence_score.clamp(0, 100))
+        .bind(source_contract)
+        .bind(domain)
+        .bind(metadata)
+        .bind(event_time)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn list_recent_threat_events(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        since: DateTime<Utc>,
+        limit: i64,
+    ) -> Result<Vec<ThreatEvent>, Error> {
+        sqlx::query_as(
+            r#"
+            SELECT * FROM threat_events
+            WHERE wallet_id = $1 AND event_time >= $2
+            ORDER BY event_time DESC
+            LIMIT $3
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(since)
+        .bind(limit.clamp(1, 500))
+        .fetch_all(pool)
+        .await
+    }
+
+    pub async fn create_threat_entity_edge(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        from_entity_type: &str,
+        from_entity_id: &str,
+        edge_type: &str,
+        to_entity_type: &str,
+        to_entity_id: &str,
+        weight: i32,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<ThreatEntityEdge, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO threat_entity_edges (
+                wallet_id, from_entity_type, from_entity_id, edge_type,
+                to_entity_type, to_entity_id, weight, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, '{}'::jsonb))
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(from_entity_type)
+        .bind(from_entity_id)
+        .bind(edge_type)
+        .bind(to_entity_type)
+        .bind(to_entity_id)
+        .bind(weight.clamp(1, 100))
+        .bind(metadata)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn find_recent_open_campaign_by_type(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        campaign_type: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Option<ThreatCampaign>, Error> {
+        sqlx::query_as(
+            r#"
+            SELECT * FROM threat_campaigns
+            WHERE wallet_id = $1
+              AND campaign_type = $2
+              AND status IN ('open', 'investigating')
+              AND last_seen_at >= $3
+            ORDER BY last_seen_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(campaign_type)
+        .bind(since)
+        .fetch_optional(pool)
+        .await
+    }
+
+    pub async fn create_threat_campaign(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        campaign_type: &str,
+        risk_score: i32,
+        confidence_score: i32,
+        narrative: &str,
+        signal_categories: &serde_json::Value,
+        first_seen_at: Option<DateTime<Utc>>,
+        last_seen_at: Option<DateTime<Utc>>,
+    ) -> Result<ThreatCampaign, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO threat_campaigns (
+                wallet_id, campaign_type, status, risk_score, confidence_score, narrative,
+                signal_categories, first_seen_at, last_seen_at, updated_at
+            )
+            VALUES (
+                $1, $2, 'open', $3, $4, $5,
+                $6, COALESCE($7, NOW()), COALESCE($8, NOW()), NOW()
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(wallet_id)
+        .bind(campaign_type)
+        .bind(risk_score.clamp(0, 100))
+        .bind(confidence_score.clamp(0, 100))
+        .bind(narrative)
+        .bind(signal_categories)
+        .bind(first_seen_at)
+        .bind(last_seen_at)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn update_threat_campaign_scores(
+        pool: &DbPool,
+        campaign_id: Uuid,
+        risk_score: i32,
+        confidence_score: i32,
+        narrative: &str,
+        signal_categories: &serde_json::Value,
+        last_seen_at: Option<DateTime<Utc>>,
+    ) -> Result<ThreatCampaign, Error> {
+        sqlx::query_as(
+            r#"
+            UPDATE threat_campaigns
+            SET risk_score = $2,
+                confidence_score = $3,
+                narrative = $4,
+                signal_categories = $5,
+                last_seen_at = COALESCE($6, NOW()),
+                updated_at = NOW()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(campaign_id)
+        .bind(risk_score.clamp(0, 100))
+        .bind(confidence_score.clamp(0, 100))
+        .bind(narrative)
+        .bind(signal_categories)
+        .bind(last_seen_at)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn create_threat_campaign_evidence(
+        pool: &DbPool,
+        campaign_id: Uuid,
+        event_id: Option<Uuid>,
+        edge_id: Option<Uuid>,
+        evidence_type: &str,
+        evidence_rank: i32,
+        detail: Option<&str>,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<ThreatCampaignEvidence, Error> {
+        sqlx::query_as(
+            r#"
+            INSERT INTO threat_campaign_evidence (
+                campaign_id, event_id, edge_id, evidence_type, evidence_rank, detail, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, '{}'::jsonb))
+            RETURNING *
+            "#,
+        )
+        .bind(campaign_id)
+        .bind(event_id)
+        .bind(edge_id)
+        .bind(evidence_type)
+        .bind(evidence_rank.max(0))
+        .bind(detail)
+        .bind(metadata)
+        .fetch_one(pool)
+        .await
+    }
+
+    pub async fn count_campaign_evidence(pool: &DbPool, campaign_id: Uuid) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM threat_campaign_evidence WHERE campaign_id = $1",
+        )
+        .bind(campaign_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
+    pub async fn list_campaigns_for_dashboard(
+        pool: &DbPool,
+        user_id: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<ThreatCampaignDashboardRow>, Error> {
+        let limit = limit.clamp(1, 200);
+        match user_id {
+            Some(uid) if !uid.trim().is_empty() => {
+                sqlx::query_as(
+                    r#"
+                    SELECT c.id, w.address AS wallet_address, c.campaign_type, c.status, c.confidence_score,
+                           c.risk_score, c.narrative, c.signal_categories, c.first_seen_at, c.last_seen_at,
+                           COUNT(e.id)::bigint AS evidence_count
+                    FROM threat_campaigns c
+                    JOIN wallets w ON w.id = c.wallet_id
+                    LEFT JOIN threat_campaign_evidence e ON e.campaign_id = c.id
+                    WHERE w.is_active = true
+                      AND w.user_id = $1
+                    GROUP BY c.id, w.address
+                    ORDER BY c.last_seen_at DESC, c.confidence_score DESC
+                    LIMIT $2
+                    "#,
+                )
+                .bind(uid)
+                .bind(limit)
+                .fetch_all(pool)
+                .await
+            }
+            _ => {
+                sqlx::query_as(
+                    r#"
+                    SELECT c.id, w.address AS wallet_address, c.campaign_type, c.status, c.confidence_score,
+                           c.risk_score, c.narrative, c.signal_categories, c.first_seen_at, c.last_seen_at,
+                           COUNT(e.id)::bigint AS evidence_count
+                    FROM threat_campaigns c
+                    JOIN wallets w ON w.id = c.wallet_id
+                    LEFT JOIN threat_campaign_evidence e ON e.campaign_id = c.id
+                    WHERE w.is_active = true
+                    GROUP BY c.id, w.address
+                    ORDER BY c.last_seen_at DESC, c.confidence_score DESC
+                    LIMIT $1
+                    "#,
+                )
+                .bind(limit)
+                .fetch_all(pool)
+                .await
+            }
+        }
     }
 
     pub async fn create_alert(

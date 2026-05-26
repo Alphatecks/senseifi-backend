@@ -114,6 +114,79 @@ pub struct ThreatRemediationAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ThreatEvent {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub threat_id: Option<Uuid>,
+    pub event_type: String,
+    pub signal_category: String,
+    pub threat_type: Option<String>,
+    pub surface: Option<String>,
+    pub risk_score: i32,
+    pub confidence_score: i32,
+    pub source_contract: Option<String>,
+    pub domain: Option<String>,
+    pub metadata: serde_json::Value,
+    pub event_time: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ThreatEntityEdge {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub from_entity_type: String,
+    pub from_entity_id: String,
+    pub edge_type: String,
+    pub to_entity_type: String,
+    pub to_entity_id: String,
+    pub weight: i32,
+    pub metadata: serde_json::Value,
+    pub observed_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ThreatCampaign {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub campaign_type: String,
+    pub status: String,
+    pub risk_score: i32,
+    pub confidence_score: i32,
+    pub narrative: String,
+    pub signal_categories: serde_json::Value,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct ThreatCampaignEvidence {
+    pub id: Uuid,
+    pub campaign_id: Uuid,
+    pub event_id: Option<Uuid>,
+    pub edge_id: Option<Uuid>,
+    pub evidence_type: String,
+    pub evidence_rank: i32,
+    pub detail: Option<String>,
+    pub metadata: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatCorrelationSummary {
+    pub campaign_id: String,
+    pub campaign_type: String,
+    pub confidence_score: i32,
+    pub risk_score: i32,
+    pub narrative: String,
+    pub evidence_count: i64,
+    pub last_seen_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Alert {
     pub id: Uuid,
     pub wallet_id: Uuid,
@@ -364,7 +437,7 @@ pub struct DashboardOverviewResponse {
 #[derive(Debug, Serialize)]
 pub struct WalletStatusOverview {
     pub active_wallet_count: i64,
-    /// "safe" | "moderate" | "attention" from worst wallet score.
+    /// Operational connection state: "active" | "inactive" (not derived from security score).
     pub status: String,
     pub last_scan_at: Option<DateTime<Utc>>,
 }
@@ -890,6 +963,8 @@ pub struct AnalyzeTxResponse {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elite_assessment: Option<EliteRiskAssessment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<ThreatCorrelationSummary>,
 }
 
 /// User policy level for personalized risk thresholds.
@@ -984,6 +1059,8 @@ pub struct DappConnectionCheckResponse {
     pub website_scan: Option<WebsiteScanSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub correlation: Option<ThreatCorrelationSummary>,
 }
 
 /// One row in protection_auto_scan (which addresses have Auto Security Scan on).
