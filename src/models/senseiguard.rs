@@ -397,7 +397,17 @@ pub struct ConnectedWalletModalSecurity {
 }
 
 #[derive(Debug, Serialize)]
+pub struct WalletConnectionStatus {
+    /// Connection state from `wallets.is_active` — not derived from security score.
+    pub connection: String,
+    /// Monitoring row status (`wallet_monitoring.status`), e.g. active.
+    pub monitoring: String,
+}
+
+#[derive(Debug, Serialize)]
 pub struct DashboardSummaryResponse {
+    /// Operational wallet connection/monitoring state (separate from security score).
+    pub wallet_status: WalletConnectionStatus,
     pub security_status: SecurityStatusResponse,
     pub threats_this_month: i64,
     pub threats_trend_percent: f64,

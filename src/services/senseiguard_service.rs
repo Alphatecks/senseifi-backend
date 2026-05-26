@@ -10,7 +10,8 @@ use crate::models::senseiguard::{
     MetricCard, MonitoredTransaction, NativeChainBalance, OverallRiskCard, RecentActivityOverview,
     ReportedThreatsCard, ScamFrequencyDay, ScamPatternInsightsCard, ScamPatternsCard,
     ScanObservation, SecurityOverviewResponse, SecurityScan, SecurityStatusResponse, Threat,
-    ThreatLevelCard, ThreatRemediationAction, WalletApproval, WalletAsset, WalletStatusOverview,
+    ThreatLevelCard, ThreatRemediationAction, WalletApproval, WalletAsset, WalletConnectionStatus,
+    WalletStatusOverview,
 };
 use crate::repositories::senseiguard_repository::{
     ActivityFeedRowLive, SenseiguardRepository, ThreatDetectionRow,
@@ -366,55 +367,84 @@ impl SenseiguardService {
         address: &str,
     ) -> Result<SecurityStatusResponse, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
-        let latest = SenseiguardRepository::get_latest_scan(pool, wallet_id).await?;
-        let (score, status, last_scan_at) = match &latest {
-            Some(s) => (s.score, s.status.clone(), Some(s.scanned_at)),
-            None => {
-                let sc: (i32,) = sqlx::query_as(
-                    "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
-                )
-                .bind(wallet_id)
-                .fetch_optional(pool)
-                .await?
-                .unwrap_or((0,));
-                let at: (Option<chrono::DateTime<chrono::Utc>>,) = sqlx::query_as(
-                    "SELECT last_scan_at FROM wallet_monitoring WHERE wallet_id = $1",
-                )
-                .bind(wallet_id)
-                .fetch_optional(pool)
-                .await?
-                .unwrap_or((None,));
-                // Default DB security_score is 0; without a scan that is "unknown", not weak.
-                if at.0.is_none() {
-                    (100, "unscanned".to_string(), None)
-                } else {
-                    (sc.0, Self::status_from_score(sc.0), at.0)
-                }
-            }
-        };
+        let latest_scan = SenseiguardRepository::get_latest_scan(pool, wallet_id).await?;
+        let mon: (i32, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+            "SELECT COALESCE(security_score, 0), last_scan_at FROM wallet_monitoring WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_optional(pool)
+        .await?
+        .unwrap_or((0, None));
+
+        let has_full_scan = latest_scan.is_some();
+        let has_health_touch = mon.1.is_some();
+
+        // Never scanned and never health-refreshed: DB default score 0 is not "weak".
+        if !has_full_scan && !has_health_touch {
+            return Ok(SecurityStatusResponse {
+                score: 100,
+                status: "unscanned".to_string(),
+                message: "Run a full scan to see your security score and findings.".to_string(),
+                last_scan_at: None,
+                level: "safe".to_string(),
+                risk_breakdown: None,
+                last_updated: None,
+            });
+        }
+
+        // Live score from open threats + unread high alerts — not a stale security_scans row.
+        let (score, _, _) = Self::compute_live_security_score(pool, wallet_id).await?;
+        let status = Self::status_from_score(score);
+        let last_scan_at = latest_scan
+            .as_ref()
+            .map(|s| s.scanned_at)
+            .or(mon.1);
         let message = match status.as_str() {
             "strong" => "Your wallet is well protected. A few settings can be improved for stronger security.",
             "moderate" => "Your wallet has moderate protection. Run a scan and address the findings.",
             "weak" => "Your wallet needs attention. Run a full scan and fix critical issues.",
-            "unscanned" => "Run a full scan to see your security score and findings.",
             _ => "Run a full scan to see your security status.",
         };
         let level = match status.as_str() {
-            "strong" | "unscanned" => "safe",
+            "strong" => "safe",
             "moderate" => "moderate",
             _ => "dangerous",
         };
-        let last_updated = last_scan_at;
-        let risk_breakdown = None;
         Ok(SecurityStatusResponse {
             score,
             status,
             message: message.to_string(),
             last_scan_at,
             level: level.to_string(),
-            risk_breakdown,
-            last_updated,
+            risk_breakdown: None,
+            last_updated: last_scan_at,
         })
+    }
+
+    /// Current security score from open threats and unread high alerts (ignores stale scan history).
+    async fn compute_live_security_score(
+        pool: &DbPool,
+        wallet_id: Uuid,
+    ) -> Result<(i32, i64, i64), Error> {
+        let open = SenseiguardRepository::list_active_threats(pool, wallet_id, 500).await?;
+        let mut threat_penalty: i32 = 0;
+        for t in &open {
+            if Self::is_policy_enforcement_threat(t) {
+                continue;
+            }
+            threat_penalty += match t.severity.to_lowercase().as_str() {
+                "critical" => 14,
+                "high" => 12,
+                "medium" => 7,
+                _ => 3,
+            };
+        }
+        let unread_high = SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
+        let score = 100_i32
+            .saturating_sub(threat_penalty)
+            .saturating_sub((unread_high as i32).saturating_mul(3))
+            .clamp(0, 100);
+        Ok((score, open.len() as i64, unread_high))
     }
 
     fn status_from_score(score: i32) -> String {
@@ -786,6 +816,22 @@ impl SenseiguardService {
             .await?
             .ok_or(Error::RowNotFound)?;
         let wallet_id = wallet.id;
+        let monitoring_status: Option<(String,)> = sqlx::query_as(
+            "SELECT status FROM wallet_monitoring WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_optional(pool)
+        .await?;
+        let wallet_status = WalletConnectionStatus {
+            connection: if wallet.is_active {
+                "active".to_string()
+            } else {
+                "inactive".to_string()
+            },
+            monitoring: monitoring_status
+                .map(|r| r.0)
+                .unwrap_or_else(|| "active".to_string()),
+        };
         let security_status = Self::get_security_status(pool, address).await?;
         let threats_this_month =
             SenseiguardRepository::count_threats_this_month(pool, wallet_id).await?;
@@ -812,6 +858,7 @@ impl SenseiguardService {
             SenseiguardRepository::get_wallet_issues_this_month(pool, wallet_id).await?;
 
         Ok(DashboardSummaryResponse {
+            wallet_status,
             security_status,
             threats_this_month,
             threats_trend_percent: Self::change_percent(threats_this_month, threats_prev),
@@ -1275,25 +1322,15 @@ impl SenseiguardService {
         address: &str,
     ) -> Result<WalletHealthRefresh, Error> {
         let wallet_id = Self::wallet_id_by_address(pool, address).await?;
-        let previous = Self::get_security_status(pool, address).await?.score;
-        let open = SenseiguardRepository::list_active_threats(pool, wallet_id, 500).await?;
-        let mut threat_penalty: i32 = 0;
-        for t in &open {
-            if Self::is_policy_enforcement_threat(t) {
-                continue;
-            }
-            threat_penalty += match t.severity.to_lowercase().as_str() {
-                "critical" => 14,
-                "high" => 12,
-                "medium" => 7,
-                _ => 3,
-            };
-        }
-        let unread_high = SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
-        let score = 100_i32
-            .saturating_sub(threat_penalty)
-            .saturating_sub((unread_high as i32).saturating_mul(3))
-            .clamp(0, 100);
+        let previous: i32 = sqlx::query_as(
+            "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
+        )
+        .bind(wallet_id)
+        .fetch_optional(pool)
+        .await?
+        .map(|r: (i32,)| r.0)
+        .unwrap_or(0);
+        let (score, open_count, _) = Self::compute_live_security_score(pool, wallet_id).await?;
         SenseiguardRepository::update_wallet_security_score(pool, wallet_id, score).await?;
         let risk_score = 100 - score;
         let risk_level = protection_engine::score_to_band(risk_score).to_string();
@@ -1302,7 +1339,7 @@ impl SenseiguardService {
             score,
             risk_score,
             risk_level,
-            open_threats: open.len() as i64,
+            open_threats: open_count,
         })
     }
 
@@ -1564,14 +1601,10 @@ impl SenseiguardService {
             .await?,
         );
 
-        let score: i32 = sqlx::query_as(
-            "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
-        )
-        .bind(wallet_id)
-        .fetch_optional(pool)
-        .await?
-        .map(|r: (i32,)| r.0)
-        .unwrap_or(0);
+        let score = Self::get_security_status(pool, address)
+            .await
+            .map(|s| s.score)
+            .unwrap_or(100);
 
         Ok(DashboardMetricsResponse {
             malicious_transaction: MetricCard {
@@ -2057,6 +2090,7 @@ impl SenseiguardService {
             "strong" => "Secured",
             "moderate" => "Moderate",
             "unscanned" => "Not scanned",
+            "weak" => "At risk",
             _ => "At risk",
         };
         let last_scan_ago = security

@@ -1061,20 +1061,10 @@ async fn risk_profile(
     };
     let wallet_id = wallet.id;
 
-    let last_score =
-        if let Ok(Some(s)) = SenseiguardRepository::get_latest_scan(&pool, wallet_id).await {
-            s.score
-        } else {
-            let row: Option<(i32,)> = sqlx::query_as(
-                "SELECT COALESCE(security_score, 0) FROM wallet_monitoring WHERE wallet_id = $1",
-            )
-            .bind(wallet_id)
-            .fetch_optional(&pool)
-            .await
-            .ok()
-            .flatten();
-            row.map(|r| r.0).unwrap_or(0)
-        };
+    let last_score = SenseiguardService::get_security_status(&pool, &address)
+        .await
+        .map(|s| s.score)
+        .unwrap_or(100);
 
     let approval_count = SenseiguardRepository::count_approvals(&pool, wallet_id)
         .await
