@@ -3,6 +3,7 @@
 use crate::db::DbPool;
 use crate::models::senseiguard::ReputationInfo;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
+use crate::clients::external_reputation;
 use sqlx::Row;
 
 pub struct ReputationService;
@@ -16,16 +17,30 @@ pub struct ReputationGraphResult {
 }
 
 impl ReputationService {
-    /// Aggregate reputation from external APIs and our scam_reports.
-    /// Stub: uses only local scam_reports count; add GoPlus/Chainabuse/TokenSniffer later.
-    pub async fn get_reputation(pool: &DbPool, contract_address: &str) -> ReputationInfo {
-        let community_flags = SenseiguardRepository::count_scam_reports(pool, contract_address)
+    /// Aggregate reputation from external APIs and local scam reports.
+    /// Sources:
+    /// - Local `scam_reports` table
+    /// - GoPlus token security (when reachable)
+    /// - Optional URL-template feeds via env:
+    ///   - CHAINABUSE_ADDRESS_URL_TEMPLATE
+    ///   - SCAMSNIFFER_ADDRESS_URL_TEMPLATE
+    pub async fn get_reputation(
+        pool: &DbPool,
+        contract_address: &str,
+        chain_id: Option<u64>,
+    ) -> ReputationInfo {
+        let local_flags = SenseiguardRepository::count_scam_reports(pool, contract_address)
             .await
             .unwrap_or(0) as u32;
+        let ext = external_reputation::fetch_combined_signals(contract_address, chain_id).await;
+        let community_flags = local_flags.saturating_add(ext.community_flags);
+        let reported_scam = local_flags > 0 || ext.reported_scam;
+        let verified_source = ext.verified_source.or(Some(false));
+
         ReputationInfo {
-            reported_scam: Some(community_flags > 0),
+            reported_scam: Some(reported_scam),
             community_flags: Some(community_flags),
-            verified_source: Some(false), // Etherscan verified: integrate later
+            verified_source,
         }
     }
 

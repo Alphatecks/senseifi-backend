@@ -77,7 +77,7 @@ impl ScanService {
         let sim_with_fns = simulation;
 
         // 4. Reputation (uses pool for scam_reports)
-        let reputation = ReputationService::get_reputation(pool, contract_address).await;
+        let reputation = ReputationService::get_reputation(pool, contract_address, chain_id).await;
 
         // 5. Trend from DB
         let (scans_today, wallets_affected) =

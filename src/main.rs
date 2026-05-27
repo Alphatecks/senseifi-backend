@@ -116,6 +116,7 @@ async fn main() {
     // (including 429 from rate limit, 404, 5xx) gets CORS headers.
     let app = Router::new()
         .nest("/api", routes::api_routes(pool))
+        .merge(routes::scamsniffer_proxy_routes::scamsniffer_proxy_public_routes())
         .layer(GovernorLayer::new(governor_conf))
         .layer(RequestBodyLimitLayer::new(256 * 1024)) // 256 KiB max body
         .layer(SetResponseHeaderLayer::overriding(

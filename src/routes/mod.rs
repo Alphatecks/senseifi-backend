@@ -5,6 +5,7 @@ pub mod dashboard_routes;
 pub mod payment_routes;
 pub mod protection_routes;
 pub mod scan_routes;
+pub mod scamsniffer_proxy_routes;
 pub mod subscription_routes;
 pub mod wallet_routes;
 
