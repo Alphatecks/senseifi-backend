@@ -14,6 +14,7 @@ use crate::services::threat_scoring_v2::{ThreatScoringV2, ThreatSignal, SCORING_
 use crate::services::website_scan_service;
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
+use std::cmp::Reverse;
 use strsim::levenshtein;
 
 // --- Production risk bands (aligned with PHISHING_DETECTION_ROADMAP) ---
@@ -638,6 +639,23 @@ fn is_homograph_domain(domain: &str) -> bool {
     domain.chars().any(|c| c as u32 > 127)
 }
 
+/// Rank finding text by prefixed severity (higher = more severe).
+/// Expected format: "[critical] ...", "[high] ...", "[medium] ...", "[low] ...".
+fn finding_severity_rank(finding: &str) -> i32 {
+    let lower = finding.trim().to_ascii_lowercase();
+    if lower.starts_with("[critical]") {
+        4
+    } else if lower.starts_with("[high]") {
+        3
+    } else if lower.starts_with("[medium]") {
+        2
+    } else if lower.starts_with("[low]") {
+        1
+    } else {
+        0
+    }
+}
+
 /// When new_dapp_connection_alerts is ON we check domain; when OFF skip.
 pub async fn evaluate_dapp_connection(
     pool: &DbPool,
@@ -689,6 +707,8 @@ pub async fn evaluate_dapp_connection(
         } else if let Some(reason) = intel.reason.clone() {
             findings.insert(0, format!("[low] {}", reason));
         }
+        // Ensure UI "top finding" (first item) is always highest severity.
+        findings.sort_by_key(|f| Reverse(finding_severity_rank(f)));
         website_scan_summary = Some(WebsiteScanSummary {
             target: scan.target,
             normalized_url: scan.normalized_url,
