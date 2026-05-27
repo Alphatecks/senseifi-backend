@@ -54,13 +54,14 @@ impl ScoringEngine {
     }
 
     /// Reputation risk. Don't penalize "not verified" (many legitimate contracts aren't on Etherscan); only scam reports and community flags.
+    /// Keep this moderate to avoid over-penalizing with sparse or noisy reports.
     fn reputation_risk(rep: &ReputationInfo) -> u8 {
         let mut r = 0u8;
         if rep.reported_scam == Some(true) {
-            r += 80;
+            r += 45;
         }
         let flags = rep.community_flags.unwrap_or(0);
-        r = r.saturating_add((flags as u8).min(20));
+        r = r.saturating_add((flags as u8).min(25));
         r.min(100)
     }
 

@@ -34,7 +34,8 @@ impl ReputationService {
             .unwrap_or(0) as u32;
         let ext = external_reputation::fetch_combined_signals(contract_address, chain_id).await;
         let community_flags = local_flags.saturating_add(ext.community_flags);
-        let reported_scam = local_flags > 0 || ext.reported_scam;
+        // Require multiple local reports before hard "reported_scam" to reduce one-off false positives.
+        let reported_scam = local_flags >= 3 || ext.reported_scam;
         let verified_source = ext.verified_source.or(Some(false));
 
         ReputationInfo {

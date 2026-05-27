@@ -14,6 +14,8 @@ pub struct SimulateResult {
 struct AssetChange {
     #[serde(rename = "changeType")]
     change_type: Option<String>,
+    #[serde(rename = "from")]
+    from: Option<String>,
     #[serde(rename = "to")]
     to: Option<String>,
 }
@@ -72,10 +74,19 @@ pub async fn simulate_contract_call(
         return Err("Simulation error".to_string());
     }
     let changes = result.changes.unwrap_or_default();
+    let sender = "0x0000000000000000000000000000000000000001".to_string();
+    let sender_lower = sender.to_lowercase();
     let contract_lower = contract_address.to_lowercase();
     let drains = changes.iter().any(|c| {
-        c.change_type.as_deref() == Some("TRANSFER")
-            && c.to.as_ref().map(|t| t.to_lowercase()) == Some(contract_lower.clone())
+        let transfer = c.change_type.as_deref() == Some("TRANSFER");
+        let from_sender = c
+            .from
+            .as_ref()
+            .map(|f| f.to_lowercase())
+            .is_some_and(|f| f == sender_lower);
+        let to = c.to.as_ref().map(|t| t.to_lowercase()).unwrap_or_default();
+        // Treat as drain only when simulated sender loses assets to a third-party address.
+        transfer && from_sender && !to.is_empty() && to != sender_lower && to != contract_lower
     });
     let count = changes.len().min(u32::MAX as usize) as u32;
     Ok(SimulateResult {

@@ -12,7 +12,7 @@ pub struct SimulationService;
 
 impl SimulationService {
     /// Simulate a call to the contract using provider chain.
-    /// dangerous_functions: from analyzer; used to set approval_scope (unlimited if approve/setApprovalForAll present).
+    /// dangerous_functions: from analyzer; used to set approval_scope (unlimited only for setApprovalForAll-style signals).
     pub async fn simulate_contract(
         contract_address: &str,
         _tokens_controlled: &[String],
@@ -63,7 +63,7 @@ impl SimulationService {
     fn approval_scope_from_dangerous(dangerous_functions: &[String]) -> String {
         let has_unlimited = dangerous_functions.iter().any(|s| {
             let l = s.to_lowercase();
-            l.contains("setapprovalforall") || l.contains("approve")
+            l.contains("setapprovalforall")
         });
         if has_unlimited {
             "unlimited".to_string()

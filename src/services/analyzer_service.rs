@@ -20,8 +20,6 @@ const BLACKLIST_NAMES: &[&str] = &["blacklist", "addblacklist", "setblacklist"];
 /// Dangerous for user approvals / proxy.
 const DANGEROUS_NAMES: &[&str] = &[
     "setapprovalforall",
-    "approve",
-    "increaseallowance",
     "delegatecall",
     "multicall",
 ];
@@ -88,10 +86,7 @@ impl AnalyzerService {
                 tracing::info!("Analyzer: empty ABI for {} (contract not verified?); using stub (no fake token list)", contract_address);
                 return AnalysisResult {
                     owner_privileges: Self::stub_owner_privileges(),
-                    dangerous_functions: vec![
-                        "delegatecall".to_string(),
-                        "setApprovalForAll".to_string(),
-                    ],
+                    dangerous_functions: vec![],
                     abi_from_etherscan: false,
                     tokens_controlled: vec!["Unknown".into()],
                     contract_name: None,
@@ -106,10 +101,7 @@ impl AnalyzerService {
                 );
                 return AnalysisResult {
                     owner_privileges: Self::stub_owner_privileges(),
-                    dangerous_functions: vec![
-                        "delegatecall".to_string(),
-                        "setApprovalForAll".to_string(),
-                    ],
+                    dangerous_functions: vec![],
                     abi_from_etherscan: false,
                     tokens_controlled: vec!["Unknown".into()],
                     contract_name: None,
@@ -236,9 +228,6 @@ impl AnalyzerService {
             {
                 out.push("delegatecall".to_string());
             }
-        }
-        if out.is_empty() {
-            out.push("setApprovalForAll".to_string());
         }
         out
     }

@@ -411,8 +411,13 @@ async fn compute_contract_reputation_risk(
         Some(s) if s <= 70 => 10,
         _ => 0,
     };
-    let report_risk = (scam_reports as i32 * 12).min(40);
-    let total = (trust_risk + report_risk).min(45);
+    // Require multiple independent reports before strong reputation penalty.
+    let report_risk = if scam_reports >= 3 {
+        ((scam_reports as i32 - 2) * 8).min(24)
+    } else {
+        0
+    };
+    let total = (trust_risk + report_risk).min(35);
     (total, trust_score, scam_reports, wallets_affected)
 }
 
@@ -579,7 +584,7 @@ async fn extension_scan_smart_contract(
     let scan_risk = (100 - scan.trust_score).clamp(0, 100);
     let final_risk = (scan_risk + contract_reputation_risk).clamp(0, 100);
     let risk_level_10 = ((final_risk as f64) / 10.0 * 10.0).round() / 10.0;
-    let malicious = final_risk >= 75 || scam_reports > 0 || scan.critical_risk_flags > 0;
+    let malicious = final_risk >= 75 || scam_reports >= 3 || scan.critical_risk_flags > 0;
 
     Ok(Json(json!({
         "screen": if malicious { "malicious_contract_detected" } else { "sensei_risk_panel" },
