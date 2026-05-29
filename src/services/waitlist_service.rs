@@ -2,7 +2,7 @@
 
 use crate::db::DbPool;
 use crate::models::wallet::{canonical_eth_address, is_valid_eth_address};
-use crate::models::waitlist::{UserXpClaim, WaitlistXpBreakdown};
+use crate::models::waitlist::{ClaimXpResult, UserXpClaim, WaitlistXpBreakdown};
 use crate::repositories::waitlist_repository::WaitlistRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
@@ -15,7 +15,6 @@ pub enum WaitlistXpError {
     WalletNotConnected,
     EmailNotOnWaitlist,
     EmailAlreadyClaimed { claimed_by_user_id: String },
-    UserAlreadyClaimed { existing_email: String },
     Database(Error),
 }
 
@@ -34,9 +33,6 @@ impl WaitlistXpError {
             Self::EmailNotOnWaitlist => "Email not found on the SenseiFi waitlist",
             Self::EmailAlreadyClaimed { .. } => {
                 "This waitlist email has already been claimed by another account"
-            }
-            Self::UserAlreadyClaimed { .. } => {
-                "This wallet account has already claimed waitlist XP with a different email"
             }
             Self::Database(_) => "Database error",
         }
@@ -85,11 +81,19 @@ pub async fn preview_xp_by_email(
     .map_err(WaitlistXpError::from)
 }
 
+fn existing_claim_result(claim: UserXpClaim, requested_email: &str) -> ClaimXpResult {
+    ClaimXpResult {
+        email_mismatch: claim.email.to_lowercase() != requested_email,
+        already_claimed: true,
+        claim,
+    }
+}
+
 pub async fn claim_xp(
     pool: &DbPool,
     email: &str,
     wallet_address: &str,
-) -> Result<UserXpClaim, WaitlistXpError> {
+) -> Result<ClaimXpResult, WaitlistXpError> {
     let email = normalize_email(email).ok_or(WaitlistXpError::InvalidEmail)?;
     if !is_valid_eth_address(wallet_address) {
         return Err(WaitlistXpError::InvalidWalletAddress);
@@ -103,27 +107,27 @@ pub async fn claim_xp(
         return Err(WaitlistXpError::WalletNotConnected);
     }
 
-    let entry = WaitlistRepository::find_entry_by_email(pool, &email)
-        .await?
-        .ok_or(WaitlistXpError::EmailNotOnWaitlist)?;
-
     let dashboard_user =
         dashboard_user_service::get_or_create_for_wallet(pool, &wallet_address).await?;
+
+    // Wallet already claimed: return stored XP (idempotent), even if a different email is submitted.
+    if let Some(existing) = WaitlistRepository::get_claim_by_wallet(pool, &wallet_address).await? {
+        return Ok(existing_claim_result(existing, &email));
+    }
 
     if let Some(existing) =
         WaitlistRepository::get_claim_by_user_id(pool, &dashboard_user.user_id).await?
     {
-        if existing.email.to_lowercase() == email {
-            return Ok(existing);
-        }
-        return Err(WaitlistXpError::UserAlreadyClaimed {
-            existing_email: existing.email,
-        });
+        return Ok(existing_claim_result(existing, &email));
     }
+
+    let entry = WaitlistRepository::find_entry_by_email(pool, &email)
+        .await?
+        .ok_or(WaitlistXpError::EmailNotOnWaitlist)?;
 
     if let Some(existing) = WaitlistRepository::get_claim_by_email(pool, &email).await? {
         if existing.user_id == dashboard_user.user_id {
-            return Ok(existing);
+            return Ok(existing_claim_result(existing, &email));
         }
         return Err(WaitlistXpError::EmailAlreadyClaimed {
             claimed_by_user_id: existing.user_id,
@@ -158,7 +162,11 @@ pub async fn claim_xp(
     )
     .await;
 
-    Ok(claim)
+    Ok(ClaimXpResult {
+        claim,
+        already_claimed: false,
+        email_mismatch: false,
+    })
 }
 
 pub async fn get_claim_for_wallet(

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::db::DbPool;
+use crate::models::waitlist::{xp_breakdown_json, xp_claim_json};
 use crate::models::wallet::is_valid_eth_address;
 use crate::services::waitlist_service::{self, WaitlistXpError};
 
@@ -44,9 +45,7 @@ fn xp_error_status(err: &WaitlistXpError) -> StatusCode {
         WaitlistXpError::WalletNotConnected | WaitlistXpError::EmailNotOnWaitlist => {
             StatusCode::NOT_FOUND
         }
-        WaitlistXpError::EmailAlreadyClaimed { .. } | WaitlistXpError::UserAlreadyClaimed { .. } => {
-            StatusCode::CONFLICT
-        }
+        WaitlistXpError::EmailAlreadyClaimed { .. } => StatusCode::CONFLICT,
         WaitlistXpError::Database(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -61,9 +60,6 @@ fn xp_error_body(err: &WaitlistXpError) -> Value {
             claimed_by_user_id,
         } => {
             body["claimed_by_user_id"] = json!(claimed_by_user_id);
-        }
-        WaitlistXpError::UserAlreadyClaimed { existing_email } => {
-            body["existing_email"] = json!(existing_email);
         }
         WaitlistXpError::Database(e) => {
             eprintln!("waitlist xp error: {}", e);
@@ -80,7 +76,7 @@ async fn preview_xp(
     match waitlist_service::preview_xp_by_email(&pool, &q.email).await {
         Ok(breakdown) => Ok(Json(json!({
             "success": true,
-            "data": breakdown,
+            "data": xp_breakdown_json(&breakdown),
         }))),
         Err(e) => Err((xp_error_status(&e), Json(xp_error_body(&e)))),
     }
@@ -91,11 +87,24 @@ async fn claim_xp(
     Json(body): Json<ClaimRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     match waitlist_service::claim_xp(&pool, &body.email, &body.wallet_address).await {
-        Ok(claim) => Ok(Json(json!({
-            "success": true,
-            "message": "Waitlist XP claimed successfully",
-            "data": claim,
-        }))),
+        Ok(result) => {
+            let message = if result.already_claimed {
+                if result.email_mismatch {
+                    "This wallet already claimed waitlist XP with a different email"
+                } else {
+                    "Waitlist XP was already claimed for this wallet"
+                }
+            } else {
+                "Waitlist XP claimed successfully"
+            };
+            Ok(Json(json!({
+                "success": true,
+                "message": message,
+                "already_claimed": result.already_claimed,
+                "email_mismatch": result.email_mismatch,
+                "data": xp_claim_json(&result.claim),
+            })))
+        }
         Err(e) => Err((xp_error_status(&e), Json(xp_error_body(&e)))),
     }
 }
@@ -144,7 +153,7 @@ async fn get_xp_status(
         Ok(Some(claim)) => Ok(Json(json!({
             "success": true,
             "claimed": true,
-            "data": claim,
+            "data": xp_claim_json(&claim),
         }))),
         Ok(None) => Ok(Json(json!({
             "success": true,
