@@ -683,6 +683,12 @@ pub struct ReputationInfo {
     pub community_flags: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_source: Option<bool>,
+    /// Rows in local `scam_reports` for this contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_report_count: Option<u32>,
+    /// GoPlus / feed signals that are informational (e.g. mintable), not scam accusations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub informational_flags: Option<u32>,
 }
 
 /// Trend: scans today, wallets affected, risk_trend badge.

@@ -42,6 +42,8 @@ impl ReputationService {
             reported_scam: Some(reported_scam),
             community_flags: Some(community_flags),
             verified_source,
+            local_report_count: Some(local_flags),
+            informational_flags: Some(ext.informational_flags),
         }
     }
 

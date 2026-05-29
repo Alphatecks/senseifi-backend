@@ -132,11 +132,13 @@ impl ScanService {
         );
         let rug_pull = ScoringEngine::rug_pull_probability(&owner_privileges);
 
-        // 9. AI summary
+        // 9. AI summary (aligned with trust score and factor breakdown)
         let ai_summary = AiInsightService::explain_risks(
+            trust_score,
             &sim_with_fns,
             &owner_privileges,
             &reputation,
+            &risk_breakdown,
             &token_controlled_str,
         );
 

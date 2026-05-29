@@ -4,6 +4,7 @@ use serde_json::Value;
 pub struct ExternalReputationSignals {
     pub reported_scam: bool,
     pub community_flags: u32,
+    pub informational_flags: u32,
     pub verified_source: Option<bool>,
 }
 
@@ -17,6 +18,7 @@ pub async fn fetch_combined_signals(
     if let Some(s) = goplus {
         out.reported_scam |= s.reported_scam;
         out.community_flags = out.community_flags.saturating_add(s.community_flags);
+        out.informational_flags = out.informational_flags.saturating_add(s.informational_flags);
         if s.verified_source == Some(true) {
             out.verified_source = Some(true);
         } else if out.verified_source.is_none() {
@@ -71,21 +73,31 @@ async fn fetch_goplus_signals(
 
     let verified_source = parse_bool_flag(token.get("is_open_source")).or(Some(false));
 
-    let mut risk_flags = 0u32;
-    let risky_keys = [
+    let scam_keys = [
         "is_honeypot",
         "is_blacklisted",
-        "is_proxy",
-        "is_mintable",
         "owner_change_balance",
         "cannot_sell_all",
-        "trading_cooldown",
-        "personal_slippage_modifiable",
         "selfdestruct",
     ];
-    for key in risky_keys {
+    let informational_keys = [
+        "is_mintable",
+        "is_proxy",
+        "trading_cooldown",
+        "personal_slippage_modifiable",
+    ];
+
+    let mut scam_flags = 0u32;
+    for key in scam_keys {
         if parse_bool_flag(token.get(key)) == Some(true) {
-            risk_flags = risk_flags.saturating_add(1);
+            scam_flags = scam_flags.saturating_add(1);
+        }
+    }
+
+    let mut informational_flags = 0u32;
+    for key in informational_keys {
+        if parse_bool_flag(token.get(key)) == Some(true) {
+            informational_flags = informational_flags.saturating_add(1);
         }
     }
 
@@ -93,12 +105,13 @@ async fn fetch_goplus_signals(
     let buy_tax = parse_number_flag(token.get("buy_tax")).unwrap_or(0.0);
     let sell_tax = parse_number_flag(token.get("sell_tax")).unwrap_or(0.0);
     if buy_tax >= 30.0 || sell_tax >= 30.0 {
-        risk_flags = risk_flags.saturating_add(1);
+        scam_flags = scam_flags.saturating_add(1);
     }
 
     Some(ExternalReputationSignals {
-        reported_scam: risk_flags > 0,
-        community_flags: risk_flags,
+        reported_scam: scam_flags > 0,
+        community_flags: scam_flags.saturating_add(informational_flags),
+        informational_flags,
         verified_source,
     })
 }
