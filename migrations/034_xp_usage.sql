@@ -1,11 +1,27 @@
 -- Track XP spent on app usage; xp balance = xp - xp_spent.
 
 ALTER TABLE user_xp_claims
-    ADD COLUMN IF NOT EXISTS xp_spent INT NOT NULL DEFAULT 0 CHECK (xp_spent >= 0);
+    ADD COLUMN IF NOT EXISTS xp_spent INT NOT NULL DEFAULT 0;
 
-ALTER TABLE user_xp_claims
-    ADD CONSTRAINT user_xp_claims_spent_not_exceed_earned
-    CHECK (xp_spent <= xp);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'user_xp_claims_xp_spent_nonneg'
+    ) THEN
+        ALTER TABLE user_xp_claims
+            ADD CONSTRAINT user_xp_claims_xp_spent_nonneg CHECK (xp_spent >= 0);
+    END IF;
+END $$;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'user_xp_claims_spent_not_exceed_earned'
+    ) THEN
+        ALTER TABLE user_xp_claims
+            ADD CONSTRAINT user_xp_claims_spent_not_exceed_earned CHECK (xp_spent <= xp);
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS xp_usage_events (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
