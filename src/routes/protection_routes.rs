@@ -641,6 +641,15 @@ async fn extension_analyze_transaction_screen(
     .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
 
     let transaction_risk_score = result.risk_score.unwrap_or(0).clamp(0, 100);
+    let policy_enforcement_active = result
+        .threat_types
+        .as_ref()
+        .map(|types| {
+            types
+                .iter()
+                .any(|t| t == crate::models::senseiguard::threat_types::POLICY_ENFORCEMENT)
+        })
+        .unwrap_or(false);
     let contract_risk_score = if let Some(to) = req.to.as_deref() {
         if is_valid_eth_address(to) {
             let (contract_reputation_risk, trust_score, _reports, _wallets) =
@@ -653,9 +662,16 @@ async fn extension_analyze_transaction_screen(
     } else {
         None
     };
+    // If settings policy (e.g. emergency lock) blocked the tx, do not present that as
+    // intrinsic contract maliciousness on this analysis screen.
+    let effective_tx_risk_score = if policy_enforcement_active {
+        0
+    } else {
+        transaction_risk_score
+    };
     let final_decision_score = contract_risk_score
-        .map(|c| c.max(transaction_risk_score))
-        .unwrap_or(transaction_risk_score);
+        .map(|c| c.max(effective_tx_risk_score))
+        .unwrap_or(effective_tx_risk_score);
     let risk_level = if final_decision_score >= 80 {
         "Critical"
     } else if final_decision_score >= 50 {
@@ -666,7 +682,9 @@ async fn extension_analyze_transaction_screen(
         "Safe"
     };
 
-    let tx_details = if req.method.as_deref() == Some("eth_signTypedData_v4")
+    let tx_details = if policy_enforcement_active {
+        "Wallet protection policy is enforcing a block (for example emergency lock). Contract risk is shown separately."
+    } else if req.method.as_deref() == Some("eth_signTypedData_v4")
         || req.method.as_deref() == Some("eth_signTypedData")
     {
         "Typed-data signature request detected."
@@ -693,6 +711,7 @@ async fn extension_analyze_transaction_screen(
         "transaction_risk_score": transaction_risk_score,
         "final_decision_score": final_decision_score,
         "decision_context": "transaction_intent_with_contract_context",
+        "policy_enforcement_active": policy_enforcement_active,
         "risk_level": risk_level,
         "recommendation": result.recommended_action.unwrap_or_else(|| "Review before signing".to_string()),
         "transaction_details": tx_details,

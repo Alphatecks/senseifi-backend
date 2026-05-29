@@ -7,6 +7,7 @@ pub mod protection_routes;
 pub mod scan_routes;
 pub mod scamsniffer_proxy_routes;
 pub mod subscription_routes;
+pub mod waitlist_routes;
 pub mod wallet_routes;
 
 pub fn api_routes(pool: crate::db::DbPool) -> Router {
@@ -19,5 +20,6 @@ pub fn api_routes(pool: crate::db::DbPool) -> Router {
         .nest("/scan-contract", scan_routes::scan_routes())
         .nest("/protection", protection_routes::protection_routes())
         .nest("/telemetry", protection_routes::telemetry_routes())
+        .nest("/waitlist", waitlist_routes::waitlist_routes())
         .with_state(pool)
 }

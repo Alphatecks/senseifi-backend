@@ -53,9 +53,11 @@ async fn main() {
 
     // CORS: allow trusted frontend origins.
     // Always include localhost and SenseiFi production domains, then extend via ALLOWED_ORIGINS.
-    let default_origins: [&str; 6] = [
+    let default_origins: [&str; 8] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "https://senseifi.io",
