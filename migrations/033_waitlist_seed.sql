@@ -1,7 +1,7 @@
 -- Seed waitlist data imported from waitlist_rows.sql and referrals_rows.sql
 TRUNCATE waitlist_referrals, waitlist_entries RESTART IDENTITY CASCADE;
 
-INSERT INTO waitlist_entries (id, email, referral_code, created_at) VALUES
+INSERT INTO waitlist_entries (id, email, created_at, referral_code) VALUES
 (1, 'test@example.com', '2026-01-20 17:13:58.297037', 'RzEsXlW4xpE'),
 (2, 'chikezie@gmail.com', '2026-01-20 17:19:03.435501', 'X9KlrUSGbsE'),
 (3, 'balogun@gmail.com', '2026-01-20 17:19:21.241391', 'dnklRd4Wpww'),
