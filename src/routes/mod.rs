@@ -2,6 +2,7 @@ use crate::services::hello_service::hello_service;
 use axum::{routing::get, Router};
 
 pub mod dashboard_routes;
+pub mod notification_routes;
 pub mod payment_routes;
 pub mod protection_routes;
 pub mod scan_routes;
@@ -21,5 +22,6 @@ pub fn api_routes(pool: crate::db::DbPool) -> Router {
         .nest("/protection", protection_routes::protection_routes())
         .nest("/telemetry", protection_routes::telemetry_routes())
         .nest("/waitlist", waitlist_routes::waitlist_routes())
+        .nest("/notifications", notification_routes::notification_routes())
         .with_state(pool)
 }

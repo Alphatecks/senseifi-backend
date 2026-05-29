@@ -7,6 +7,7 @@ pub mod hello_service;
 pub mod onchain_payment_webhook_service;
 pub mod onchain_subscribe_service;
 pub mod plan_catalog;
+pub mod notification_service;
 pub mod protection_engine;
 pub mod reputation_service;
 pub mod scan_service;
