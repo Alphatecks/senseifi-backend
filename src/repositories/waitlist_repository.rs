@@ -1,7 +1,9 @@
 use crate::db::DbPool;
-use crate::models::waitlist::{UserXpClaim, WaitlistXpBreakdown};
+use crate::models::waitlist::{UserXpClaim, WaitlistXpBreakdown, XpUsageEvent};
 use chrono::{DateTime, Utc};
+use serde_json::Value;
 use sqlx::Error;
+use uuid::Uuid;
 
 pub struct WaitlistRepository;
 
@@ -75,7 +77,7 @@ impl WaitlistRepository {
         Self::map_claim_row(
             sqlx::query_as::<_, ClaimRow>(
                 r#"
-                SELECT user_id, wallet_address, waitlist_entry_id, email, xp,
+                SELECT user_id, wallet_address, waitlist_entry_id, email, xp, xp_spent,
                        direct_referrals, level2_referrals, claimed_at
                 FROM user_xp_claims
                 WHERE LOWER(TRIM(email)) = LOWER(TRIM($1))
@@ -94,7 +96,7 @@ impl WaitlistRepository {
         Self::map_claim_row(
             sqlx::query_as::<_, ClaimRow>(
                 r#"
-                SELECT user_id, wallet_address, waitlist_entry_id, email, xp,
+                SELECT user_id, wallet_address, waitlist_entry_id, email, xp, xp_spent,
                        direct_referrals, level2_referrals, claimed_at
                 FROM user_xp_claims
                 WHERE user_id = $1
@@ -113,7 +115,7 @@ impl WaitlistRepository {
         Self::map_claim_row(
             sqlx::query_as::<_, ClaimRow>(
                 r#"
-                SELECT user_id, wallet_address, waitlist_entry_id, email, xp,
+                SELECT user_id, wallet_address, waitlist_entry_id, email, xp, xp_spent,
                        direct_referrals, level2_referrals, claimed_at
                 FROM user_xp_claims
                 WHERE LOWER(wallet_address) = LOWER($1)
@@ -142,7 +144,7 @@ impl WaitlistRepository {
                 xp, direct_referrals, level2_referrals
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7)
-            RETURNING user_id, wallet_address, waitlist_entry_id, email, xp,
+            RETURNING user_id, wallet_address, waitlist_entry_id, email, xp, xp_spent,
                       direct_referrals, level2_referrals, claimed_at
             "#,
         )
@@ -159,15 +161,114 @@ impl WaitlistRepository {
         Self::map_claim_row(Some(row)).map(|c| c.expect("insert returned row"))
     }
 
+    /// Atomically deduct XP and append a ledger row. Returns None if balance insufficient.
+    pub async fn deduct_xp_for_usage(
+        pool: &DbPool,
+        user_id: &str,
+        wallet_address: &str,
+        action_type: &str,
+        xp_cost: i32,
+        metadata: Option<Value>,
+    ) -> Result<Option<(i32, i32, i32)>, Error> {
+        let mut tx = pool.begin().await?;
+
+        let updated = sqlx::query_as::<_, (i32, i32)>(
+            r#"
+            UPDATE user_xp_claims
+            SET xp_spent = xp_spent + $2
+            WHERE user_id = $1 AND xp - xp_spent >= $2
+            RETURNING xp, xp_spent
+            "#,
+        )
+        .bind(user_id)
+        .bind(xp_cost)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let Some((xp_earned, xp_spent)) = updated else {
+            tx.rollback().await?;
+            return Ok(None);
+        };
+
+        let xp_balance = xp_earned.saturating_sub(xp_spent);
+        sqlx::query(
+            r#"
+            INSERT INTO xp_usage_events (
+                user_id, wallet_address, action_type, xp_cost, xp_balance_after, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(user_id)
+        .bind(wallet_address)
+        .bind(action_type)
+        .bind(xp_cost)
+        .bind(xp_balance)
+        .bind(metadata)
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(Some((xp_earned, xp_spent, xp_balance)))
+    }
+
+    pub async fn list_usage_events(
+        pool: &DbPool,
+        user_id: &str,
+        limit: i64,
+    ) -> Result<Vec<XpUsageEvent>, Error> {
+        let rows = sqlx::query_as::<_, UsageRow>(
+            r#"
+            SELECT id, user_id, wallet_address, action_type, xp_cost, xp_balance_after, created_at
+            FROM xp_usage_events
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(user_id)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(id, user_id, wallet_address, action_type, xp_cost, xp_balance_after, created_at)| {
+                    XpUsageEvent {
+                        id,
+                        user_id,
+                        wallet_address,
+                        action_type,
+                        xp_cost,
+                        xp_balance_after,
+                        created_at,
+                    }
+                },
+            )
+            .collect())
+    }
+
     fn map_claim_row(row: Option<ClaimRow>) -> Result<Option<UserXpClaim>, Error> {
         Ok(row.map(
-            |(user_id, wallet_address, waitlist_entry_id, email, xp, direct_referrals, level2_referrals, claimed_at)| {
+            |(
+                user_id,
+                wallet_address,
+                waitlist_entry_id,
+                email,
+                xp,
+                xp_spent,
+                direct_referrals,
+                level2_referrals,
+                claimed_at,
+            )| {
                 UserXpClaim {
                     user_id,
                     wallet_address,
                     email,
                     waitlist_entry_id,
                     xp,
+                    xp_spent,
                     direct_referrals,
                     level2_referrals,
                     claimed_at,
@@ -183,6 +284,17 @@ type ClaimRow = (
     i32,
     String,
     i32,
+    i32,
+    i32,
+    i32,
+    DateTime<Utc>,
+);
+
+type UsageRow = (
+    Uuid,
+    String,
+    String,
+    String,
     i32,
     i32,
     DateTime<Utc>,

@@ -12,6 +12,7 @@ use crate::services::domain_intel_service;
 use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
 use crate::services::threat_scoring_v2::{ThreatScoringV2, ThreatSignal, SCORING_MODEL_V2};
 use crate::services::website_scan_service;
+use crate::services::xp_usage_service::{self, XpUsageAction, XpUsageError};
 use chrono::{Duration, Utc};
 use serde_json::{json, Value};
 use std::cmp::Reverse;
@@ -890,6 +891,30 @@ pub fn build_dapp_check_skipped_with_reason(reason: &str) -> DappConnectionCheck
     }
 }
 
+/// True when analyze-tx failed because the wallet's XP balance is too low.
+pub fn is_insufficient_xp_error(message: &str) -> bool {
+    message.starts_with("insufficient_xp:")
+}
+
+async fn charge_wallet_for_tx_analysis(pool: &DbPool, wallet_address: &str) -> Result<(), String> {
+    match xp_usage_service::charge_wallet_usage(
+        pool,
+        wallet_address,
+        XpUsageAction::TxAnalysis,
+        None,
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(XpUsageError::InsufficientXp {
+            xp_balance,
+            xp_cost,
+            ..
+        }) => Err(format!("insufficient_xp:{xp_balance}:{xp_cost}")),
+        Err(XpUsageError::Database(e)) => Err(e.to_string()),
+    }
+}
+
 /// Full analyze-tx flow: settings check, evaluate, persist threat/alert when needed, return response.
 /// Used by both POST /api/protection/transaction/analyze and POST /api/dashboard/{address}/analyze-tx.
 pub async fn analyze_tx_and_respond(
@@ -912,6 +937,12 @@ pub async fn analyze_tx_and_respond(
     };
     if !settings.high_risk_tx_warnings {
         return Ok(build_analyze_tx_response(true, None));
+    }
+
+    if let Err(e) =
+        charge_wallet_for_tx_analysis(pool, wallet_address).await
+    {
+        return Err(e);
     }
 
     let mut r = if ThreatScoringV2::enabled() {

@@ -19,10 +19,38 @@ pub struct UserXpClaim {
     pub wallet_address: String,
     pub email: String,
     pub waitlist_entry_id: i32,
+    /// Total XP earned from waitlist referrals.
     pub xp: i32,
+    pub xp_spent: i32,
     pub direct_referrals: i32,
     pub level2_referrals: i32,
     pub claimed_at: DateTime<Utc>,
+}
+
+impl UserXpClaim {
+    pub fn xp_balance(&self) -> i32 {
+        self.xp.saturating_sub(self.xp_spent)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct XpUsageEvent {
+    pub id: uuid::Uuid,
+    pub user_id: String,
+    pub wallet_address: String,
+    pub action_type: String,
+    pub xp_cost: i32,
+    pub xp_balance_after: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct XpChargeResult {
+    pub action_type: String,
+    pub xp_cost: i32,
+    pub xp_spent: i32,
+    pub xp_balance: i32,
+    pub xp_earned: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +82,7 @@ pub fn xp_breakdown_json(b: &WaitlistXpBreakdown) -> Value {
 }
 
 pub fn xp_claim_json(c: &UserXpClaim) -> Value {
+    let balance = c.xp_balance();
     json!({
         "user_id": c.user_id,
         "wallet_address": c.wallet_address,
@@ -63,7 +92,20 @@ pub fn xp_claim_json(c: &UserXpClaim) -> Value {
         "successfulCount": c.direct_referrals,
         "level2_referrals": c.level2_referrals,
         "level2Count": c.level2_referrals,
-        "xp": c.xp,
+        "xp": balance,
+        "xp_earned": c.xp,
+        "xp_spent": c.xp_spent,
+        "xp_balance": balance,
         "claimed_at": c.claimed_at,
+    })
+}
+
+pub fn xp_charge_json(c: &XpChargeResult) -> Value {
+    json!({
+        "action_type": c.action_type,
+        "xp_cost": c.xp_cost,
+        "xp_spent": c.xp_spent,
+        "xp_balance": c.xp_balance,
+        "xp_earned": c.xp_earned,
     })
 }

@@ -20,3 +20,4 @@ pub mod threat_correlation_service;
 pub mod waitlist_service;
 pub mod wallet_service;
 pub mod website_scan_service;
+pub mod xp_usage_service;

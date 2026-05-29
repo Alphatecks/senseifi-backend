@@ -16,6 +16,7 @@ use crate::models::senseiguard::{
 use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::services::scan_service::ScanService;
+use crate::services::xp_usage_service::{self, XpUsageAction, XpUsageError};
 
 /// If input looks like a URL, try to extract 0x address; else return trimmed string for validation.
 fn normalize_contract_input(input: &str) -> String {
@@ -37,6 +38,30 @@ fn normalize_contract_input(input: &str) -> String {
         }
     }
     s.to_string()
+}
+
+fn scan_xp_error(err: XpUsageError) -> (StatusCode, Json<serde_json::Value>) {
+    match err {
+        XpUsageError::InsufficientXp {
+            xp_balance,
+            xp_cost,
+            action_type,
+        } => (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(xp_usage_service::insufficient_xp_json(
+                xp_balance,
+                xp_cost,
+                &action_type,
+            )),
+        ),
+        XpUsageError::Database(e) => {
+            eprintln!("xp usage error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Database error" })),
+            )
+        }
+    }
 }
 
 pub fn scan_routes() -> Router<DbPool> {
@@ -75,6 +100,18 @@ async fn scan_contract(
         .map(|s| normalize_contract_input(s))
         .filter(|s| is_valid_eth_address(s));
     let for_ref = for_address.as_deref();
+    if let Some(wallet) = for_ref {
+        if let Err(e) = xp_usage_service::charge_wallet_usage(
+            &pool,
+            wallet,
+            XpUsageAction::ContractScan,
+            Some(json!({ "contract_address": address })),
+        )
+        .await
+        {
+            return Err(scan_xp_error(e));
+        }
+    }
     match ScanService::scan_contract(&pool, &address, for_ref, request.chain_id).await {
         Ok(res) => Ok(Json(res)),
         Err(e) => Err((

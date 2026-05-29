@@ -12,6 +12,7 @@ use crate::db::DbPool;
 use crate::models::waitlist::{xp_breakdown_json, xp_claim_json};
 use crate::models::wallet::is_valid_eth_address;
 use crate::services::waitlist_service::{self, WaitlistXpError};
+use crate::services::xp_usage_service::{self, XpUsageError};
 
 #[derive(Debug, Deserialize)]
 struct PreviewQuery {
@@ -25,6 +26,13 @@ struct StatusQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct UsageQuery {
+    wallet_address: Option<String>,
+    user_id: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ClaimRequest {
     email: String,
     wallet_address: String,
@@ -35,6 +43,7 @@ pub fn waitlist_routes() -> Router<DbPool> {
         .route("/preview", get(preview_xp))
         .route("/claim", post(claim_xp))
         .route("/status", get(get_xp_status))
+        .route("/usage", get(get_xp_usage))
 }
 
 fn xp_error_status(err: &WaitlistXpError) -> StatusCode {
@@ -161,5 +170,68 @@ async fn get_xp_status(
             "data": null,
         }))),
         Err(e) => Err((xp_error_status(&e), Json(xp_error_body(&e)))),
+    }
+}
+
+async fn get_xp_usage(
+    State(pool): State<DbPool>,
+    Query(q): Query<UsageQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let wallet_address = q
+        .wallet_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let user_id = q
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if let Some(addr) = wallet_address {
+        if !is_valid_eth_address(addr) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "error": "Invalid wallet address format"
+                })),
+            ));
+        }
+    }
+
+    match xp_usage_service::list_usage_for_account(
+        &pool,
+        wallet_address,
+        user_id,
+        q.limit,
+    )
+    .await
+    {
+        Ok(payload) => {
+            if payload
+                .get("error")
+                .and_then(|v| v.as_str())
+                .is_some()
+            {
+                Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(payload),
+                ))
+            } else {
+                Ok(Json(payload))
+            }
+        }
+        Err(XpUsageError::Database(e)) => {
+            eprintln!("waitlist usage error: {}", e);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Database error" })),
+            ))
+        }
+        Err(XpUsageError::InsufficientXp { .. }) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": "Unexpected usage lookup error" })),
+        )),
     }
 }

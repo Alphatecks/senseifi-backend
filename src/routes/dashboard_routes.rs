@@ -19,6 +19,7 @@ use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
 use crate::services::protection_engine::analyze_tx_and_respond;
+use crate::services::xp_usage_service::{self, parse_insufficient_xp_error, XpUsageAction};
 use crate::services::senseiguard_service::SenseiguardService;
 
 #[derive(Debug, serde::Deserialize)]
@@ -1118,10 +1119,23 @@ async fn dashboard_analyze_tx(
     .await
     {
         Ok(out) => Ok(Json(serde_json::to_value(&out).unwrap_or(json!({})))),
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "success": false, "error": e })),
-        )),
+        Err(e) => {
+            if let Some((xp_balance, xp_cost)) = parse_insufficient_xp_error(&e) {
+                Err((
+                    StatusCode::PAYMENT_REQUIRED,
+                    Json(xp_usage_service::insufficient_xp_json(
+                        xp_balance,
+                        xp_cost,
+                        XpUsageAction::TxAnalysis.as_str(),
+                    )),
+                ))
+            } else {
+                Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "success": false, "error": e })),
+                ))
+            }
+        }
     }
 }
 

@@ -31,6 +31,7 @@ use crate::services::protection_engine::{
     analyze_tx_and_respond, build_dapp_check_response, build_dapp_check_skipped_with_reason,
     evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
 };
+use crate::services::xp_usage_service::{self, parse_insufficient_xp_error, XpUsageAction, XpUsageError};
 use crate::services::scan_service::ScanService;
 use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
 use axum::extract::Path;
@@ -60,6 +61,48 @@ struct RevokeApprovalRequest {
     contract_address: String,
     #[serde(default)]
     chain_id: Option<i64>,
+}
+
+fn analyze_tx_route_error(e: String) -> (StatusCode, Json<Value>) {
+    if let Some((xp_balance, xp_cost)) = parse_insufficient_xp_error(&e) {
+        (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(xp_usage_service::insufficient_xp_json(
+                xp_balance,
+                xp_cost,
+                XpUsageAction::TxAnalysis.as_str(),
+            )),
+        )
+    } else {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": e })),
+        )
+    }
+}
+
+fn xp_usage_route_error(err: XpUsageError) -> (StatusCode, Json<Value>) {
+    match err {
+        XpUsageError::InsufficientXp {
+            xp_balance,
+            xp_cost,
+            action_type,
+        } => (
+            StatusCode::PAYMENT_REQUIRED,
+            Json(xp_usage_service::insufficient_xp_json(
+                xp_balance,
+                xp_cost,
+                &action_type,
+            )),
+        ),
+        XpUsageError::Database(e) => {
+            eprintln!("xp usage error: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "success": false, "error": "Database error" })),
+            )
+        }
+    }
 }
 
 fn bad_address() -> (StatusCode, Json<serde_json::Value>) {
@@ -638,7 +681,7 @@ async fn extension_analyze_transaction_screen(
         None,
     )
     .await
-    .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e))?;
+    .map_err(analyze_tx_route_error)?;
 
     let transaction_risk_score = result.risk_score.unwrap_or(0).clamp(0, 100);
     let policy_enforcement_active = result
@@ -1174,13 +1217,7 @@ async fn transaction_analyze(
                 "wallets_drained_estimate": wallets_drained_estimate
             })))
         }
-        Err(e) => Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "success": false,
-                "message": e,
-            })),
-        )),
+        Err(e) => Err(analyze_tx_route_error(e)),
     }
 }
 
@@ -1226,6 +1263,17 @@ async fn dapp_connection_check(
                 Json(json!({ "success": false, "error": "domain or url is required" })),
             )
         })?;
+
+    if let Err(e) = xp_usage_service::charge_wallet_usage(
+        &pool,
+        &req.wallet_address,
+        XpUsageAction::DappCheck,
+        Some(json!({ "target": target })),
+    )
+    .await
+    {
+        return Err(xp_usage_route_error(e));
+    }
 
     match evaluate_dapp_connection(&pool, &req.wallet_address, target, req.max_pages).await {
         Ok(mut r) => {
