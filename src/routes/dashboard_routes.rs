@@ -7,7 +7,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -18,9 +18,10 @@ use crate::models::wallet::is_valid_eth_address;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
+use crate::services::notification_service::NotificationService;
 use crate::services::protection_engine::analyze_tx_and_respond;
-use crate::services::xp_usage_service::{self, parse_insufficient_xp_error, XpUsageAction};
 use crate::services::senseiguard_service::SenseiguardService;
+use crate::services::xp_usage_service::{self, parse_insufficient_xp_error, XpUsageAction};
 
 #[derive(Debug, serde::Deserialize)]
 struct RecentActivityQuery {
@@ -97,6 +98,32 @@ fn default_live_signals_limit() -> i64 {
 struct LiveScamSignalDetailQuery {
     user_id: Option<String>,
     wallet_address: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExtensionDashboardQuery {
+    user_id: Option<String>,
+    wallet_address: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ExtensionTradeInsightsQuery {
+    user_id: Option<String>,
+    wallet_address: Option<String>,
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page_10")]
+    per_page: u32,
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    risk_level: Option<String>,
+    /// Examples: 7d, 30d, 90d.
+    #[serde(default = "default_extension_period")]
+    period: String,
+}
+fn default_extension_period() -> String {
+    "7d".to_string()
 }
 
 /// Body for POST /api/dashboard/{address}/analyze-tx (doc: to, value, data, gas, chainId).
@@ -177,10 +204,35 @@ struct ThreatCampaignItem {
     last_seen_at: String,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct ExtensionMetricCard {
+    key: String,
+    title: String,
+    value: i64,
+    this_month: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trend_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ExtensionTradeInsightItem {
+    id: String,
+    wallet_or_dapp: String,
+    network: String,
+    activity_type: String,
+    risk_level: String,
+    ai_insight: String,
+    date: String,
+}
+
 pub fn dashboard_routes() -> Router<DbPool> {
     Router::new()
         .route("/overview", get(dashboard_overview))
         .route("/security-overview", get(security_overview))
+        .route("/extension/overview", get(extension_dashboard_overview))
+        .route("/extension/trade-insights", get(extension_trade_insights))
         .route("/live-scam-signals/summary", get(live_scam_signals_summary))
         .route(
             "/live-scam-signals/{signal_id}",
@@ -421,6 +473,174 @@ async fn security_overview(
             ))
         }
     }
+}
+
+/// GET /api/dashboard/extension/overview — summary cards for extension dashboard top row.
+async fn extension_dashboard_overview(
+    State(pool): State<DbPool>,
+    Query(q): Query<ExtensionDashboardQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id =
+        resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref())
+            .await;
+    let wallets = if user_id.trim().is_empty() {
+        Vec::new()
+    } else {
+        WalletRepository::get_all_active_wallets_by_user(&pool, &user_id)
+            .await
+            .unwrap_or_default()
+    };
+
+    let connected_wallets = wallets.len() as i64;
+    let mut scans_this_month = 0_i64;
+    let mut scans_prev_month = 0_i64;
+    let mut unread_alerts = 0_i64;
+
+    for wallet in &wallets {
+        scans_this_month += SenseiguardRepository::count_scans_this_month(&pool, wallet.id)
+            .await
+            .unwrap_or(0);
+        scans_prev_month += SenseiguardRepository::count_scans_previous_period(&pool, wallet.id)
+            .await
+            .unwrap_or(0);
+        unread_alerts += NotificationService::list_for_wallet(&pool, &wallet.address, 100)
+            .await
+            .map(|r| r.unread_count)
+            .unwrap_or(0);
+    }
+
+    let active_extensions = if user_id.trim().is_empty() {
+        0
+    } else {
+        SenseiguardService::get_dashboard_overview(&pool, &user_id, 1)
+            .await
+            .map(|o| o.connected_risk.active_dapps)
+            .unwrap_or(0)
+    };
+
+    let cards = vec![
+        ExtensionMetricCard {
+            key: "active_extensions".to_string(),
+            title: "Active Extensions".to_string(),
+            value: active_extensions,
+            this_month: active_extensions,
+            trend_percent: Some(0.0),
+            status: None,
+        },
+        ExtensionMetricCard {
+            key: "contracts_scanned".to_string(),
+            title: "Contract Scanned".to_string(),
+            value: scans_this_month,
+            this_month: scans_this_month,
+            trend_percent: Some(change_percent(scans_this_month, scans_prev_month)),
+            status: None,
+        },
+        ExtensionMetricCard {
+            key: "connected_wallets".to_string(),
+            title: "Connected Wallet".to_string(),
+            value: connected_wallets,
+            this_month: connected_wallets,
+            trend_percent: Some(0.0),
+            status: None,
+        },
+        ExtensionMetricCard {
+            key: "unread_alerts".to_string(),
+            title: "Unread Alerts".to_string(),
+            value: unread_alerts,
+            this_month: unread_alerts,
+            trend_percent: Some(0.0),
+            status: Some(if unread_alerts > 0 {
+                "high_risk".to_string()
+            } else {
+                "normal".to_string()
+            }),
+        },
+    ];
+
+    Ok(Json(json!({
+        "success": true,
+        "data": {
+            "cards": cards
+        }
+    })))
+}
+
+/// GET /api/dashboard/extension/trade-insights — table rows for extension dashboard insights.
+async fn extension_trade_insights(
+    State(pool): State<DbPool>,
+    Query(q): Query<ExtensionTradeInsightsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id =
+        resolve_user_id_for_dashboard(&pool, q.user_id.as_deref(), q.wallet_address.as_deref())
+            .await;
+    let user_id_opt = if user_id.trim().is_empty() {
+        None
+    } else {
+        Some(user_id.as_str())
+    };
+    let page = q.page.max(1);
+    let per_page = q.per_page.clamp(1, 50);
+    let search = q.search.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let risk_level = q
+        .risk_level
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let since = parse_period_to_since(&q.period);
+
+    let (rows, total) = SenseiguardRepository::list_extension_trade_insights(
+        &pool,
+        user_id_opt,
+        page,
+        per_page,
+        search,
+        risk_level,
+        since,
+    )
+    .await
+    .map_err(|e| {
+        eprintln!("extension_trade_insights: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": "Failed to load trade insight rows" })),
+        )
+    })?;
+
+    let items: Vec<ExtensionTradeInsightItem> = rows
+        .into_iter()
+        .map(|row| {
+            let risk_level = extension_risk_level(&row.activity_type, row.metadata.as_ref());
+            let ai_insight = extension_ai_insight(
+                row.title.as_str(),
+                row.description.as_deref(),
+                row.metadata.as_ref(),
+                risk_level.as_str(),
+            );
+            ExtensionTradeInsightItem {
+                id: row.id.to_string(),
+                wallet_or_dapp: extension_wallet_or_dapp(
+                    row.wallet_type.as_str(),
+                    row.metadata.as_ref(),
+                ),
+                network: chain_id_to_network_name(row.chain_id),
+                activity_type: extension_activity_type_label(row.activity_type.as_str()),
+                risk_level,
+                ai_insight,
+                date: format_relative_time(row.created_at),
+            }
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "success": true,
+        "data": items,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": ((total.max(0) as u32) + per_page - 1) / per_page
+        }
+    })))
 }
 
 /// GET /api/dashboard/live-scam-signals/summary — concise summary payload for each live scam signal.
@@ -686,6 +906,118 @@ fn format_relative_time(dt: DateTime<Utc>) -> String {
     } else {
         dt.format("%Y-%m-%d").to_string()
     }
+}
+
+fn parse_period_to_since(period: &str) -> Option<DateTime<Utc>> {
+    let p = period.trim().to_ascii_lowercase();
+    let days = if let Some(raw) = p.strip_suffix('d') {
+        raw.parse::<i64>().ok()
+    } else {
+        p.parse::<i64>().ok()
+    };
+    days.filter(|d| *d > 0)
+        .map(|d| Utc::now() - Duration::days(d.clamp(1, 365)))
+}
+
+fn extension_wallet_or_dapp(wallet_type: &str, metadata: Option<&Value>) -> String {
+    let dapp = metadata
+        .and_then(|m| m.get("dapp_name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(name) = dapp {
+        return name.to_string();
+    }
+    let counterparty = metadata
+        .and_then(|m| m.get("counterparty"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(cp) = counterparty {
+        return cp.to_string();
+    }
+    wallet_type_to_display(wallet_type)
+}
+
+fn wallet_type_to_display(wallet_type: &str) -> String {
+    match wallet_type.to_ascii_lowercase().as_str() {
+        "metamask" => "MetaMask Wallet".to_string(),
+        "coinbase" => "Coinbase Wallet".to_string(),
+        "trust" | "trust wallet" => "Trust Wallet".to_string(),
+        "ledger" => "Ledger Wallet".to_string(),
+        other if !other.is_empty() => {
+            let mut s = other.to_string();
+            if let Some(first) = s.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            format!("{s} Wallet")
+        }
+        _ => "Wallet".to_string(),
+    }
+}
+
+fn extension_activity_type_label(activity_type: &str) -> String {
+    match activity_type.to_ascii_lowercase().as_str() {
+        "suspicious_approval" => "Contract Approval".to_string(),
+        "outgoing_tx" => "Token Transfer".to_string(),
+        "blocked_interaction" => "Smart Contract Interaction".to_string(),
+        "incoming_tx" => "Incoming Transfer".to_string(),
+        other if !other.is_empty() => other.replace('_', " "),
+        _ => "Activity".to_string(),
+    }
+}
+
+fn extension_risk_level(activity_type: &str, metadata: Option<&Value>) -> String {
+    if let Some(level) = metadata
+        .and_then(|m| m.get("risk_level"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return level.to_ascii_uppercase();
+    }
+    match activity_type.to_ascii_lowercase().as_str() {
+        "blocked_interaction" => "CRITICAL".to_string(),
+        "suspicious_approval" => "HIGH".to_string(),
+        "outgoing_tx" => "MEDIUM".to_string(),
+        _ => "LOW".to_string(),
+    }
+}
+
+fn extension_ai_insight(
+    title: &str,
+    description: Option<&str>,
+    metadata: Option<&Value>,
+    risk_level: &str,
+) -> String {
+    if let Some(insight) = metadata
+        .and_then(|m| m.get("ai_insight"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return insight.to_string();
+    }
+    if let Some(text) = description
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+    {
+        return text.chars().take(140).collect();
+    }
+    match risk_level {
+        "CRITICAL" => format!("{title} matches known high-risk behavior."),
+        "HIGH" => format!("{title} shows suspicious pattern; review before signing."),
+        "MEDIUM" => format!("{title} has moderate risk signals from current telemetry."),
+        _ => format!("{title} observed with low-risk confidence."),
+    }
+}
+
+fn change_percent(current: i64, previous: i64) -> f64 {
+    if previous == 0 {
+        return 0.0;
+    }
+    (((current - previous) as f64 / previous as f64) * 1000.0).round() / 10.0
 }
 
 /// Resolve user_id from query (user_id, or wallet_address, or fallback to first active wallet). Used by overview and security-overview.

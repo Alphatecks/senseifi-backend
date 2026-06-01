@@ -132,6 +132,21 @@ pub struct ActivityFeedRowLive {
     pub created_at: DateTime<Utc>,
 }
 
+/// Row for extension Trade Insight table with wallet chain info.
+#[derive(Debug, sqlx::FromRow)]
+pub struct ExtensionTradeInsightRow {
+    pub id: Uuid,
+    pub wallet_id: Uuid,
+    pub wallet_address: String,
+    pub wallet_type: String,
+    pub chain_id: i64,
+    pub activity_type: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub metadata: Option<serde_json::Value>,
+    pub created_at: DateTime<Utc>,
+}
+
 pub struct SenseiguardRepository;
 
 impl SenseiguardRepository {
@@ -1550,6 +1565,93 @@ impl SenseiguardRepository {
         };
 
         Ok((rows, total))
+    }
+
+    /// Paginated Trade Insight table feed used by extension dashboard.
+    /// Supports optional user scope plus risk/search/since filters.
+    pub async fn list_extension_trade_insights(
+        pool: &DbPool,
+        user_id: Option<&str>,
+        page: u32,
+        per_page: u32,
+        search: Option<&str>,
+        risk_level: Option<&str>,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<(Vec<ExtensionTradeInsightRow>, i64), Error> {
+        let offset = (page.saturating_sub(1) as i64) * (per_page as i64);
+        let limit = per_page as i64;
+
+        let total: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true
+              AND ($1::text IS NULL OR w.user_id = $1)
+              AND ($2::timestamptz IS NULL OR af.created_at >= $2)
+              AND (
+                    $3::text IS NULL
+                    OR COALESCE(LOWER(af.title), '') LIKE ('%' || LOWER($3) || '%')
+                    OR COALESCE(LOWER(af.description), '') LIKE ('%' || LOWER($3) || '%')
+                    OR COALESCE(LOWER(af.metadata->>'counterparty'), '') LIKE ('%' || LOWER($3) || '%')
+                    OR COALESCE(LOWER(af.metadata->>'dapp_name'), '') LIKE ('%' || LOWER($3) || '%')
+                 )
+              AND (
+                    $4::text IS NULL
+                    OR LOWER(COALESCE(af.metadata->>'risk_level', '')) = LOWER($4)
+                 )
+            "#,
+        )
+        .bind(user_id)
+        .bind(since)
+        .bind(search)
+        .bind(risk_level)
+        .fetch_one(pool)
+        .await?;
+
+        let rows: Vec<ExtensionTradeInsightRow> = sqlx::query_as(
+            r#"
+            SELECT
+                af.id,
+                af.wallet_id,
+                w.address AS wallet_address,
+                w.wallet_type,
+                w.chain_id,
+                af.activity_type,
+                af.title,
+                af.description,
+                af.metadata,
+                af.created_at
+            FROM activity_feed af
+            JOIN wallets w ON w.id = af.wallet_id
+            WHERE w.is_active = true
+              AND ($1::text IS NULL OR w.user_id = $1)
+              AND ($2::timestamptz IS NULL OR af.created_at >= $2)
+              AND (
+                    $3::text IS NULL
+                    OR COALESCE(LOWER(af.title), '') LIKE ('%' || LOWER($3) || '%')
+                    OR COALESCE(LOWER(af.description), '') LIKE ('%' || LOWER($3) || '%')
+                    OR COALESCE(LOWER(af.metadata->>'counterparty'), '') LIKE ('%' || LOWER($3) || '%')
+                    OR COALESCE(LOWER(af.metadata->>'dapp_name'), '') LIKE ('%' || LOWER($3) || '%')
+                 )
+              AND (
+                    $4::text IS NULL
+                    OR LOWER(COALESCE(af.metadata->>'risk_level', '')) = LOWER($4)
+                 )
+            ORDER BY af.created_at DESC
+            LIMIT $5 OFFSET $6
+            "#,
+        )
+        .bind(user_id)
+        .bind(since)
+        .bind(search)
+        .bind(risk_level)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        Ok((rows, total.0))
     }
 
     /// Count of active approvals for this wallet (for Security tab "Active Approval").

@@ -18,6 +18,7 @@ tags:
   - name: Telemetry
   - name: Wallet
   - name: Scanner
+  - name: Dashboard
 
 paths:
   /protection/transaction/analyze:
@@ -181,6 +182,90 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dashboard/extension/overview:
+    get:
+      tags: [Dashboard]
+      operationId: getExtensionDashboardOverview
+      summary: Get extension dashboard top cards
+      parameters:
+        - in: query
+          name: user_id
+          schema:
+            type: string
+        - in: query
+          name: wallet_address
+          schema:
+            $ref: "#/components/schemas/EvmAddress"
+      responses:
+        "200":
+          description: Extension card metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtensionDashboardOverviewResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /dashboard/extension/trade-insights:
+    get:
+      tags: [Dashboard]
+      operationId: getExtensionTradeInsights
+      summary: Get extension trade insight table rows
+      parameters:
+        - in: query
+          name: user_id
+          schema:
+            type: string
+        - in: query
+          name: wallet_address
+          schema:
+            $ref: "#/components/schemas/EvmAddress"
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - in: query
+          name: per_page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+        - in: query
+          name: risk_level
+          schema:
+            type: string
+            description: Case-insensitive risk level (e.g. high, medium, critical)
+        - in: query
+          name: period
+          schema:
+            type: string
+            default: 7d
+            description: Relative period in days (examples 7d, 30d, 90d)
+      responses:
+        "200":
+          description: Trade insight table payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExtensionTradeInsightsResponse"
         "500":
           description: Server error
           content:
@@ -691,6 +776,95 @@ components:
         scanned_at:
           type: string
           format: date-time
+
+    ExtensionDashboardOverviewResponse:
+      type: object
+      additionalProperties: false
+      required: [success, data]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: object
+          additionalProperties: false
+          required: [cards]
+          properties:
+            cards:
+              type: array
+              items:
+                $ref: "#/components/schemas/ExtensionMetricCard"
+
+    ExtensionMetricCard:
+      type: object
+      additionalProperties: false
+      required: [key, title, value, this_month]
+      properties:
+        key:
+          type: string
+        title:
+          type: string
+        value:
+          type: integer
+        this_month:
+          type: integer
+        trend_percent:
+          type: number
+          format: float
+        status:
+          type: string
+
+    ExtensionTradeInsightsResponse:
+      type: object
+      additionalProperties: false
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ExtensionTradeInsightItem"
+        pagination:
+          type: object
+          additionalProperties: false
+          required: [page, per_page, total, total_pages]
+          properties:
+            page:
+              type: integer
+            per_page:
+              type: integer
+            total:
+              type: integer
+            total_pages:
+              type: integer
+
+    ExtensionTradeInsightItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - wallet_or_dapp
+        - network
+        - activity_type
+        - risk_level
+        - ai_insight
+        - date
+      properties:
+        id:
+          type: string
+          format: uuid
+        wallet_or_dapp:
+          type: string
+        network:
+          type: string
+        activity_type:
+          type: string
+        risk_level:
+          type: string
+        ai_insight:
+          type: string
+        date:
+          type: string
 
     ErrorResponse:
       type: object
