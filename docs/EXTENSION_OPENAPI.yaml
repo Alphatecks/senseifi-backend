@@ -19,6 +19,7 @@ tags:
   - name: Wallet
   - name: Scanner
   - name: Dashboard
+  - name: Billing
 
 paths:
   /protection/transaction/analyze:
@@ -266,6 +267,60 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExtensionTradeInsightsResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /payments/billing-history:
+    get:
+      tags: [Billing]
+      operationId: getBillingHistory
+      summary: Get billing history table rows
+      parameters:
+        - in: query
+          name: user_id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - in: query
+          name: per_page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+        - in: query
+          name: search
+          schema:
+            type: string
+            description: Plan-name search
+        - in: query
+          name: status
+          schema:
+            type: string
+            description: Raw status filter (confirmed, failed, paid, scheduled, etc)
+      responses:
+        "200":
+          description: Billing history payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BillingHistoryResponse"
+        "400":
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Server error
           content:
@@ -865,6 +920,64 @@ components:
           type: string
         date:
           type: string
+
+    BillingHistoryResponse:
+      type: object
+      additionalProperties: false
+      required: [success, data, pagination]
+      properties:
+        success:
+          type: boolean
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/BillingHistoryItem"
+        pagination:
+          type: object
+          additionalProperties: false
+          required: [page, per_page, total, total_pages]
+          properties:
+            page:
+              type: integer
+            per_page:
+              type: integer
+            total:
+              type: integer
+            total_pages:
+              type: integer
+
+    BillingHistoryItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - plan_name
+        - amount
+        - currency
+        - purchase_date
+        - end_date
+        - status
+      properties:
+        id:
+          type: string
+          format: uuid
+        plan_name:
+          type: string
+        amount:
+          type: string
+        currency:
+          type: string
+        purchase_date:
+          type: string
+          format: date
+        end_date:
+          type: string
+          format: date
+        status:
+          type: string
+        action_url:
+          type: string
+          format: uri
 
     ErrorResponse:
       type: object

@@ -1,10 +1,11 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
 
@@ -14,7 +15,7 @@ use crate::models::onchain_payment::{
     TriggerDueChargeJobRequest, UpsertOnchainPaymentProfileRequest,
 };
 use crate::repositories::onchain_payment_repository::{
-    CreateSubscriptionCycleInput, OnchainPaymentRepository,
+    BillingHistoryRow, CreateSubscriptionCycleInput, OnchainPaymentRepository,
 };
 use crate::repositories::subscription_repository::SubscriptionRepository;
 use crate::services::onchain_payment_webhook_service::OnchainPaymentWebhookService;
@@ -24,6 +25,7 @@ use crate::services::plan_catalog::OnchainPriceTable;
 pub fn payment_routes() -> Router<DbPool> {
     Router::new()
         .route("/plans", get(list_onchain_plans))
+        .route("/billing-history", get(list_billing_history))
         .route("/onchain-subscribe", post(onchain_subscribe))
         .route("/profile", post(upsert_payment_profile))
         .route("/cycles", post(create_subscription_cycle))
@@ -31,6 +33,38 @@ pub fn payment_routes() -> Router<DbPool> {
         .route("/jobs/expire-grace", post(trigger_grace_expiry_job))
         .route("/webhooks/base-indexer", post(base_indexer_webhook))
         .route("/webhooks/payment-contract", post(payment_contract_webhook))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BillingHistoryQuery {
+    user_id: String,
+    #[serde(default = "default_page")]
+    page: u32,
+    #[serde(default = "default_per_page")]
+    per_page: u32,
+    #[serde(default)]
+    search: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+fn default_page() -> u32 {
+    1
+}
+fn default_per_page() -> u32 {
+    10
+}
+
+#[derive(Debug, serde::Serialize)]
+struct BillingHistoryItem {
+    id: String,
+    plan_name: String,
+    amount: String,
+    currency: String,
+    purchase_date: String,
+    end_date: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    action_url: Option<String>,
 }
 
 /// Lists Pro / Pro+ / Premium SKUs with monthly and annual USD prices (no Stripe). Requires onchain billing enabled.
@@ -45,6 +79,45 @@ async fn list_onchain_plans() -> Result<Json<Value>, (StatusCode, Json<Value>)> 
     Ok(Json(json!({
         "success": true,
         "data": table.list_descriptors()
+    })))
+}
+
+/// Table API for billing history page.
+async fn list_billing_history(
+    State(pool): State<DbPool>,
+    Query(q): Query<BillingHistoryQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = q.user_id.trim();
+    if user_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "user_id is required" })),
+        ));
+    }
+    let page = q.page.max(1);
+    let per_page = q.per_page.clamp(1, 100);
+
+    let (rows, total) = OnchainPaymentRepository::list_billing_history(
+        &pool,
+        user_id,
+        page,
+        per_page,
+        q.search.as_deref(),
+        q.status.as_deref(),
+    )
+    .await
+    .map_err(internal_error)?;
+
+    let data: Vec<BillingHistoryItem> = rows.into_iter().map(map_billing_row).collect();
+    Ok(Json(json!({
+        "success": true,
+        "data": data,
+        "pagination": {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "total_pages": ((total.max(0) as u32) + per_page - 1) / per_page
+        }
     })))
 }
 
@@ -274,4 +347,66 @@ fn bad_request_error(e: String) -> (StatusCode, Json<Value>) {
         StatusCode::BAD_REQUEST,
         Json(json!({ "success": false, "error": e })),
     )
+}
+
+fn map_billing_row(row: BillingHistoryRow) -> BillingHistoryItem {
+    BillingHistoryItem {
+        id: row.cycle_id.to_string(),
+        plan_name: plan_label(&row.plan),
+        amount: format!("${} USDC", row.amount_due_usdc.round_dp(2)),
+        currency: "USDC".to_string(),
+        purchase_date: format_yyyy_mm_dd(row.purchase_date),
+        end_date: format_yyyy_mm_dd(row.end_date),
+        status: billing_status_label(&row.status),
+        action_url: build_receipt_url(row.chain_id, row.onchain_tx_hash.as_deref()),
+    }
+}
+
+fn plan_label(plan: &str) -> String {
+    let p = plan.trim().to_ascii_lowercase();
+    if p.is_empty() {
+        return "Plan".to_string();
+    }
+    format!("{} + plan", capitalize(&p))
+}
+
+fn capitalize(s: &str) -> String {
+    let mut out = s.to_string();
+    if let Some(first) = out.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    out
+}
+
+fn billing_status_label(status: &str) -> String {
+    match status.to_ascii_lowercase().as_str() {
+        "confirmed" | "paid" => "Completed".to_string(),
+        "failed" | "cancelled" => "Failed".to_string(),
+        "pending_confirmation" | "submitted" | "created" | "charging" | "scheduled" => {
+            "Pending".to_string()
+        }
+        "grace" => "Grace".to_string(),
+        other => capitalize(other),
+    }
+}
+
+fn format_yyyy_mm_dd(dt: DateTime<Utc>) -> String {
+    dt.format("%Y-%m-%d").to_string()
+}
+
+fn build_receipt_url(chain_id: i32, tx_hash: Option<&str>) -> Option<String> {
+    let tx = tx_hash?.trim();
+    if tx.is_empty() {
+        return None;
+    }
+    let base = match chain_id {
+        1 => "https://etherscan.io/tx/",
+        8453 => "https://basescan.org/tx/",
+        56 => "https://bscscan.com/tx/",
+        137 => "https://polygonscan.com/tx/",
+        42161 => "https://arbiscan.io/tx/",
+        10 => "https://optimistic.etherscan.io/tx/",
+        _ => "https://basescan.org/tx/",
+    };
+    Some(format!("{base}{tx}"))
 }

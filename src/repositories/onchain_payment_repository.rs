@@ -55,6 +55,18 @@ pub struct UpdateChargeAttemptOutcomeInput<'a> {
     pub failure_reason: Option<&'a str>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct BillingHistoryRow {
+    pub cycle_id: Uuid,
+    pub plan: String,
+    pub amount_due_usdc: Decimal,
+    pub purchase_date: DateTime<Utc>,
+    pub end_date: DateTime<Utc>,
+    pub status: String,
+    pub chain_id: i32,
+    pub onchain_tx_hash: Option<String>,
+}
+
 impl OnchainPaymentRepository {
     pub async fn get_event_log_by_provider_event(
         pool: &DbPool,
@@ -396,5 +408,84 @@ impl OnchainPaymentRepository {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    /// Paginated billing history rows for the billing table UI.
+    pub async fn list_billing_history(
+        pool: &DbPool,
+        user_id: &str,
+        page: u32,
+        per_page: u32,
+        search: Option<&str>,
+        status: Option<&str>,
+    ) -> Result<(Vec<BillingHistoryRow>, i64), Error> {
+        let limit = per_page.clamp(1, 100) as i64;
+        let offset = (page.max(1).saturating_sub(1) as i64) * limit;
+        let search = search
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase());
+        let status = status
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_ascii_lowercase());
+
+        let total: (i64,) = sqlx::query_as(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM subscription_cycles sc
+            LEFT JOIN subscription_charge_attempts sca ON sca.id = sc.charge_attempt_id
+            WHERE sc.user_id = $1
+              AND ($2::text IS NULL OR LOWER(sc.plan) LIKE ('%' || $2 || '%'))
+              AND (
+                    $3::text IS NULL
+                    OR LOWER(COALESCE(sca.status, sc.status)) = $3
+                  )
+            "#,
+        )
+        .bind(user_id)
+        .bind(search.as_deref())
+        .bind(status.as_deref())
+        .fetch_one(pool)
+        .await?;
+
+        let rows = sqlx::query_as::<_, BillingHistoryRow>(
+            r#"
+            SELECT
+                sc.id AS cycle_id,
+                sc.plan,
+                sc.amount_due_usdc,
+                COALESCE(sca.period_start, sc.created_at) AS purchase_date,
+                COALESCE(
+                    sca.period_end,
+                    CASE
+                        WHEN LOWER(sc.billing_cycle) IN ('annual', 'yearly') THEN sc.due_at + INTERVAL '1 year'
+                        ELSE sc.due_at + INTERVAL '1 month'
+                    END
+                ) AS end_date,
+                COALESCE(sca.status, sc.status) AS status,
+                COALESCE(sca.chain_id, 8453) AS chain_id,
+                sca.onchain_tx_hash
+            FROM subscription_cycles sc
+            LEFT JOIN subscription_charge_attempts sca ON sca.id = sc.charge_attempt_id
+            WHERE sc.user_id = $1
+              AND ($2::text IS NULL OR LOWER(sc.plan) LIKE ('%' || $2 || '%'))
+              AND (
+                    $3::text IS NULL
+                    OR LOWER(COALESCE(sca.status, sc.status)) = $3
+                  )
+            ORDER BY COALESCE(sca.period_start, sc.created_at) DESC
+            LIMIT $4 OFFSET $5
+            "#,
+        )
+        .bind(user_id)
+        .bind(search.as_deref())
+        .bind(status.as_deref())
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(pool)
+        .await?;
+
+        Ok((rows, total.0))
     }
 }
