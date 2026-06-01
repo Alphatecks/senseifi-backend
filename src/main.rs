@@ -1,6 +1,7 @@
 use axum::Router;
 use http::header::{HeaderName, HeaderValue, X_CONTENT_TYPE_OPTIONS, X_FRAME_OPTIONS};
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -80,8 +81,25 @@ async fn main() {
             }
         }
     }
+    // Browser extension requests come from `chrome-extension://<id>`.
+    // Keep strict allowlist for web origins while allowing Chrome extension origins.
+    let allowed_origin_bytes = Arc::new(
+        list.iter()
+            .map(|v| v.as_bytes().to_vec())
+            .collect::<std::collections::HashSet<Vec<u8>>>(),
+    );
+    let allow_origin = AllowOrigin::predicate({
+        let allowed_origin_bytes = Arc::clone(&allowed_origin_bytes);
+        move |origin: &HeaderValue, _request| {
+            origin
+                .to_str()
+                .map(|s| s.starts_with("chrome-extension://"))
+                .unwrap_or(false)
+                || allowed_origin_bytes.contains(origin.as_bytes())
+        }
+    });
     let cors = CorsLayer::new()
-        .allow_origin(AllowOrigin::list(list))
+        .allow_origin(allow_origin)
         .allow_methods([
             http::Method::GET,
             http::Method::POST,
