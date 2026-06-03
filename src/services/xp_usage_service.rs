@@ -87,14 +87,7 @@ pub async fn charge_wallet_usage(
         return Ok(None);
     };
 
-    charge_user_usage(
-        pool,
-        &claim.user_id,
-        &wallet_address,
-        action,
-        metadata,
-    )
-    .await
+    charge_user_usage(pool, &claim.user_id, &wallet_address, action, metadata).await
 }
 
 pub async fn charge_user_usage(
@@ -132,12 +125,10 @@ pub async fn charge_user_usage(
         None => {
             let claim = WaitlistRepository::get_claim_by_user_id(pool, user_id)
                 .await?
-                .ok_or_else(|| {
-                    XpUsageError::InsufficientXp {
-                        xp_balance: 0,
-                        xp_cost,
-                        action_type: action_type.to_string(),
-                    }
+                .ok_or_else(|| XpUsageError::InsufficientXp {
+                    xp_balance: 0,
+                    xp_cost,
+                    action_type: action_type.to_string(),
                 })?;
             Err(XpUsageError::InsufficientXp {
                 xp_balance: claim.xp_balance(),

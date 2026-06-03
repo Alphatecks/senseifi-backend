@@ -18,6 +18,7 @@ use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
 use crate::services::senseiguard_service::SenseiguardService;
+use crate::services::waitlist_service;
 use crate::services::wallet_service::WalletService;
 
 #[derive(Debug, Deserialize)]
@@ -112,6 +113,11 @@ async fn connect_wallet(
         None
     };
 
+    let xp_user_id = req
+        .user_id
+        .clone()
+        .or_else(|| dashboard_user.as_ref().map(|du| du.user_id.clone()));
+
     match WalletService::connect_wallet(&pool, req).await {
         Ok(wallet) => {
             // Ensure wallet row has user_id so overview "active wallets" count includes this wallet.
@@ -119,6 +125,14 @@ async fn connect_wallet(
                 let _ =
                     WalletRepository::update_wallet_user_id(&pool, &wallet.address, &du.user_id)
                         .await;
+            }
+            if let Some(user_id) = xp_user_id.as_deref() {
+                if let Err(e) =
+                    waitlist_service::ensure_welcome_xp_claim(&pool, user_id, &wallet.address)
+                        .await
+                {
+                    eprintln!("ensure_welcome_xp_claim on connect: {}", e);
+                }
             }
             let mut body = json!({
                 "success": true,

@@ -7,6 +7,9 @@ use uuid::Uuid;
 
 pub struct WaitlistRepository;
 
+/// Reserved `waitlist_entries.id` for auto-granted connect-wallet XP (not a real waitlist signup).
+pub const WELCOME_WAITLIST_ENTRY_ID: i32 = -1;
+
 #[derive(Debug, Clone)]
 pub struct WaitlistEntryRow {
     pub id: i32,
@@ -161,6 +164,50 @@ impl WaitlistRepository {
         Self::map_claim_row(Some(row)).map(|c| c.expect("insert returned row"))
     }
 
+    pub fn is_welcome_claim(claim: &UserXpClaim) -> bool {
+        claim.waitlist_entry_id == WELCOME_WAITLIST_ENTRY_ID
+    }
+
+    /// Replace a welcome-only claim with waitlist referral XP (same user_id).
+    pub async fn upgrade_welcome_claim_to_waitlist(
+        pool: &DbPool,
+        user_id: &str,
+        wallet_address: &str,
+        waitlist_entry_id: i32,
+        email: &str,
+        xp: i32,
+        direct_referrals: i32,
+        level2_referrals: i32,
+    ) -> Result<UserXpClaim, Error> {
+        let row = sqlx::query_as::<_, ClaimRow>(
+            r#"
+            UPDATE user_xp_claims
+            SET wallet_address = $2,
+                waitlist_entry_id = $3,
+                email = $4,
+                xp = $5,
+                direct_referrals = $6,
+                level2_referrals = $7
+            WHERE user_id = $1
+              AND waitlist_entry_id = $8
+            RETURNING user_id, wallet_address, waitlist_entry_id, email, xp, xp_spent,
+                      direct_referrals, level2_referrals, claimed_at
+            "#,
+        )
+        .bind(user_id)
+        .bind(wallet_address)
+        .bind(waitlist_entry_id)
+        .bind(email)
+        .bind(xp)
+        .bind(direct_referrals)
+        .bind(level2_referrals)
+        .bind(WELCOME_WAITLIST_ENTRY_ID)
+        .fetch_optional(pool)
+        .await?;
+
+        Self::map_claim_row(row)?.ok_or(Error::RowNotFound)
+    }
+
     /// Atomically deduct XP and append a ledger row. Returns None if balance insufficient.
     pub async fn deduct_xp_for_usage(
         pool: &DbPool,
@@ -234,7 +281,15 @@ impl WaitlistRepository {
         Ok(rows
             .into_iter()
             .map(
-                |(id, user_id, wallet_address, action_type, xp_cost, xp_balance_after, created_at)| {
+                |(
+                    id,
+                    user_id,
+                    wallet_address,
+                    action_type,
+                    xp_cost,
+                    xp_balance_after,
+                    created_at,
+                )| {
                     XpUsageEvent {
                         id,
                         user_id,
@@ -290,12 +345,4 @@ type ClaimRow = (
     DateTime<Utc>,
 );
 
-type UsageRow = (
-    Uuid,
-    String,
-    String,
-    String,
-    i32,
-    i32,
-    DateTime<Utc>,
-);
+type UsageRow = (Uuid, String, String, String, i32, i32, DateTime<Utc>);

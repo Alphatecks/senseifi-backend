@@ -410,10 +410,7 @@ impl SenseiguardService {
             None
         };
         let status = Self::status_from_score(score);
-        let last_scan_at = latest_scan
-            .as_ref()
-            .map(|s| s.scanned_at)
-            .or(mon.1);
+        let last_scan_at = latest_scan.as_ref().map(|s| s.scanned_at).or(mon.1);
         let message = match status.as_str() {
             "strong" => "Your wallet is well protected. A few settings can be improved for stronger security.",
             "moderate" => "Your wallet has moderate protection. Run a scan and address the findings.",
@@ -451,8 +448,7 @@ impl SenseiguardService {
 
         if ThreatScoringV2::enabled() {
             let campaigns =
-                SenseiguardRepository::list_open_campaigns_for_wallet(pool, wallet_id, 500)
-                    .await?;
+                SenseiguardRepository::list_open_campaigns_for_wallet(pool, wallet_id, 500).await?;
             let mut campaign_penalty: i32 = 0;
             for c in &campaigns {
                 campaign_penalty += match c.risk_score {
@@ -859,12 +855,11 @@ impl SenseiguardService {
             .await?
             .ok_or(Error::RowNotFound)?;
         let wallet_id = wallet.id;
-        let monitoring_status: Option<(String,)> = sqlx::query_as(
-            "SELECT status FROM wallet_monitoring WHERE wallet_id = $1",
-        )
-        .bind(wallet_id)
-        .fetch_optional(pool)
-        .await?;
+        let monitoring_status: Option<(String,)> =
+            sqlx::query_as("SELECT status FROM wallet_monitoring WHERE wallet_id = $1")
+                .bind(wallet_id)
+                .fetch_optional(pool)
+                .await?;
         let wallet_status = WalletConnectionStatus {
             connection: if wallet.is_active {
                 "active".to_string()

@@ -204,7 +204,11 @@ pub async fn evaluate_transaction(
 }
 
 /// Map calldata heuristics to v2 Execute-stage signals.
-pub fn collect_tx_signals(to: Option<&str>, value: Option<&str>, data: Option<&str>) -> Vec<ThreatSignal> {
+pub fn collect_tx_signals(
+    to: Option<&str>,
+    value: Option<&str>,
+    data: Option<&str>,
+) -> Vec<ThreatSignal> {
     use crate::models::senseiguard::threat_types;
     let mut signals = Vec::new();
     let data = data.unwrap_or("");
@@ -282,14 +286,17 @@ async fn collect_temporal_signals(
         {
             let age = Utc::now().signed_duration_since(first_seen);
             if age < Duration::days(7) {
-                signals.push(ThreatSignal::new(
-                    kill_chain::LURE,
-                    "temporal",
-                    Some(crate::models::senseiguard::threat_types::FRONTEND_PHISHING),
-                    12,
-                    58,
-                    &ThreatScoringV2::campaign_key_domain(domain),
-                ).with_metadata(json!({ "domain_first_seen_days": age.num_days() })));
+                signals.push(
+                    ThreatSignal::new(
+                        kill_chain::LURE,
+                        "temporal",
+                        Some(crate::models::senseiguard::threat_types::FRONTEND_PHISHING),
+                        12,
+                        58,
+                        &ThreatScoringV2::campaign_key_domain(domain),
+                    )
+                    .with_metadata(json!({ "domain_first_seen_days": age.num_days() })),
+                );
             }
         }
     }
@@ -346,7 +353,10 @@ async fn evaluate_transaction_v2(
     }
 
     let mut signals = collect_tx_signals(to, value, data);
-    signals.extend(ThreatScoringV2::collect_signature_signals(sign_method, sign_params));
+    signals.extend(ThreatScoringV2::collect_signature_signals(
+        sign_method,
+        sign_params,
+    ));
 
     if let Some(domain) = domain.filter(|d| !d.trim().is_empty()) {
         signals.extend(collect_dapp_signals_v2(pool, wallet_address, domain).await?);
@@ -939,9 +949,7 @@ pub async fn analyze_tx_and_respond(
         return Ok(build_analyze_tx_response(true, None));
     }
 
-    if let Err(e) =
-        charge_wallet_for_tx_analysis(pool, wallet_address).await
-    {
+    if let Err(e) = charge_wallet_for_tx_analysis(pool, wallet_address).await {
         return Err(e);
     }
 
@@ -1124,10 +1132,15 @@ mod threat_model_v2_tests {
 
     #[test]
     fn v1_and_v2_both_flag_unlimited_approval_calldata() {
-        let (v1_score, _, _, v1_types, _) =
-            threat_analyze_tx_sync(Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"), None, Some(APPROVE_DATA));
+        let (v1_score, _, _, v1_types, _) = threat_analyze_tx_sync(
+            Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+            None,
+            Some(APPROVE_DATA),
+        );
         assert!(v1_score >= MEDIUM_WARNING_THRESHOLD);
-        assert!(v1_types.iter().any(|t| t == threat_types::UNLIMITED_APPROVAL));
+        assert!(v1_types
+            .iter()
+            .any(|t| t == threat_types::UNLIMITED_APPROVAL));
 
         let signals = collect_tx_signals(
             Some("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),

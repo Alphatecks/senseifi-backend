@@ -31,7 +31,8 @@ async fn list_notifications(
         return Err(bad_address());
     }
 
-    match NotificationService::list_for_wallet(&pool, &q.wallet_address, q.limit.unwrap_or(50)).await
+    match NotificationService::list_for_wallet(&pool, &q.wallet_address, q.limit.unwrap_or(50))
+        .await
     {
         Ok(response) => Ok(Json(notification_list_json(
             response.unread_count,

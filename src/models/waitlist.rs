@@ -31,6 +31,11 @@ impl UserXpClaim {
     pub fn xp_balance(&self) -> i32 {
         self.xp.saturating_sub(self.xp_spent)
     }
+
+    pub fn is_welcome_bonus(&self) -> bool {
+        self.waitlist_entry_id
+            == crate::repositories::waitlist_repository::WELCOME_WAITLIST_ENTRY_ID
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

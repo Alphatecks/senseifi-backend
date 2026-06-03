@@ -3,6 +3,7 @@
 use crate::db::DbPool;
 use crate::models::wallet::{canonical_eth_address, DashboardUser};
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
+use crate::services::waitlist_service;
 use rand::Rng;
 use sqlx::Error;
 
@@ -47,10 +48,18 @@ pub async fn get_or_create_for_wallet(
 ) -> Result<DashboardUser, Error> {
     let addr = canonical_eth_address(wallet_address);
     if let Some(du) = DashboardUserRepository::get_by_wallet(pool, &addr).await? {
+        if let Err(e) = waitlist_service::ensure_welcome_xp_claim(pool, &du.user_id, &addr).await {
+            eprintln!("ensure_welcome_xp_claim (existing user): {}", e);
+        }
         return Ok(du);
     }
     let user_id = random_user_id();
     let display_name = random_display_name().to_string();
     let user_number = random_user_number();
-    DashboardUserRepository::create(pool, &addr, &user_id, &display_name, user_number).await
+    let du =
+        DashboardUserRepository::create(pool, &addr, &user_id, &display_name, user_number).await?;
+    if let Err(e) = waitlist_service::ensure_welcome_xp_claim(pool, &du.user_id, &addr).await {
+        eprintln!("ensure_welcome_xp_claim (new user): {}", e);
+    }
+    Ok(du)
 }

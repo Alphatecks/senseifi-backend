@@ -31,9 +31,11 @@ use crate::services::protection_engine::{
     analyze_tx_and_respond, build_dapp_check_response, build_dapp_check_skipped_with_reason,
     evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
 };
-use crate::services::xp_usage_service::{self, parse_insufficient_xp_error, XpUsageAction, XpUsageError};
 use crate::services::scan_service::ScanService;
 use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
+use crate::services::xp_usage_service::{
+    self, parse_insufficient_xp_error, XpUsageAction, XpUsageError,
+};
 use axum::extract::Path;
 use uuid::Uuid;
 

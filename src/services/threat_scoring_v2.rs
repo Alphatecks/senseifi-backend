@@ -106,15 +106,16 @@ impl ThreatScoringV2 {
 
         for s in signals {
             stages.insert(s.stage.clone());
-            let entry = groups.entry(s.campaign_key.clone()).or_insert_with(|| {
-                SignalGroupSummary {
-                    campaign_key: s.campaign_key.clone(),
-                    stage: s.stage.clone(),
-                    max_risk: 0,
-                    max_confidence: 0,
-                    threat_types: vec![],
-                }
-            });
+            let entry =
+                groups
+                    .entry(s.campaign_key.clone())
+                    .or_insert_with(|| SignalGroupSummary {
+                        campaign_key: s.campaign_key.clone(),
+                        stage: s.stage.clone(),
+                        max_risk: 0,
+                        max_confidence: 0,
+                        threat_types: vec![],
+                    });
             entry.max_risk = entry.max_risk.max(s.risk_contribution);
             entry.max_confidence = entry.max_confidence.max(s.confidence);
             if let Some(tt) = &s.threat_type {
@@ -229,7 +230,11 @@ impl ThreatScoringV2 {
     }
 
     /// Merge campaign correlation score when v2 is active.
-    pub fn merge_campaign_score(verdict: &mut ScoredVerdict, campaign_risk: i32, campaign_confidence: i32) {
+    pub fn merge_campaign_score(
+        verdict: &mut ScoredVerdict,
+        campaign_risk: i32,
+        campaign_confidence: i32,
+    ) {
         if campaign_confidence >= CAMPAIGN_BLOCK_CONFIDENCE {
             verdict.risk_score = verdict.risk_score.max(campaign_risk);
             verdict.band = score_to_band(verdict.risk_score).to_string();

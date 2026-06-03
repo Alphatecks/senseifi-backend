@@ -36,9 +36,7 @@ impl NotificationService {
 
         let mut items: Vec<NotificationItem> = Vec::new();
 
-        if let Ok(broadcasts) =
-            NotificationRepository::list_active_broadcasts(pool, limit).await
-        {
+        if let Ok(broadcasts) = NotificationRepository::list_active_broadcasts(pool, limit).await {
             for b in broadcasts {
                 let read = read_set.contains(&(SOURCE_BROADCAST.to_string(), b.id));
                 items.push(NotificationItem {
@@ -63,9 +61,7 @@ impl NotificationService {
         if let Ok(Some(wallet)) =
             WalletRepository::get_wallet_by_address(pool, &wallet_address).await
         {
-            if let Ok(alerts) =
-                SenseiguardRepository::list_alerts(pool, wallet.id, limit).await
-            {
+            if let Ok(alerts) = SenseiguardRepository::list_alerts(pool, wallet.id, limit).await {
                 for alert in alerts {
                     items.push(map_alert(&alert, &read_set));
                 }
@@ -174,13 +170,10 @@ impl NotificationService {
             return Ok(false);
         }
 
-        Ok(NotificationRepository::mark_source_read(
-            pool,
-            &wallet_address,
-            source_type,
-            source_id,
+        Ok(
+            NotificationRepository::mark_source_read(pool, &wallet_address, source_type, source_id)
+                .await?,
         )
-        .await?)
     }
 
     pub async fn mark_all_read(pool: &DbPool, wallet_address: &str) -> Result<i64, Error> {
@@ -205,14 +198,17 @@ impl NotificationService {
             .map(|n| (n.source_type, n.source_id))
             .collect();
 
-        updated += NotificationRepository::mark_sources_read(pool, &wallet_address, &unread).await?;
+        updated +=
+            NotificationRepository::mark_sources_read(pool, &wallet_address, &unread).await?;
         Ok(updated)
     }
 }
 
-fn map_alert(alert: &Alert, read_set: &std::collections::HashSet<(String, Uuid)>) -> NotificationItem {
-    let read = alert.read_at.is_some()
-        || read_set.contains(&(SOURCE_ALERT.to_string(), alert.id));
+fn map_alert(
+    alert: &Alert,
+    read_set: &std::collections::HashSet<(String, Uuid)>,
+) -> NotificationItem {
+    let read = alert.read_at.is_some() || read_set.contains(&(SOURCE_ALERT.to_string(), alert.id));
     NotificationItem {
         id: composite_notification_id(SOURCE_ALERT, alert.id),
         source_type: SOURCE_ALERT.to_string(),
@@ -252,7 +248,9 @@ fn map_activity(
     }
 }
 
-fn activity_mapping(activity_type: &str) -> (&'static str, &'static str, Option<NotificationAction>) {
+fn activity_mapping(
+    activity_type: &str,
+) -> (&'static str, &'static str, Option<NotificationAction>) {
     match activity_type {
         "suspicious_approval" | "blocked_interaction" => (
             "transaction",
@@ -277,10 +275,7 @@ fn alert_category(severity: &str) -> String {
 }
 
 fn threat_category(threat_type: &Option<String>, title: &str) -> String {
-    let t = threat_type
-        .as_deref()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let t = threat_type.as_deref().unwrap_or("").to_ascii_lowercase();
     let title_l = title.to_ascii_lowercase();
     if t.contains("token") || title_l.contains("token") {
         "token_risk".to_string()

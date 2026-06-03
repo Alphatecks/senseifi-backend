@@ -55,7 +55,12 @@ impl AiInsightService {
             bullets.push(format!("Score drivers: {top}."));
         }
 
-        bullets.push(action_bullet(score, simulation, reputation, owner_privileges));
+        bullets.push(action_bullet(
+            score,
+            simulation,
+            reputation,
+            owner_privileges,
+        ));
 
         format!(
             "{headline}\n\n{}",
@@ -122,9 +127,7 @@ fn reputation_bullet(reputation: &ReputationInfo) -> String {
     let info = reputation.informational_flags.unwrap_or(0);
 
     if local >= 3 {
-        return format!(
-            "Reputation: {local} community scam report(s) on file in our database."
-        );
+        return format!("Reputation: {local} community scam report(s) on file in our database.");
     }
 
     if reputation.reported_scam == Some(true) {
@@ -189,13 +192,17 @@ fn action_bullet(
     let privileged = owner.mint == Some(true) || owner.withdraw_liquidity == Some(true);
 
     if drain || (credible_scam && trust_score < 50) {
-        "Next step: Do not approve unlimited permissions; revoke existing approvals if unsure.".to_string()
+        "Next step: Do not approve unlimited permissions; revoke existing approvals if unsure."
+            .to_string()
     } else if credible_scam || trust_score < 60 {
-        "Next step: Confirm contract address, team, and audits on a block explorer before signing.".to_string()
+        "Next step: Confirm contract address, team, and audits on a block explorer before signing."
+            .to_string()
     } else if privileged && trust_score >= 70 {
-        "Next step: Standard due diligence — verify you are on the official contract address.".to_string()
+        "Next step: Standard due diligence — verify you are on the official contract address."
+            .to_string()
     } else {
-        "Next step: Always double-check approvals and the exact contract you are interacting with.".to_string()
+        "Next step: Always double-check approvals and the exact contract you are interacting with."
+            .to_string()
     }
 }
 

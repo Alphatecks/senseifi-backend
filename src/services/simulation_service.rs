@@ -28,7 +28,8 @@ impl SimulationService {
         };
 
         if rpc_url.contains("alchemy.com") {
-            if let Ok(sim) = alchemy_simulate::simulate_contract_call(&rpc_url, contract_address).await
+            if let Ok(sim) =
+                alchemy_simulate::simulate_contract_call(&rpc_url, contract_address).await
             {
                 return Self::build_result(
                     sim.drains_full_balance,
@@ -39,7 +40,8 @@ impl SimulationService {
             }
         }
 
-        if let Ok((drains, hidden)) = Self::simulate_via_trace_call(&rpc_url, contract_address).await
+        if let Ok((drains, hidden)) =
+            Self::simulate_via_trace_call(&rpc_url, contract_address).await
         {
             return Self::build_result(drains, hidden, &approval_scope, dangerous_functions);
         }
@@ -88,7 +90,10 @@ impl SimulationService {
 
     /// Conservative fallback when no simulator provider is available.
     /// Avoids false positives from synthetic "always-drain" stubs.
-    fn conservative_result(approval_scope: &str, dangerous_functions: &[String]) -> SimulationResult {
+    fn conservative_result(
+        approval_scope: &str,
+        dangerous_functions: &[String],
+    ) -> SimulationResult {
         Self::build_result(false, 0, approval_scope, dangerous_functions)
     }
 
@@ -134,8 +139,8 @@ impl SimulationService {
             "timeout": "10s"
         });
 
-        let out = Self::json_rpc_request(rpc_url, "debug_traceCall", json!([tx, "latest", opts]))
-            .await?;
+        let out =
+            Self::json_rpc_request(rpc_url, "debug_traceCall", json!([tx, "latest", opts])).await?;
         let hidden = Self::count_internal_calls(&out).min(u32::MAX as usize) as u32;
         Ok((false, hidden))
     }

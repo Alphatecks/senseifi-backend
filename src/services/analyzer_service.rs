@@ -18,11 +18,7 @@ const WITHDRAW_NAMES: &[&str] = &[
 ];
 const BLACKLIST_NAMES: &[&str] = &["blacklist", "addblacklist", "setblacklist"];
 /// Dangerous for user approvals / proxy.
-const DANGEROUS_NAMES: &[&str] = &[
-    "setapprovalforall",
-    "delegatecall",
-    "multicall",
-];
+const DANGEROUS_NAMES: &[&str] = &["setapprovalforall", "delegatecall", "multicall"];
 
 fn abi_has_function(abi_json: &str, names: &[&str]) -> bool {
     #[derive(Debug, Deserialize)]

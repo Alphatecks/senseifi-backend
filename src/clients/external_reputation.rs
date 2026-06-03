@@ -18,7 +18,9 @@ pub async fn fetch_combined_signals(
     if let Some(s) = goplus {
         out.reported_scam |= s.reported_scam;
         out.community_flags = out.community_flags.saturating_add(s.community_flags);
-        out.informational_flags = out.informational_flags.saturating_add(s.informational_flags);
+        out.informational_flags = out
+            .informational_flags
+            .saturating_add(s.informational_flags);
         if s.verified_source == Some(true) {
             out.verified_source = Some(true);
         } else if out.verified_source.is_none() {
@@ -117,7 +119,9 @@ async fn fetch_goplus_signals(
 }
 
 async fn fetch_custom_report_count(template_env: &str, contract_address: &str) -> Option<u32> {
-    let template = std::env::var(template_env).ok().filter(|s| !s.trim().is_empty())?;
+    let template = std::env::var(template_env)
+        .ok()
+        .filter(|s| !s.trim().is_empty())?;
     let url = template.replace("{address}", contract_address);
     let json = fetch_json(&url).await?;
 

@@ -65,9 +65,7 @@ fn xp_error_body(err: &WaitlistXpError) -> Value {
         "error": err.message(),
     });
     match err {
-        WaitlistXpError::EmailAlreadyClaimed {
-            claimed_by_user_id,
-        } => {
+        WaitlistXpError::EmailAlreadyClaimed { claimed_by_user_id } => {
             body["claimed_by_user_id"] = json!(claimed_by_user_id);
         }
         WaitlistXpError::Database(e) => {
@@ -200,24 +198,10 @@ async fn get_xp_usage(
         }
     }
 
-    match xp_usage_service::list_usage_for_account(
-        &pool,
-        wallet_address,
-        user_id,
-        q.limit,
-    )
-    .await
-    {
+    match xp_usage_service::list_usage_for_account(&pool, wallet_address, user_id, q.limit).await {
         Ok(payload) => {
-            if payload
-                .get("error")
-                .and_then(|v| v.as_str())
-                .is_some()
-            {
-                Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(payload),
-                ))
+            if payload.get("error").and_then(|v| v.as_str()).is_some() {
+                Err((StatusCode::BAD_REQUEST, Json(payload)))
             } else {
                 Ok(Json(payload))
             }

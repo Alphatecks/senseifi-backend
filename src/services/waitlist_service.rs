@@ -1,9 +1,9 @@
 //! Waitlist XP: compute referral XP and bind claims to dashboard user_id + wallet.
 
 use crate::db::DbPool;
-use crate::models::wallet::{canonical_eth_address, is_valid_eth_address};
 use crate::models::waitlist::{ClaimXpResult, UserXpClaim, WaitlistXpBreakdown};
-use crate::repositories::waitlist_repository::WaitlistRepository;
+use crate::models::wallet::{canonical_eth_address, is_valid_eth_address};
+use crate::repositories::waitlist_repository::{WaitlistRepository, WELCOME_WAITLIST_ENTRY_ID};
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
 use sqlx::Error;
@@ -40,7 +40,10 @@ impl WaitlistXpError {
 }
 
 fn normalize_email(email: &str) -> Option<String> {
-    let trimmed = email.trim().trim_start_matches('\n').trim_start_matches('\r');
+    let trimmed = email
+        .trim()
+        .trim_start_matches('\n')
+        .trim_start_matches('\r');
     if trimmed.is_empty() || !trimmed.contains('@') {
         return None;
     }
@@ -59,6 +62,51 @@ fn xp_per_level2_referral() -> i32 {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(50)
+}
+
+pub fn welcome_xp_amount() -> i32 {
+    std::env::var("XP_WELCOME_BONUS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100)
+}
+
+fn welcome_claim_email(user_id: &str) -> String {
+    format!("welcome+{user_id}@senseifi.internal")
+}
+
+/// Grant starter XP once per dashboard user when they connect a wallet (idempotent).
+pub async fn ensure_welcome_xp_claim(
+    pool: &DbPool,
+    user_id: &str,
+    wallet_address: &str,
+) -> Result<(), Error> {
+    let amount = welcome_xp_amount();
+    if amount <= 0 {
+        return Ok(());
+    }
+
+    if WaitlistRepository::get_claim_by_user_id(pool, user_id)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+
+    let email = welcome_claim_email(user_id);
+    WaitlistRepository::insert_claim(
+        pool,
+        user_id,
+        wallet_address,
+        WELCOME_WAITLIST_ENTRY_ID,
+        &email,
+        amount,
+        0,
+        0,
+    )
+    .await?;
+
+    Ok(())
 }
 
 pub async fn preview_xp_by_email(
@@ -110,15 +158,19 @@ pub async fn claim_xp(
     let dashboard_user =
         dashboard_user_service::get_or_create_for_wallet(pool, &wallet_address).await?;
 
-    // Wallet already claimed: return stored XP (idempotent), even if a different email is submitted.
+    // Wallet already claimed: return stored XP unless it is only the welcome bonus.
     if let Some(existing) = WaitlistRepository::get_claim_by_wallet(pool, &wallet_address).await? {
-        return Ok(existing_claim_result(existing, &email));
+        if !WaitlistRepository::is_welcome_claim(&existing) {
+            return Ok(existing_claim_result(existing, &email));
+        }
     }
 
     if let Some(existing) =
         WaitlistRepository::get_claim_by_user_id(pool, &dashboard_user.user_id).await?
     {
-        return Ok(existing_claim_result(existing, &email));
+        if !WaitlistRepository::is_welcome_claim(&existing) {
+            return Ok(existing_claim_result(existing, &email));
+        }
     }
 
     let entry = WaitlistRepository::find_entry_by_email(pool, &email)
@@ -143,24 +195,38 @@ pub async fn claim_xp(
     )
     .await?;
 
-    let claim = WaitlistRepository::insert_claim(
-        pool,
-        &dashboard_user.user_id,
-        &wallet_address,
-        entry.id,
-        &entry.email,
-        breakdown.xp,
-        breakdown.direct_referrals,
-        breakdown.level2_referrals,
-    )
-    .await?;
+    let claim = if WaitlistRepository::get_claim_by_user_id(pool, &dashboard_user.user_id)
+        .await?
+        .map(|c| WaitlistRepository::is_welcome_claim(&c))
+        .unwrap_or(false)
+    {
+        WaitlistRepository::upgrade_welcome_claim_to_waitlist(
+            pool,
+            &dashboard_user.user_id,
+            &wallet_address,
+            entry.id,
+            &entry.email,
+            breakdown.xp,
+            breakdown.direct_referrals,
+            breakdown.level2_referrals,
+        )
+        .await?
+    } else {
+        WaitlistRepository::insert_claim(
+            pool,
+            &dashboard_user.user_id,
+            &wallet_address,
+            entry.id,
+            &entry.email,
+            breakdown.xp,
+            breakdown.direct_referrals,
+            breakdown.level2_referrals,
+        )
+        .await?
+    };
 
-    let _ = WalletRepository::update_wallet_user_id(
-        pool,
-        &wallet_address,
-        &dashboard_user.user_id,
-    )
-    .await;
+    let _ = WalletRepository::update_wallet_user_id(pool, &wallet_address, &dashboard_user.user_id)
+        .await;
 
     Ok(ClaimXpResult {
         claim,

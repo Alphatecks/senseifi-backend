@@ -1,9 +1,9 @@
 //! Reputation & network intelligence: GoPlus, Chainabuse, ScamSniffer, Etherscan verified, etc.
 
+use crate::clients::external_reputation;
 use crate::db::DbPool;
 use crate::models::senseiguard::ReputationInfo;
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
-use crate::clients::external_reputation;
 use sqlx::Row;
 
 pub struct ReputationService;

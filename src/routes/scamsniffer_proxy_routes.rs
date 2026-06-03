@@ -1,16 +1,13 @@
-use axum::{
-    extract::Path,
-    http::StatusCode,
-    response::Json,
-    routing::get,
-    Router,
-};
+use axum::{extract::Path, http::StatusCode, response::Json, routing::get, Router};
 use serde_json::{json, Value};
 
 use crate::models::wallet::is_valid_eth_address;
 
 pub fn scamsniffer_proxy_public_routes() -> Router {
-    Router::new().route("/scamsniffer/address/{address}", get(scamsniffer_address_proxy))
+    Router::new().route(
+        "/scamsniffer/address/{address}",
+        get(scamsniffer_address_proxy),
+    )
 }
 
 async fn scamsniffer_address_proxy(
