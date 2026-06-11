@@ -1,3 +1,6 @@
+//! Reputation & network intelligence: GoPlus, Chainabuse, ScamSniffer, Etherscan verified, etc.
+
+use crate::clients::goplus;
 use serde_json::Value;
 
 #[derive(Debug, Clone, Default)]
@@ -14,7 +17,7 @@ pub async fn fetch_combined_signals(
 ) -> ExternalReputationSignals {
     let mut out = ExternalReputationSignals::default();
 
-    let goplus = fetch_goplus_signals(contract_address, chain_id).await;
+    let goplus = fetch_goplus_token_signals(contract_address, chain_id).await;
     if let Some(s) = goplus {
         out.reported_scam |= s.reported_scam;
         out.community_flags = out.community_flags.saturating_add(s.community_flags);
@@ -49,30 +52,21 @@ pub async fn fetch_combined_signals(
     out
 }
 
-async fn fetch_goplus_signals(
+async fn fetch_goplus_token_signals(
     contract_address: &str,
     chain_id: Option<u64>,
 ) -> Option<ExternalReputationSignals> {
-    let base = std::env::var("GOPLUS_API_BASE_URL")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "https://api.gopluslabs.io".to_string());
     let chain = chain_id.unwrap_or(1);
-    let url = format!(
-        "{}/api/v1/token_security/{}?contract_addresses={}",
-        base.trim_end_matches('/'),
-        chain,
-        contract_address.to_lowercase()
-    );
-    let json = fetch_json(&url).await?;
-    let result_map = json.get("result")?.as_object()?;
-
+    let result_map = goplus::fetch_token_security(contract_address, chain).await?;
     let lookup = contract_address.to_lowercase();
     let token = result_map
         .get(&lookup)
-        .or_else(|| result_map.values().next())?
-        .clone();
+        .or_else(|| result_map.as_object()?.values().next())?;
 
+    parse_goplus_token_entry(token)
+}
+
+fn parse_goplus_token_entry(token: &Value) -> Option<ExternalReputationSignals> {
     let verified_source = parse_bool_flag(token.get("is_open_source")).or(Some(false));
 
     let scam_keys = [
@@ -103,7 +97,6 @@ async fn fetch_goplus_signals(
         }
     }
 
-    // Tax outliers are suspicious (common drainer/honeypot characteristic).
     let buy_tax = parse_number_flag(token.get("buy_tax")).unwrap_or(0.0);
     let sell_tax = parse_number_flag(token.get("sell_tax")).unwrap_or(0.0);
     if buy_tax >= 30.0 || sell_tax >= 30.0 {
@@ -132,11 +125,7 @@ async fn fetch_custom_report_count(template_env: &str, contract_address: &str) -
     }
 
     let count = extract_report_count(&json);
-    if count > 0 {
-        Some(count)
-    } else {
-        None
-    }
+    if count > 0 { Some(count) } else { None }
 }
 
 async fn fetch_json(url: &str) -> Option<Value> {
@@ -205,5 +194,17 @@ fn to_u32(v: &Value) -> Option<u32> {
         Value::String(s) => s.trim().parse::<u32>().ok(),
         Value::Array(arr) => Some(arr.len().min(u32::MAX as usize) as u32),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn goplus_token_honeypot_parsed() {
+        let token = serde_json::json!({ "is_honeypot": "1", "is_open_source": "0" });
+        let parsed = parse_goplus_token_entry(&token).unwrap();
+        assert!(parsed.reported_scam);
     }
 }

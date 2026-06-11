@@ -192,8 +192,32 @@ Dashboard endpoints return **only real data** from your database (and, where con
 | **Chain RPC (JSON-RPC)** | `src/clients/rpc.rs`, wallet_routes | `eth_getCode` (bytecode), `eth_getBalance` (native balance) | `ETHEREUM_RPC_URL`, `BSC_RPC_URL`, `POLYGON_RPC_URL`, `BASE_RPC_URL`, `ARBITRUM_RPC_URL` |
 | **Alchemy** | `src/clients/alchemy_simulate.rs`, simulation_service | `alchemy_simulateAssetChanges` for scan simulation (when RPC URL is Alchemy) | Same RPC URL; only used when host is `alchemy.com` |
 | **Moralis** | `src/clients/moralis_wallet.rs`, `SenseiguardService::sync_wallet_indexed_tokens` | Wallet token balances per EVM chain (`/api/v2.2/wallets/.../tokens`) | `MORALIS_API_KEY`, optional `MORALIS_API_BASE_URL`, `TOKEN_BALANCE_SCAN_CHAIN_IDS` |
+| **GoPlus Security** | `src/clients/goplus.rs`, connection-check, threat-feed cache, tx analyze | Phishing site, dApp security, malicious address, token security | `GOPLUS_APP_KEY`, `GOPLUS_APP_SECRET`, optional `GOPLUS_API_BASE_URL`, `GOPLUS_ENABLED`, `GOPLUS_INTEL_CACHE_TTL_DAYS` |
+| **ScamSniffer** | `src/routes/scamsniffer_proxy_routes.rs` | EVM address lookup proxy | `SCAMSNIFFER_API_KEY`, optional `SCAMSNIFFER_LOOKUP_API_BASE_URL` |
 
-**Not implemented (cited in architecture docs only)** — GoPlus Security, Honeypot.is, Chainabuse, ScamSniffer, Tenderly, Blocknative. These are listed as possible data sources in the architecture; the backend does not call them today.
+**GoPlus (Phase 1 — threat intelligence)**
+
+When `GOPLUS_APP_KEY` and `GOPLUS_APP_SECRET` are set:
+
+- **`POST /api/protection/dapp/connection-check`** calls GoPlus phishing + dApp security in parallel with the site crawl.
+- **`POST /api/protection/transaction/analyze`** enriches EVM `to` and Solana program IDs via GoPlus malicious address API.
+- **`GET /api/protection/threat-feed`** merges confirmed positives from `external_intel_cache` (table migration `038`).
+
+Optional emergency overrides (not required for normal operation):
+
+- `SENSEIGUARD_MALICIOUS_DOMAINS`, `SENSEIGUARD_MALICIOUS_DOMAINS_SOLANA`, `SENSEIGUARD_MALICIOUS_PROGRAMS`
+
+Example:
+
+```bash
+GOPLUS_APP_KEY=
+GOPLUS_APP_SECRET=
+GOPLUS_API_BASE_URL=https://api.gopluslabs.io
+GOPLUS_ENABLED=true
+GOPLUS_INTEL_CACHE_TTL_DAYS=7
+```
+
+**Not implemented (Phase 2+)** — Blowfish tx simulation, extended ScamSniffer domains, Honeypot.is, Chainabuse bulk feeds, Tenderly, Blocknative.
 
 ---
 

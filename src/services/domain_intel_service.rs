@@ -61,6 +61,11 @@ fn normalize_domain(input: &str) -> Option<String> {
     parsed.host_str().map(|h| h.to_lowercase())
 }
 
+/// Public helper for other services (threat intel aggregation).
+pub fn normalize_domain_host(input: &str) -> Option<String> {
+    normalize_domain(input)
+}
+
 fn parse_env_malicious_domains() -> Vec<String> {
     std::env::var("SENSEIGUARD_MALICIOUS_DOMAINS")
         .ok()
@@ -159,6 +164,21 @@ pub async fn get_domain_threat_feed(pool: &DbPool) -> Result<DomainThreatFeedRes
 
 pub async fn assess_domain(pool: &DbPool, target: &str) -> DomainIntelAssessment {
     let domain = normalize_domain(target).unwrap_or_else(|| target.trim().to_lowercase());
+
+    if let Some(cached_risk) = crate::services::external_intel_cache_service::get_cached_domain_hit(
+        pool, &domain,
+    )
+    .await
+    {
+        return DomainIntelAssessment {
+            domain,
+            is_malicious: true,
+            is_trusted: false,
+            reason: Some("Domain matched cached external threat intelligence.".to_string()),
+            risk_boost: cached_risk.max(60),
+        };
+    }
+
     let feed = get_domain_threat_feed(pool).await.ok();
 
     let malicious = feed

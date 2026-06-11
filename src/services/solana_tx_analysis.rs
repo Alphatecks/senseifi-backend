@@ -40,6 +40,8 @@ pub struct SolanaAnalysisResult {
     pub threat_types: Vec<String>,
     pub malicious_program_detected: bool,
     pub program_ids: Vec<String>,
+    /// Programs that contributed to elevated risk (for auto-learning feed).
+    pub flagged_programs: Vec<String>,
     pub recommendation: String,
 }
 
@@ -95,6 +97,7 @@ pub fn analyze_solana_request(
     let mut bulk_operation_risk = 0i32;
     let mut malicious_program_detected = false;
     let mut program_ids: Vec<String> = Vec::new();
+    let mut flagged_programs: Vec<String> = Vec::new();
 
     if method == "signMessage" || method == "wallet_standard_signMessage" {
         findings.push("[medium] Off-chain message signing request".to_string());
@@ -126,6 +129,9 @@ pub fn analyze_solana_request(
                 if malicious_programs.contains(program) {
                     malicious_program_detected = true;
                     program_reputation_risk = program_reputation_risk.max(95);
+                    if !flagged_programs.contains(program) {
+                        flagged_programs.push(program.clone());
+                    }
                     findings.push(format!(
                         "[critical] Transaction invokes known malicious program {}",
                         truncate_program(program)
@@ -175,6 +181,14 @@ pub fn analyze_solana_request(
     for program in &unique_programs {
         if is_unknown_program(program) {
             program_reputation_risk = program_reputation_risk.max(40);
+            if drainer_pattern_risk >= 70
+                || authority_change_risk >= 55
+                || bulk_operation_risk >= 35
+            {
+                if !flagged_programs.contains(program) {
+                    flagged_programs.push(program.clone());
+                }
+            }
             if !findings.iter().any(|f| f.contains(program)) {
                 findings.push(format!(
                     "[medium] Unknown program invoked: {}",
@@ -231,6 +245,7 @@ pub fn analyze_solana_request(
         threat_types,
         malicious_program_detected,
         program_ids,
+        flagged_programs,
         recommendation,
     }
 }

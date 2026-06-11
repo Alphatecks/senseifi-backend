@@ -7,7 +7,6 @@ use axum::{
     routing::{get, post, put},
     Router,
 };
-use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use url::Url;
@@ -30,13 +29,14 @@ use crate::services::domain_intel_service;
 use crate::services::elite_intelligence_service::{
     EliteAssessmentRequest, EliteIntelligenceService,
 };
+use crate::services::goplus_intel_service;
 use crate::services::protection_engine::{
     analyze_tx_and_respond, evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
     score_to_band, DappEvalResult,
 };
-use crate::services::solana_tx_analysis::{
-    analyze_solana_request, is_solana_sign_method, merge_malicious_programs,
-    parse_env_malicious_programs, static_malicious_programs,
+use crate::services::solana_tx_analysis::{analyze_solana_request, is_solana_sign_method};
+use crate::services::threat_intel_service::{
+    get_malicious_programs, get_multichain_threat_feed, record_solana_analysis_signals,
 };
 use crate::services::scan_service::ScanService;
 use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
@@ -1153,22 +1153,7 @@ async fn analyze_solana_transaction(
         }
     }
 
-    let db_programs = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT contract_address
-        FROM scam_reports
-        WHERE contract_address !~* '^0x[0-9a-f]{40}$'
-          AND length(contract_address) >= 32
-        ORDER BY contract_address
-        LIMIT 500
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .unwrap_or_default();
-
-    let env_programs = parse_env_malicious_programs();
-    let malicious_programs = merge_malicious_programs(&db_programs, &env_programs);
+    let malicious_programs = get_malicious_programs(pool).await;
 
     let solana = analyze_solana_request(
         method,
@@ -1177,20 +1162,60 @@ async fn analyze_solana_transaction(
         domain_risk_score,
     );
 
-    let score = solana.risk_score;
+    let goplus_programs = goplus_intel_service::enrich_addresses(
+        pool,
+        &solana.program_ids,
+        "solana",
+        "program",
+        Some("solana"),
+        8,
+    )
+    .await;
+
+    let mut score = solana.risk_score;
+    let mut findings = solana.findings.clone();
+    let mut malicious_program_detected = solana.malicious_program_detected;
+    if goplus_programs.malicious_detected {
+        score = score.max(goplus_programs.risk_boost);
+        malicious_program_detected = true;
+        for f in goplus_programs.findings {
+            if !findings.contains(&f) {
+                findings.push(f);
+            }
+        }
+    }
+
     let band = score_to_band(score).to_string();
-    let malicious = solana.malicious_program_detected || score >= 80;
+    let malicious = malicious_program_detected || score >= 80;
+
+    let domain_for_signals = req
+        .domain
+        .as_deref()
+        .or(req.url.as_deref())
+        .and_then(normalize_dapp_domain);
+
+    record_solana_analysis_signals(
+        pool,
+        &wallet_address,
+        domain_for_signals.as_deref(),
+        score,
+        &solana.program_ids,
+        &solana.flagged_programs,
+        malicious_program_detected,
+        method,
+    )
+    .await;
 
     Ok(Json(json!({
         "risk_score": score,
         "riskScore": score,
         "risk_level_10": risk_level_10(score),
         "band": band,
-        "findings": solana.findings,
+        "findings": findings,
         "breakdown": solana.breakdown,
         "recommendation": solana.recommendation,
         "malicious_contract_detected": malicious,
-        "malicious_program_detected": solana.malicious_program_detected,
+        "malicious_program_detected": malicious_program_detected,
         "reported_incidents": 0,
         "wallets_drained_estimate": 0,
         "threat_types": solana.threat_types,
@@ -1301,6 +1326,7 @@ async fn transaction_analyze(
             let mut trust_score: Option<i32> = None;
             let mut scam_reports: i64 = 0;
             let mut wallets_drained_estimate: i64 = 0;
+            let mut goplus_evm_findings: Vec<String> = Vec::new();
             if let Some(ref to_addr) = to {
                 if is_valid_eth_address(to_addr) {
                     let (rep_risk, trust, reports, wallets_affected) =
@@ -1309,6 +1335,21 @@ async fn transaction_analyze(
                     trust_score = trust;
                     scam_reports = reports;
                     wallets_drained_estimate = wallets_affected;
+
+                    let goplus_addr = goplus_intel_service::enrich_addresses(
+                        &pool,
+                        std::slice::from_ref(to_addr),
+                        &goplus_intel_service::evm_chain_id_string(req.chain_id),
+                        "contract",
+                        Some("evm"),
+                        1,
+                    )
+                    .await;
+                    if goplus_addr.malicious_detected {
+                        contract_reputation_risk =
+                            contract_reputation_risk.max(goplus_addr.risk_boost);
+                    }
+                    goplus_evm_findings = goplus_addr.findings;
                 }
             }
 
@@ -1394,6 +1435,11 @@ async fn transaction_analyze(
                     findings.push(format!("Destination contract trust score is low ({})", t));
                 }
                 findings.push("Destination contract linked to malicious-risk signals".to_string());
+            }
+            for f in goplus_evm_findings {
+                if !findings.iter().any(|x| x == &f) {
+                    findings.push(f);
+                }
             }
             if behavioral_risk >= 30 {
                 findings.push("Project/domain phishing risk signal detected".to_string());
@@ -1825,82 +1871,21 @@ async fn scan_history(
 async fn get_threat_feed(
     State(pool): State<DbPool>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let malicious_contracts = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT contract_address
-        FROM scam_reports
-        WHERE contract_address ~* '^0x[0-9a-f]{40}$'
-        ORDER BY contract_address
-        LIMIT 500
-        "#,
-    )
-    .fetch_all(&pool)
-    .await
-    .map_err(|_| {
+    let feed = get_multichain_threat_feed(&pool).await.map_err(|_| {
         extension_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to build threat feed",
         )
     })?;
 
-    let malicious_programs = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT DISTINCT contract_address
-        FROM scam_reports
-        WHERE contract_address !~* '^0x[0-9a-f]{40}$'
-          AND length(contract_address) >= 32
-        ORDER BY contract_address
-        LIMIT 500
-        "#,
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap_or_default();
-
-    let env_programs = parse_env_malicious_programs();
-    let static_programs = static_malicious_programs();
-    let mut program_set: std::collections::HashSet<String> = malicious_programs.into_iter().collect();
-    for p in env_programs {
-        program_set.insert(p);
-    }
-    for p in static_programs {
-        program_set.insert(p);
-    }
-    let mut malicious_programs: Vec<String> = program_set.into_iter().collect();
-    malicious_programs.sort();
-
-    let domain_feed = domain_intel_service::get_domain_threat_feed(&pool)
-        .await
-        .map_err(|_| {
-            extension_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to build threat feed",
-            )
-        })?;
-
-    let solana_env_domains = std::env::var("SENSEIGUARD_MALICIOUS_DOMAINS_SOLANA")
-        .ok()
-        .map(|s| {
-            s.split(',')
-                .map(|d| d.trim().to_lowercase())
-                .filter(|d| !d.is_empty())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    let malicious_domains_by_family = json!({
-        "evm": domain_feed.malicious_domains,
-        "solana": solana_env_domains,
-    });
-
     Ok(Json(json!({
-        "malicious_contracts": malicious_contracts,
-        "malicious_domains": domain_feed.malicious_domains,
-        "malicious_programs": malicious_programs,
-        "malicious_domains_by_family": malicious_domains_by_family,
-        "trusted_domains": domain_feed.trusted_domains,
-        "sources": domain_feed.sources,
-        "updated_at": Utc::now(),
+        "malicious_contracts": feed.malicious_contracts,
+        "malicious_domains": feed.malicious_domains,
+        "malicious_programs": feed.malicious_programs,
+        "malicious_domains_by_family": feed.malicious_domains_by_family,
+        "trusted_domains": feed.trusted_domains,
+        "sources": feed.sources,
+        "updated_at": feed.updated_at,
     })))
 }
 
@@ -1983,6 +1968,16 @@ async fn ingest_telemetry_events(
 
         if let Some(wallet_address) = wallet_from_context {
             if is_valid_wallet_address(&wallet_address, chain_family) {
+                let program_ids = ev
+                    .context
+                    .as_ref()
+                    .and_then(|ctx| ctx.get("program_ids"))
+                    .cloned()
+                    .or_else(|| {
+                        ev.context.as_ref().and_then(|ctx| {
+                            ctx.get("programIds").cloned()
+                        })
+                    });
                 let metadata = json!({
                     "event_type": ev.event_type,
                     "risk_score": ev.risk_score,
@@ -1992,6 +1987,7 @@ async fn ingest_telemetry_events(
                     "decision": ev.decision,
                     "context": ev.context,
                     "chain_family": chain_family.as_str(),
+                    "program_ids": program_ids,
                     "at": ev.at,
                 });
                 let _ = crate::services::senseiguard_service::SenseiguardService::ingest_activity(

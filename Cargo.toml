@@ -28,6 +28,8 @@ scraper = "0.20"
 url = "2.5"
 hmac = "0.12"
 sha2 = "0.10"
+sha1 = "0.10"
+urlencoding = "2.1"
 tiny-keccak = { version = "2.0.2", features = ["keccak"] }
 bs58 = "0.5"
 base64 = "0.22"

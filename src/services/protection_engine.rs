@@ -8,7 +8,9 @@ use crate::models::senseiguard::{
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
+use crate::clients::goplus::{self, DappSecurityResult, PhishingSiteResult};
 use crate::services::domain_intel_service;
+use crate::services::external_intel_cache_service;
 use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
 use crate::services::threat_scoring_v2::{ThreatScoringV2, ThreatSignal, SCORING_MODEL_V2};
 use crate::services::website_scan_service;
@@ -27,6 +29,8 @@ const MEDIUM_WARNING_THRESHOLD: i32 = 30;
 /// Signal weights for additive risk (doc: domain typosquat +25, homograph +25, unlimited approval +35, etc.)
 const WEIGHT_DOMAIN_TYPOSQUAT: i32 = 25;
 const WEIGHT_DOMAIN_HOMOGRAPH: i32 = 25;
+const WEIGHT_GOPLUS_PHISHING: i32 = 60;
+const WEIGHT_GOPLUS_MALICIOUS_DAPP: i32 = 50;
 const WEIGHT_UNLIMITED_APPROVAL: i32 = 35;
 const WEIGHT_DELEGATECALL_PATTERN: i32 = 20;
 const WEIGHT_UNKNOWN_DESTINATION: i32 = 25;
@@ -696,8 +700,26 @@ pub async fn evaluate_dapp_connection(
     let intel = domain_intel_service::assess_domain(pool, target).await;
     risk_score += intel.risk_boost;
 
+    let (scan_result, goplus_phishing, goplus_dapp) = tokio::join!(
+        website_scan_service::scan_website(target, max_pages),
+        goplus::check_phishing_site(target),
+        goplus::check_dapp_security(target),
+    );
+
+    let mut goplus_findings: Vec<String> = Vec::new();
+    apply_goplus_dapp_scoring(
+        pool,
+        target,
+        &intel.domain,
+        &mut risk_score,
+        &mut goplus_findings,
+        goplus_phishing.as_ref(),
+        goplus_dapp.as_ref(),
+    )
+    .await;
+
     let mut website_scan_summary: Option<WebsiteScanSummary> = None;
-    if let Ok(scan) = website_scan_service::scan_website(target, max_pages).await {
+    if let Ok(scan) = scan_result {
         risk_score = (risk_score + scan.risk_score).min(100);
         let mut findings = scan
             .issues
@@ -718,7 +740,11 @@ pub async fn evaluate_dapp_connection(
         } else if let Some(reason) = intel.reason.clone() {
             findings.insert(0, format!("[low] {}", reason));
         }
-        // Ensure UI "top finding" (first item) is always highest severity.
+        for f in goplus_findings {
+            if !findings.iter().any(|x| x == &f) {
+                findings.insert(0, f);
+            }
+        }
         findings.sort_by_key(|f| Reverse(finding_severity_rank(f)));
         website_scan_summary = Some(WebsiteScanSummary {
             target: scan.target,
@@ -730,12 +756,23 @@ pub async fn evaluate_dapp_connection(
             issue_count: scan.issues.len(),
             findings,
         });
-    } else if intel.is_malicious || intel.is_trusted {
-        let finding = if intel.is_malicious {
-            "[critical] Domain matched malicious threat-intelligence feed.".to_string()
+    } else if intel.is_malicious || intel.is_trusted || !goplus_findings.is_empty() {
+        let mut findings = if intel.is_malicious {
+            vec!["[critical] Domain matched malicious threat-intelligence feed.".to_string()]
+        } else if intel.is_trusted {
+            vec!["[low] Domain matched trusted protocol allowlist.".to_string()]
         } else {
-            "[low] Domain matched trusted protocol allowlist.".to_string()
+            Vec::new()
         };
+        for f in goplus_findings {
+            if !findings.iter().any(|x| x == &f) {
+                findings.insert(0, f);
+            }
+        }
+        if findings.is_empty() {
+            findings.push("[medium] Site scan unavailable; limited assessment applied.".to_string());
+        }
+        findings.sort_by_key(|f| Reverse(finding_severity_rank(f)));
         website_scan_summary = Some(WebsiteScanSummary {
             target: target.to_string(),
             normalized_url: format!("https://{}", intel.domain),
@@ -743,8 +780,8 @@ pub async fn evaluate_dapp_connection(
             safety: score_to_band(risk_score.clamp(0, 100)).to_string(),
             risk_score: risk_score.clamp(0, 100),
             crawled_pages: 0,
-            issue_count: 1,
-            findings: vec![finding],
+            issue_count: findings.len(),
+            findings,
         });
     }
     risk_score = risk_score.clamp(0, 100);
@@ -758,6 +795,109 @@ pub async fn evaluate_dapp_connection(
         website_scan: website_scan_summary,
         correlation: None,
     })
+}
+
+async fn apply_goplus_dapp_scoring(
+    pool: &DbPool,
+    target: &str,
+    normalized_domain: &str,
+    risk_score: &mut i32,
+    findings: &mut Vec<String>,
+    phishing: Option<&PhishingSiteResult>,
+    dapp: Option<&DappSecurityResult>,
+) {
+    let Some(phishing) = phishing else {
+        if let Some(dapp) = dapp {
+            apply_goplus_dapp_only(pool, target, normalized_domain, risk_score, findings, dapp)
+                .await;
+        }
+        return;
+    };
+
+    if phishing.is_phishing {
+        *risk_score = (*risk_score + WEIGHT_GOPLUS_PHISHING).min(100);
+        findings.push("[critical] GoPlus: known phishing site".to_string());
+        let _ = external_intel_cache_service::upsert_positive_hit(
+            pool,
+            "domain",
+            normalized_domain,
+            None,
+            "goplus",
+            WEIGHT_GOPLUS_PHISHING,
+            json!({ "source_api": "phishing_site", "target": target }),
+        )
+        .await;
+    }
+
+    for contract in &phishing.malicious_contracts {
+        let addr = contract.to_lowercase();
+        if addr.starts_with("0x") && addr.len() == 42 {
+            let _ = external_intel_cache_service::upsert_positive_hit(
+                pool,
+                "contract",
+                &addr,
+                Some("evm"),
+                "goplus",
+                85,
+                json!({ "source_api": "phishing_site", "domain": normalized_domain }),
+            )
+            .await;
+        }
+    }
+
+    if let Some(dapp) = dapp {
+        apply_goplus_dapp_only(pool, target, normalized_domain, risk_score, findings, dapp).await;
+    }
+}
+
+async fn apply_goplus_dapp_only(
+    pool: &DbPool,
+    target: &str,
+    normalized_domain: &str,
+    risk_score: &mut i32,
+    findings: &mut Vec<String>,
+    dapp: &DappSecurityResult,
+) {
+    if dapp.is_trusted {
+        *risk_score = (*risk_score - 10).max(0);
+        findings.push("[low] GoPlus: dApp on trusted list".to_string());
+    }
+
+    if dapp.malicious_contract || dapp.malicious_creator {
+        *risk_score = (*risk_score + WEIGHT_GOPLUS_MALICIOUS_DAPP).min(100);
+        if dapp.malicious_contract {
+            findings.push("[critical] GoPlus: malicious contract linked to dApp".to_string());
+        }
+        if dapp.malicious_creator {
+            findings.push("[critical] GoPlus: malicious creator linked to dApp".to_string());
+        }
+        let _ = external_intel_cache_service::upsert_positive_hit(
+            pool,
+            "domain",
+            normalized_domain,
+            None,
+            "goplus",
+            WEIGHT_GOPLUS_MALICIOUS_DAPP,
+            json!({ "source_api": "dapp_security", "target": target }),
+        )
+        .await;
+    }
+
+    for contract in &dapp.malicious_contract_addresses {
+        let addr = contract.to_lowercase();
+        if addr.starts_with("0x") && addr.len() == 42 {
+            let _ = external_intel_cache_service::upsert_positive_hit(
+                pool,
+                "contract",
+                &addr,
+                Some("evm"),
+                "goplus",
+                90,
+                json!({ "source_api": "dapp_security", "domain": normalized_domain }),
+            )
+            .await;
+        }
+    }
 }
 
 /// Run one monitor cycle for a wallet (update last_scan_at; in future: check approvals, tokens, contracts).
