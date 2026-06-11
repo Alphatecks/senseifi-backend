@@ -1060,7 +1060,10 @@ pub struct EliteRiskAssessment {
 /// Request for POST /api/dapp/connection-check.
 #[derive(Debug, Deserialize)]
 pub struct DappConnectionCheckRequest {
-    pub wallet_address: String,
+    #[serde(default)]
+    pub wallet_address: Option<String>,
+    #[serde(default)]
+    pub chain_family: Option<String>,
     #[serde(default)]
     pub domain: Option<String>,
     #[serde(default)]

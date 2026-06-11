@@ -1,7 +1,7 @@
 use crate::db::DbPool;
 use crate::models::wallet::{
-    canonical_eth_address, ConnectWalletRequest, ConnectedWalletItem, WalletResponse,
-    WalletStatusResponse,
+    canonical_eth_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
+    ChainFamily, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
 };
 use crate::repositories::wallet_repository::WalletRepository;
 use sqlx::Error;
@@ -13,12 +13,15 @@ impl WalletService {
         pool: &DbPool,
         request: ConnectWalletRequest,
     ) -> Result<WalletResponse, Error> {
-        // Validate wallet address format (basic check)
-        if !request.address.starts_with("0x") || request.address.len() != 42 {
+        let chain_family = parse_chain_family(request.chain_family.as_deref());
+        if !is_valid_wallet_address(&request.address, chain_family) {
             return Err(Error::RowNotFound);
         }
 
-        let addr = canonical_eth_address(&request.address);
+        let addr = match chain_family {
+            ChainFamily::Evm => canonical_eth_address(&request.address),
+            ChainFamily::Solana => request.address.clone(),
+        };
         // Create or update wallet (user_id scopes dashboard to this user)
         let wallet = WalletRepository::create_wallet(
             pool,

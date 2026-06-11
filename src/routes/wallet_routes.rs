@@ -12,7 +12,9 @@ use sqlx::Error;
 use crate::clients::{etherscan, rpc};
 use crate::db::DbPool;
 use crate::models::wallet::{
-    is_valid_eth_address, ConnectWalletRequest, ALLOWED_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
+    is_valid_eth_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
+    ChainFamily, ALLOWED_EVM_WALLET_TYPES, ALLOWED_SOLANA_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
+    SOLANA_MAINNET_CHAIN_ID,
 };
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -57,7 +59,9 @@ async fn connect_wallet(
     State(pool): State<DbPool>,
     Json(request): Json<ConnectWalletRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&request.address) {
+    let chain_family = parse_chain_family(request.chain_family.as_deref());
+
+    if !is_valid_wallet_address(&request.address, chain_family) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -67,29 +71,62 @@ async fn connect_wallet(
             })),
         ));
     }
-    if request.chain_id < CHAIN_ID_MIN || request.chain_id > CHAIN_ID_MAX {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "message": "Invalid chain_id",
-                "error": "Invalid chain_id"
-            })),
-        ));
-    }
+
     let wt = request.wallet_type.to_lowercase();
-    if !ALLOWED_WALLET_TYPES.contains(&wt.as_str()) {
+    let allowed = match chain_family {
+        ChainFamily::Evm => ALLOWED_EVM_WALLET_TYPES,
+        ChainFamily::Solana => ALLOWED_SOLANA_WALLET_TYPES,
+    };
+    if !allowed.contains(&wt.as_str()) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
-                "message": "Invalid wallet_type; allowed: metamask, coinbase",
-                "error": "Invalid wallet_type; allowed: metamask, coinbase"
+                "message": format!(
+                    "Invalid wallet_type; allowed for {}: {}",
+                    chain_family.as_str(),
+                    allowed.join(", ")
+                ),
+                "error": "Invalid wallet_type"
             })),
         ));
     }
+
+    let effective_chain_id = match chain_family {
+        ChainFamily::Evm => {
+            if request.chain_id < CHAIN_ID_MIN || request.chain_id > CHAIN_ID_MAX {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "success": false,
+                        "message": "Invalid chain_id",
+                        "error": "Invalid chain_id"
+                    })),
+                ));
+            }
+            request.chain_id
+        }
+        ChainFamily::Solana => {
+            if request.chain_id == 0 {
+                SOLANA_MAINNET_CHAIN_ID
+            } else if request.chain_id < CHAIN_ID_MIN || request.chain_id > CHAIN_ID_MAX {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "success": false,
+                        "message": "Invalid chain_id",
+                        "error": "Invalid chain_id"
+                    })),
+                ));
+            } else {
+                request.chain_id
+            }
+        }
+    };
+
     let mut req = request;
     req.wallet_type = wt.clone();
+    req.chain_id = effective_chain_id;
 
     // If frontend doesn't send user_id, create/get dashboard user (random user_id, display_name, user_number).
     let dashboard_user = if req.user_id.is_none()

@@ -14,6 +14,7 @@ pub mod scan_service;
 pub mod scoring_engine;
 pub mod senseiguard_service;
 pub mod simulation_service;
+pub mod solana_tx_analysis;
 pub mod subscription_charge_service;
 pub mod subscription_service;
 pub mod threat_correlation_service;

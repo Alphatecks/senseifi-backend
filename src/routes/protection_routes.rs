@@ -20,7 +20,10 @@ use crate::models::senseiguard::{
     SimulateTxResponse, UpdateProtectionSettingsRequest, UpdateSecurityRuleRequest,
     UserRiskProfile, WatchlistContractRequest,
 };
-use crate::models::wallet::is_valid_eth_address;
+use crate::models::wallet::{
+    is_valid_eth_address, is_valid_solana_address, is_valid_wallet_address, parse_chain_family,
+    ChainFamily,
+};
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::domain_intel_service;
@@ -28,8 +31,12 @@ use crate::services::elite_intelligence_service::{
     EliteAssessmentRequest, EliteIntelligenceService,
 };
 use crate::services::protection_engine::{
-    analyze_tx_and_respond, build_dapp_check_response, build_dapp_check_skipped_with_reason,
-    evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
+    analyze_tx_and_respond, evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
+    score_to_band, DappEvalResult,
+};
+use crate::services::solana_tx_analysis::{
+    analyze_solana_request, is_solana_sign_method, merge_malicious_programs,
+    parse_env_malicious_programs, static_malicious_programs,
 };
 use crate::services::scan_service::ScanService;
 use crate::services::threat_correlation_service::{ThreatCorrelationService, ThreatSignalInput};
@@ -112,9 +119,95 @@ fn bad_address() -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::BAD_REQUEST,
         Json(json!({
             "success": false,
-            "error": "Invalid address format (0x + 40 hex)"
+            "error": "Invalid address format for chain family"
         })),
     )
+}
+
+fn bad_wallet_address(family: ChainFamily) -> (StatusCode, Json<serde_json::Value>) {
+    let hint = match family {
+        ChainFamily::Evm => "Expected 0x + 40 hex characters",
+        ChainFamily::Solana => "Expected base58 Solana pubkey (32–44 characters)",
+    };
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "success": false,
+            "error": format!("Invalid wallet_address format. {}", hint)
+        })),
+    )
+}
+
+fn site_safety_label(band: &str) -> String {
+    band.to_ascii_lowercase()
+}
+
+fn risk_level_10(score: i32) -> f64 {
+    ((score as f64) / 10.0 * 10.0).round() / 10.0
+}
+
+fn build_dapp_extension_response(
+    skipped: bool,
+    result: Option<DappEvalResult>,
+    reason: Option<&str>,
+) -> Value {
+    if skipped {
+        return json!({
+            "skipped": true,
+            "reason": reason,
+            "correlation": null,
+        });
+    }
+
+    let r = result.unwrap_or(DappEvalResult {
+        risk_score: 0,
+        phishing_risk: false,
+        safety: "Safe".to_string(),
+        website_scan: None,
+        correlation: None,
+    });
+
+    let band = r.safety.clone();
+    let site_safety = site_safety_label(&band);
+    let findings = r
+        .website_scan
+        .as_ref()
+        .map(|s| s.findings.clone())
+        .filter(|f| !f.is_empty())
+        .unwrap_or_else(|| {
+            vec!["[low] No significant domain risks detected".to_string()]
+        });
+
+    let website_scan = r.website_scan.as_ref().map(|ws| {
+        json!({
+            "target": ws.target,
+            "normalized_url": ws.normalized_url,
+            "domain": ws.domain,
+            "safety": site_safety_label(&ws.safety),
+            "summary": format!(
+                "Scanned {} page(s); {} issue(s) found",
+                ws.crawled_pages, ws.issue_count
+            ),
+            "findings": ws.findings,
+            "risk_score": ws.risk_score,
+            "crawled_pages": ws.crawled_pages,
+            "issue_count": ws.issue_count,
+        })
+    });
+
+    json!({
+        "skipped": false,
+        "risk_score": r.risk_score,
+        "risk_level_10": risk_level_10(r.risk_score),
+        "band": band,
+        "site_safety": site_safety,
+        "site_safe": band == "Safe",
+        "findings": findings,
+        "phishing_risk": r.phishing_risk,
+        "safety": r.safety,
+        "website_scan": website_scan,
+        "correlation": r.correlation,
+    })
 }
 
 fn normalize_dapp_domain(target: &str) -> Option<String> {
@@ -234,6 +327,12 @@ struct ExtensionAnalyzeRequest {
     #[serde(default)]
     source: Option<String>,
     #[serde(default)]
+    chain_family: Option<String>,
+    #[serde(default)]
+    network: Option<String>,
+    #[serde(default)]
+    meta: Option<Value>,
+    #[serde(default)]
     risk_profile: Option<String>,
     #[serde(default)]
     liquidity_drop_1h_pct: Option<f64>,
@@ -344,6 +443,8 @@ struct TelemetryEvent {
     decision: Option<String>,
     #[serde(default)]
     context: Option<Value>,
+    #[serde(default, rename = "chainFamily")]
+    chain_family: Option<String>,
     at: String,
 }
 
@@ -994,6 +1095,117 @@ async fn extension_screen_action(
     }
 }
 
+async fn analyze_solana_transaction(
+    pool: &DbPool,
+    req: &ExtensionAnalyzeRequest,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let method = req
+        .method
+        .as_deref()
+        .ok_or_else(|| extension_error(StatusCode::BAD_REQUEST, "method is required for Solana analysis"))?;
+
+    if !is_solana_sign_method(method) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Unsupported method for Solana transaction analysis",
+        ));
+    }
+
+    if method != "connect" && method != "wallet_standard_connect" && req.params.is_none() {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "params is required when method is provided",
+        ));
+    }
+
+    let wallet_address = req
+        .wallet_address
+        .clone()
+        .ok_or_else(|| extension_error(StatusCode::BAD_REQUEST, "wallet_address is required"))?;
+
+    if !is_valid_solana_address(&wallet_address) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format for Solana",
+        ));
+    }
+
+    let domain_target = req
+        .domain
+        .clone()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| req.url.clone().filter(|s| !s.trim().is_empty()));
+
+    let mut domain_risk_score = 0i32;
+    let mut site_safety: Option<String> = None;
+    let mut website_scan_payload: Option<Value> = None;
+
+    if let Some(ref target) = domain_target {
+        if let Ok(dapp_eval) =
+            evaluate_dapp_connection(pool, &wallet_address, target, None).await
+        {
+            domain_risk_score = dapp_eval.risk_score;
+            site_safety = Some(site_safety_label(&dapp_eval.safety));
+            website_scan_payload = dapp_eval
+                .website_scan
+                .as_ref()
+                .and_then(|s| serde_json::to_value(s).ok());
+        }
+    }
+
+    let db_programs = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT contract_address
+        FROM scam_reports
+        WHERE contract_address !~* '^0x[0-9a-f]{40}$'
+          AND length(contract_address) >= 32
+        ORDER BY contract_address
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let env_programs = parse_env_malicious_programs();
+    let malicious_programs = merge_malicious_programs(&db_programs, &env_programs);
+
+    let solana = analyze_solana_request(
+        method,
+        req.params.as_deref(),
+        &malicious_programs,
+        domain_risk_score,
+    );
+
+    let score = solana.risk_score;
+    let band = score_to_band(score).to_string();
+    let malicious = solana.malicious_program_detected || score >= 80;
+
+    Ok(Json(json!({
+        "risk_score": score,
+        "riskScore": score,
+        "risk_level_10": risk_level_10(score),
+        "band": band,
+        "findings": solana.findings,
+        "breakdown": solana.breakdown,
+        "recommendation": solana.recommendation,
+        "malicious_contract_detected": malicious,
+        "malicious_program_detected": solana.malicious_program_detected,
+        "reported_incidents": 0,
+        "wallets_drained_estimate": 0,
+        "threat_types": solana.threat_types,
+        "site_safety": site_safety,
+        "site_safe": site_safety.as_deref().map(|s| s == "safe"),
+        "website_scan": website_scan_payload,
+        "correlation": null,
+        "chain_family": "solana",
+        "network": req.network,
+        "url": req.url,
+        "domain": req.domain,
+        "program_ids": solana.program_ids,
+    })))
+}
+
 async fn transaction_analyze(
     State(pool): State<DbPool>,
     axum::Json(raw): axum::Json<Value>,
@@ -1014,6 +1226,11 @@ async fn transaction_analyze(
             StatusCode::BAD_REQUEST,
             "Invalid source. Expected senseiguard_extension",
         ));
+    }
+
+    let chain_family = parse_chain_family(req.chain_family.as_deref());
+    if chain_family == ChainFamily::Solana {
+        return analyze_solana_transaction(&pool, &req).await;
     }
 
     if let Some(method) = req.method.as_deref() {
@@ -1227,33 +1444,21 @@ async fn dapp_connection_check(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<DappConnectionCheckRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
-        return Err(bad_address());
+    let chain_family = parse_chain_family(req.chain_family.as_deref());
+
+    if let Some(ref wallet) = req.wallet_address {
+        let trimmed = wallet.trim();
+        if !trimmed.is_empty() && !is_valid_wallet_address(trimmed, chain_family) {
+            return Err(bad_wallet_address(chain_family));
+        }
     }
-    let settings =
-        match SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address).await {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                let out = build_dapp_check_skipped_with_reason(
-                    "Protection settings not found for wallet. Save settings first.",
-                );
-                return Ok(Json(
-                    serde_json::to_value(&out).unwrap_or(json!({ "skipped": true })),
-                ));
-            }
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "success": false, "error": e.to_string() })),
-                ));
-            }
-        };
-    if !settings.new_dapp_connection_alerts {
-        let out = build_dapp_check_skipped_with_reason("New dApp connection alerts are disabled.");
-        return Ok(Json(
-            serde_json::to_value(&out).unwrap_or(json!({ "skipped": true })),
-        ));
-    }
+
+    let wallet_for_scan = req
+        .wallet_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let target = req
         .url
         .as_deref()
@@ -1266,88 +1471,118 @@ async fn dapp_connection_check(
             )
         })?;
 
-    if let Err(e) = xp_usage_service::charge_wallet_usage(
-        &pool,
-        &req.wallet_address,
-        XpUsageAction::DappCheck,
-        Some(json!({ "target": target })),
-    )
-    .await
-    {
-        return Err(xp_usage_route_error(e));
+    let mut run_side_effects = false;
+    if let Some(wallet_address) = wallet_for_scan {
+        match SenseiguardRepository::get_protection_settings(&pool, wallet_address).await {
+            Ok(Some(settings)) if settings.new_dapp_connection_alerts => {
+                run_side_effects = true;
+                if let Err(e) = xp_usage_service::charge_wallet_usage(
+                    &pool,
+                    wallet_address,
+                    XpUsageAction::DappCheck,
+                    Some(json!({ "target": target, "chain_family": chain_family.as_str() })),
+                )
+                .await
+                {
+                    return Err(xp_usage_route_error(e));
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) if chain_family == ChainFamily::Evm => {
+                let out = build_dapp_extension_response(
+                    true,
+                    None,
+                    Some("Protection settings not found for wallet. Save settings first."),
+                );
+                return Ok(Json(out));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "success": false, "error": e.to_string() })),
+                ));
+            }
+        }
     }
 
-    match evaluate_dapp_connection(&pool, &req.wallet_address, target, req.max_pages).await {
+    let scan_wallet = wallet_for_scan.unwrap_or("11111111111111111111111111111111");
+
+    match evaluate_dapp_connection(&pool, scan_wallet, target, req.max_pages).await {
         Ok(mut r) => {
-            if r.risk_score > 0 {
-                if let Ok(Some(wallet)) =
-                    WalletRepository::get_wallet_by_address(&pool, &req.wallet_address).await
-                {
-                    let domain = normalize_dapp_domain(target);
-                    let confidence = if r.risk_score >= 75 {
-                        84
-                    } else if r.risk_score >= 50 {
-                        74
-                    } else {
-                        62
-                    };
-                    if let Ok(correlation) = ThreatCorrelationService::ingest_signal(
-                        &pool,
-                        ThreatSignalInput {
-                            wallet_id: wallet.id,
-                            threat_id: None,
-                            event_type: "dapp_connection_check".to_string(),
-                            signal_category: "domain".to_string(),
-                            threat_type: Some(if r.phishing_risk {
-                                "frontend_phishing".to_string()
+            if run_side_effects {
+                if let Some(wallet_address) = wallet_for_scan {
+                    if r.risk_score > 0 {
+                        if let Ok(Some(wallet)) =
+                            WalletRepository::get_wallet_by_address(&pool, wallet_address).await
+                        {
+                            let domain = normalize_dapp_domain(target);
+                            let confidence = if r.risk_score >= 75 {
+                                84
+                            } else if r.risk_score >= 50 {
+                                74
                             } else {
-                                "phishing_indicator".to_string()
-                            }),
-                            surface: Some("off_chain".to_string()),
-                            risk_score: r.risk_score,
-                            confidence_score: confidence,
-                            source_contract: None,
-                            domain: domain.clone(),
-                            metadata: json!({
-                                "target": target,
-                                "safety": r.safety.clone(),
-                                "phishing_risk": r.phishing_risk,
-                                "website_scan": r.website_scan.clone()
-                            }),
-                            event_time: None,
-                            kill_chain_stage: Some(kill_chain::LURE.to_string()),
-                        },
-                    )
-                    .await
-                    {
-                        r.correlation = correlation;
+                                62
+                            };
+                            if let Ok(correlation) = ThreatCorrelationService::ingest_signal(
+                                &pool,
+                                ThreatSignalInput {
+                                    wallet_id: wallet.id,
+                                    threat_id: None,
+                                    event_type: "dapp_connection_check".to_string(),
+                                    signal_category: "domain".to_string(),
+                                    threat_type: Some(if r.phishing_risk {
+                                        "frontend_phishing".to_string()
+                                    } else {
+                                        "phishing_indicator".to_string()
+                                    }),
+                                    surface: Some("off_chain".to_string()),
+                                    risk_score: r.risk_score,
+                                    confidence_score: confidence,
+                                    source_contract: None,
+                                    domain: domain.clone(),
+                                    metadata: json!({
+                                        "target": target,
+                                        "safety": r.safety.clone(),
+                                        "phishing_risk": r.phishing_risk,
+                                        "website_scan": r.website_scan.clone(),
+                                        "chain_family": chain_family.as_str()
+                                    }),
+                                    event_time: None,
+                                    kill_chain_stage: Some(kill_chain::LURE.to_string()),
+                                },
+                            )
+                            .await
+                            {
+                                r.correlation = correlation;
+                            }
+                        }
+                    }
+                    if let Some(domain) = normalize_dapp_domain(target) {
+                        let dapp_name = derive_dapp_name(&domain);
+                        let description = r
+                            .website_scan
+                            .as_ref()
+                            .map(|scan| {
+                                format!(
+                                    "Connection checked via SenseiGuard (safety: {}).",
+                                    scan.safety
+                                )
+                            })
+                            .unwrap_or_else(|| "Connection checked via SenseiGuard.".to_string());
+                        let _ = SenseiguardRepository::upsert_dapp_connection(
+                            &pool,
+                            wallet_address,
+                            &domain,
+                            &dapp_name,
+                            Some(&description),
+                            None,
+                        )
+                        .await;
                     }
                 }
             }
-            if let Some(domain) = normalize_dapp_domain(target) {
-                let dapp_name = derive_dapp_name(&domain);
-                let description = r
-                    .website_scan
-                    .as_ref()
-                    .map(|scan| {
-                        format!(
-                            "Connection checked via SenseiGuard (safety: {}).",
-                            scan.safety
-                        )
-                    })
-                    .unwrap_or_else(|| "Connection checked via SenseiGuard.".to_string());
-                let _ = SenseiguardRepository::upsert_dapp_connection(
-                    &pool,
-                    &req.wallet_address,
-                    &domain,
-                    &dapp_name,
-                    Some(&description),
-                    None,
-                )
-                .await;
-            }
-            let out = build_dapp_check_response(false, Some(r));
-            Ok(Json(serde_json::to_value(&out).unwrap_or(json!({}))))
+            Ok(Json(build_dapp_extension_response(false, Some(r), None)))
         }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1608,6 +1843,32 @@ async fn get_threat_feed(
         )
     })?;
 
+    let malicious_programs = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT DISTINCT contract_address
+        FROM scam_reports
+        WHERE contract_address !~* '^0x[0-9a-f]{40}$'
+          AND length(contract_address) >= 32
+        ORDER BY contract_address
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap_or_default();
+
+    let env_programs = parse_env_malicious_programs();
+    let static_programs = static_malicious_programs();
+    let mut program_set: std::collections::HashSet<String> = malicious_programs.into_iter().collect();
+    for p in env_programs {
+        program_set.insert(p);
+    }
+    for p in static_programs {
+        program_set.insert(p);
+    }
+    let mut malicious_programs: Vec<String> = program_set.into_iter().collect();
+    malicious_programs.sort();
+
     let domain_feed = domain_intel_service::get_domain_threat_feed(&pool)
         .await
         .map_err(|_| {
@@ -1617,9 +1878,26 @@ async fn get_threat_feed(
             )
         })?;
 
+    let solana_env_domains = std::env::var("SENSEIGUARD_MALICIOUS_DOMAINS_SOLANA")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|d| d.trim().to_lowercase())
+                .filter(|d| !d.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let malicious_domains_by_family = json!({
+        "evm": domain_feed.malicious_domains,
+        "solana": solana_env_domains,
+    });
+
     Ok(Json(json!({
         "malicious_contracts": malicious_contracts,
         "malicious_domains": domain_feed.malicious_domains,
+        "malicious_programs": malicious_programs,
+        "malicious_domains_by_family": malicious_domains_by_family,
         "trusted_domains": domain_feed.trusted_domains,
         "sources": domain_feed.sources,
         "updated_at": Utc::now(),
@@ -1684,6 +1962,18 @@ async fn ingest_telemetry_events(
     let mut accepted: i64 = 0;
     for ev in req.events {
         accepted += 1;
+        let chain_family = ev
+            .chain_family
+            .as_deref()
+            .or_else(|| {
+                ev.context
+                    .as_ref()
+                    .and_then(|ctx| ctx.get("chain_family").or_else(|| ctx.get("chainFamily")))
+                    .and_then(|v| v.as_str())
+            })
+            .map(|s| parse_chain_family(Some(s)))
+            .unwrap_or(ChainFamily::Evm);
+
         let wallet_from_context = ev
             .context
             .as_ref()
@@ -1692,7 +1982,7 @@ async fn ingest_telemetry_events(
             .map(|s| s.to_string());
 
         if let Some(wallet_address) = wallet_from_context {
-            if is_valid_eth_address(&wallet_address) {
+            if is_valid_wallet_address(&wallet_address, chain_family) {
                 let metadata = json!({
                     "event_type": ev.event_type,
                     "risk_score": ev.risk_score,
@@ -1701,6 +1991,7 @@ async fn ingest_telemetry_events(
                     "findings": ev.findings,
                     "decision": ev.decision,
                     "context": ev.context,
+                    "chain_family": chain_family.as_str(),
                     "at": ev.at,
                 });
                 let _ = crate::services::senseiguard_service::SenseiguardService::ingest_activity(
@@ -1709,7 +2000,10 @@ async fn ingest_telemetry_events(
                     IngestActivityRequest {
                         activity_type: "extension_event".to_string(),
                         title: "Extension telemetry event".to_string(),
-                        description: Some("Telemetry batch ingest".to_string()),
+                        description: Some(format!(
+                            "Telemetry batch ingest ({})",
+                            chain_family.as_str()
+                        )),
                         metadata: Some(metadata),
                     },
                 )
