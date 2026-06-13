@@ -99,6 +99,8 @@ pub struct ActivityMonitorWalletRow {
     pub address: String,
     pub chain_id: i64,
     pub wallet_type: String,
+    pub wallet_provider: Option<String>,
+    pub wallet_name: Option<String>,
     pub connected_at: DateTime<Utc>,
     pub is_active: bool,
     pub user_id: Option<String>,
@@ -125,6 +127,8 @@ pub struct ActivityFeedRowLive {
     pub wallet_id: Uuid,
     pub wallet_address: String,
     pub wallet_type: String,
+    pub wallet_provider: Option<String>,
+    pub wallet_name: Option<String>,
     pub activity_type: String,
     pub title: String,
     pub description: Option<String>,
@@ -139,6 +143,8 @@ pub struct ExtensionTradeInsightRow {
     pub wallet_id: Uuid,
     pub wallet_address: String,
     pub wallet_type: String,
+    pub wallet_provider: Option<String>,
+    pub wallet_name: Option<String>,
     pub chain_id: i64,
     pub activity_type: String,
     pub title: String,
@@ -1109,7 +1115,8 @@ impl SenseiguardRepository {
         let rows = if let Some(uid) = user_id {
             sqlx::query_as::<_, ActivityMonitorWalletRow>(
                 r#"
-                SELECT w.address, w.chain_id, w.wallet_type, w.connected_at, w.is_active, w.user_id,
+                SELECT w.address, w.chain_id, w.wallet_type, w.wallet_provider, w.wallet_name,
+                       w.connected_at, w.is_active, w.user_id,
                        wm.security_score, wm.last_scan_at
                 FROM wallets w
                 LEFT JOIN wallet_monitoring wm ON wm.wallet_id = w.id
@@ -1123,7 +1130,8 @@ impl SenseiguardRepository {
         } else {
             sqlx::query_as::<_, ActivityMonitorWalletRow>(
                 r#"
-                SELECT w.address, w.chain_id, w.wallet_type, w.connected_at, w.is_active, w.user_id,
+                SELECT w.address, w.chain_id, w.wallet_type, w.wallet_provider, w.wallet_name,
+                       w.connected_at, w.is_active, w.user_id,
                        wm.security_score, wm.last_scan_at
                 FROM wallets w
                 LEFT JOIN wallet_monitoring wm ON wm.wallet_id = w.id
@@ -1533,6 +1541,7 @@ impl SenseiguardRepository {
             sqlx::query_as(
                 r#"
                 SELECT af.id, af.wallet_id, w.address AS wallet_address, w.wallet_type,
+                       w.wallet_provider, w.wallet_name,
                        af.activity_type, af.title, af.description, af.metadata, af.created_at
                 FROM activity_feed af
                 JOIN wallets w ON w.id = af.wallet_id
@@ -1550,6 +1559,7 @@ impl SenseiguardRepository {
             sqlx::query_as(
                 r#"
                 SELECT af.id, af.wallet_id, w.address AS wallet_address, w.wallet_type,
+                       w.wallet_provider, w.wallet_name,
                        af.activity_type, af.title, af.description, af.metadata, af.created_at
                 FROM activity_feed af
                 JOIN wallets w ON w.id = af.wallet_id
@@ -1616,6 +1626,8 @@ impl SenseiguardRepository {
                 af.wallet_id,
                 w.address AS wallet_address,
                 w.wallet_type,
+                w.wallet_provider,
+                w.wallet_name,
                 w.chain_id,
                 af.activity_type,
                 af.title,

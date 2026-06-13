@@ -1,7 +1,7 @@
 use crate::db::DbPool;
 use crate::models::wallet::{
-    canonical_eth_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
-    ChainFamily, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
+    canonical_eth_address, is_valid_wallet_address, parse_chain_family, wallet_display_name,
+    ConnectWalletRequest, ChainFamily, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
 };
 use crate::repositories::wallet_repository::WalletRepository;
 use sqlx::Error;
@@ -28,6 +28,8 @@ impl WalletService {
             &addr,
             request.chain_id,
             &request.wallet_type,
+            request.wallet_provider.as_deref(),
+            request.wallet_name.as_deref(),
             request.user_id.as_deref(),
         )
         .await?;
@@ -112,7 +114,11 @@ impl WalletService {
             .map(|w| ConnectedWalletItem {
                 id: w.id,
                 address: w.address,
-                provider: wallet_type_to_provider(&w.wallet_type),
+                provider: wallet_display_name(
+                    &w.wallet_type,
+                    w.wallet_provider.as_deref(),
+                    w.wallet_name.as_deref(),
+                ),
                 currency: chain_id_to_currency(w.chain_id),
                 connected_at: w.connected_at,
             })
@@ -142,25 +148,6 @@ impl WalletService {
         .await?;
 
         Ok(())
-    }
-}
-
-fn wallet_type_to_provider(wallet_type: &str) -> String {
-    match wallet_type.to_lowercase().as_str() {
-        "metamask" => "MetaMask".to_string(),
-        "coinbase" => "Coinbase".to_string(),
-        "trustwallet" => "Trust Wallet".to_string(),
-        "walletconnect" => "WalletConnect".to_string(),
-        "binance" => "Binance".to_string(),
-        "kraken" => "Kraken".to_string(),
-        "bitstamp" => "Bitstamp".to_string(),
-        _ => {
-            let mut s = wallet_type.to_string();
-            if let Some(r) = s.get_mut(0..1) {
-                r.make_ascii_uppercase();
-            }
-            s
-        }
     }
 }
 

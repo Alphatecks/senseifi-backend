@@ -26,7 +26,9 @@
 - **Input validation**  
   - Wallet `address`: must be `0x` + 40 hex chars (Ethereum style).  
   - `chain_id`: must be in `1..=999_999`.  
-  - `wallet_type`: allowlist `metamask`, `coinbase`, `trustwallet` (aliases: `trust`, `trust wallet`), `walletconnect`.  
+  - `wallet_type`: connection method allowlist (`metamask`, `coinbase`, `trustwallet`, `walletconnect`, `binance`, …).  
+  - `wallet_provider`: optional slug for the wallet app (required for WalletConnect when known; any safe `^[a-z0-9_-]{2,32}$` slug accepted).  
+  - `wallet_name`: optional human-readable label from the client (max 64 chars).  
   Path and JSON inputs are validated before use.
 
 - **No sensitive error detail**  

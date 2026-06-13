@@ -15,6 +15,10 @@ pub struct Wallet {
     pub updated_at: DateTime<Utc>,
     /// User who connected this wallet (e.g. auth provider sub). NULL = legacy.
     pub user_id: Option<String>,
+    /// Wallet app slug from WalletConnect metadata or direct connect (e.g. trustwallet, rainbow).
+    pub wallet_provider: Option<String>,
+    /// Human-readable wallet label from the client (e.g. "Trust Wallet").
+    pub wallet_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +34,12 @@ pub struct ConnectWalletRequest {
     /// Solana cluster identifier (e.g. mainnet-beta, devnet). Informational for popup connect.
     #[serde(default)]
     pub network: Option<String>,
+    /// Wallet app slug from WalletConnect `walletInfo` / session peer metadata.
+    #[serde(default)]
+    pub wallet_provider: Option<String>,
+    /// Human-readable wallet name from the client (optional; used for dashboard display).
+    #[serde(default)]
+    pub wallet_name: Option<String>,
 }
 
 /// Supported chain families for multi-chain protection and wallet connect.
@@ -112,6 +122,7 @@ pub const ALLOWED_EVM_WALLET_TYPES: &[&str] = &[
     "trustwallet",
     "trust",
     "walletconnect",
+    "binance",
 ];
 
 /// Canonical stored value for EVM wallet_type (aliases normalized on connect).
@@ -121,8 +132,170 @@ pub fn normalize_evm_wallet_type(wallet_type: &str) -> Option<&'static str> {
         "coinbase" => Some("coinbase"),
         "trustwallet" | "trust wallet" | "trust" => Some("trustwallet"),
         "walletconnect" | "wallet connect" => Some("walletconnect"),
+        "binance" | "binance wallet" | "binancewallet" => Some("binance"),
         _ => None,
     }
+}
+
+/// Max length for stored wallet_provider slug.
+pub const WALLET_PROVIDER_MAX_LEN: usize = 32;
+
+/// Max length for stored wallet_name label.
+pub const WALLET_NAME_MAX_LEN: usize = 64;
+
+/// Safe wallet_provider slug: lowercase alphanumeric, hyphen, underscore.
+pub fn is_valid_wallet_provider_slug(slug: &str) -> bool {
+    let s = slug.trim();
+    (2..=WALLET_PROVIDER_MAX_LEN).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
+/// Normalize a wallet provider string from the client into a storage slug.
+pub fn slugify_wallet_provider(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for c in raw.trim().to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        }
+    }
+    out.truncate(WALLET_PROVIDER_MAX_LEN);
+    out
+}
+
+/// Trim and bound wallet_name; reject control characters.
+pub fn sanitize_wallet_name(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if s.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let mut name = s.to_string();
+    name.truncate(WALLET_NAME_MAX_LEN);
+    Some(name)
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedWalletConnectFields {
+    pub wallet_type: String,
+    pub wallet_provider: Option<String>,
+    pub wallet_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletConnectValidationError {
+    InvalidWalletType,
+    InvalidWalletProvider,
+    InvalidWalletName,
+}
+
+impl WalletConnectValidationError {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::InvalidWalletType => "Invalid wallet_type",
+            Self::InvalidWalletProvider => {
+                "Invalid wallet_provider; use 2-32 lowercase letters, digits, hyphen, or underscore"
+            }
+            Self::InvalidWalletName => "Invalid wallet_name",
+        }
+    }
+}
+
+/// Resolve and validate wallet_type / wallet_provider / wallet_name for connect.
+pub fn resolve_connect_wallet_metadata(
+    chain_family: ChainFamily,
+    wallet_type: &str,
+    wallet_provider: Option<&str>,
+    wallet_name: Option<&str>,
+) -> Result<ResolvedWalletConnectFields, WalletConnectValidationError> {
+    let wallet_name = match sanitize_wallet_name(wallet_name) {
+        Some(n) => Some(n),
+        None if wallet_name.is_some() => return Err(WalletConnectValidationError::InvalidWalletName),
+        None => None,
+    };
+
+    let wallet_type = match chain_family {
+        ChainFamily::Evm => normalize_evm_wallet_type(wallet_type)
+            .ok_or(WalletConnectValidationError::InvalidWalletType)?
+            .to_string(),
+        ChainFamily::Solana => {
+            let wt = wallet_type.trim().to_lowercase();
+            if !ALLOWED_SOLANA_WALLET_TYPES.contains(&wt.as_str()) {
+                return Err(WalletConnectValidationError::InvalidWalletType);
+            }
+            wt
+        }
+    };
+
+    let wallet_provider = match wallet_provider.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => {
+            let slug = slugify_wallet_provider(raw);
+            if !is_valid_wallet_provider_slug(&slug) {
+                return Err(WalletConnectValidationError::InvalidWalletProvider);
+            }
+            Some(slug)
+        }
+        None if wallet_type == "walletconnect" => None,
+        None => Some(wallet_type.clone()),
+    };
+
+    Ok(ResolvedWalletConnectFields {
+        wallet_type,
+        wallet_provider,
+        wallet_name,
+    })
+}
+
+/// UI label for a connected wallet (prefers wallet_name, then provider, then wallet_type).
+pub fn wallet_display_name(
+    wallet_type: &str,
+    wallet_provider: Option<&str>,
+    wallet_name: Option<&str>,
+) -> String {
+    if let Some(name) = wallet_name.map(str::trim).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    if let Some(provider) = wallet_provider.map(str::trim).filter(|s| !s.is_empty()) {
+        return known_wallet_slug_display(provider);
+    }
+    known_wallet_slug_display(wallet_type)
+}
+
+fn known_wallet_slug_display(slug: &str) -> String {
+    match slug.to_ascii_lowercase().as_str() {
+        "metamask" => "MetaMask".to_string(),
+        "coinbase" => "Coinbase Wallet".to_string(),
+        "trustwallet" | "trust" => "Trust Wallet".to_string(),
+        "walletconnect" => "WalletConnect".to_string(),
+        "binance" | "binancewallet" => "Binance Wallet".to_string(),
+        "phantom" => "Phantom".to_string(),
+        "solflare" => "Solflare".to_string(),
+        "backpack" => "Backpack".to_string(),
+        "rainbow" => "Rainbow".to_string(),
+        "rabby" => "Rabby".to_string(),
+        "zerion" => "Zerion".to_string(),
+        "safe" => "Safe".to_string(),
+        "ledger" => "Ledger".to_string(),
+        "okx" | "okxwallet" => "OKX Wallet".to_string(),
+        other if !other.is_empty() => title_case_slug(other),
+        _ => "Wallet".to_string(),
+    }
+}
+
+fn title_case_slug(slug: &str) -> String {
+    slug.split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Allowed Solana wallet types for popup connect.
@@ -144,20 +317,72 @@ pub struct WalletResponse {
     pub address: String,
     pub chain_id: i64,
     pub wallet_type: String,
+    pub wallet_provider: Option<String>,
+    pub wallet_name: Option<String>,
+    pub provider_display: String,
     pub connected_at: DateTime<Utc>,
     pub is_active: bool,
 }
 
 impl From<Wallet> for WalletResponse {
     fn from(wallet: Wallet) -> Self {
+        let provider_display = wallet_display_name(
+            &wallet.wallet_type,
+            wallet.wallet_provider.as_deref(),
+            wallet.wallet_name.as_deref(),
+        );
         WalletResponse {
             id: wallet.id,
             address: wallet.address,
             chain_id: wallet.chain_id,
             wallet_type: wallet.wallet_type,
+            wallet_provider: wallet.wallet_provider,
+            wallet_name: wallet.wallet_name,
+            provider_display,
             connected_at: wallet.connected_at,
             is_active: wallet.is_active,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_wallet_provider_normalizes_names() {
+        assert_eq!(slugify_wallet_provider("Trust Wallet"), "trustwallet");
+        assert_eq!(slugify_wallet_provider("rainbow"), "rainbow");
+    }
+
+    #[test]
+    fn resolve_walletconnect_with_provider() {
+        let resolved = resolve_connect_wallet_metadata(
+            ChainFamily::Evm,
+            "walletconnect",
+            Some("Trust Wallet"),
+            Some("Trust Wallet"),
+        )
+        .expect("valid");
+        assert_eq!(resolved.wallet_type, "walletconnect");
+        assert_eq!(resolved.wallet_provider.as_deref(), Some("trustwallet"));
+        assert_eq!(resolved.wallet_name.as_deref(), Some("Trust Wallet"));
+    }
+
+    #[test]
+    fn resolve_direct_metamask_defaults_provider() {
+        let resolved =
+            resolve_connect_wallet_metadata(ChainFamily::Evm, "metamask", None, None).expect("valid");
+        assert_eq!(resolved.wallet_type, "metamask");
+        assert_eq!(resolved.wallet_provider.as_deref(), Some("metamask"));
+    }
+
+    #[test]
+    fn display_prefers_wallet_name() {
+        assert_eq!(
+            wallet_display_name("walletconnect", Some("rainbow"), Some("Rainbow Wallet")),
+            "Rainbow Wallet"
+        );
     }
 }
 

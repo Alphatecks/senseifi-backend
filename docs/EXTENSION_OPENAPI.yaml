@@ -754,7 +754,16 @@ components:
           minimum: 1
         wallet_type:
           type: string
-          enum: [metamask, coinbase, trustwallet, trust, walletconnect]
+          description: Connection method (e.g. walletconnect for WalletConnect modal, metamask for injected).
+          enum: [metamask, coinbase, trustwallet, trust, walletconnect, binance]
+        wallet_provider:
+          type: string
+          description: Wallet app slug from WalletConnect session metadata (e.g. trustwallet, rainbow). Optional for walletconnect; auto-set for direct connects.
+          pattern: '^[a-z0-9_-]{2,32}$'
+        wallet_name:
+          type: string
+          description: Human-readable wallet label from the client (e.g. Trust Wallet).
+          maxLength: 64
         user_id:
           type: string
 

@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::clients::moralis_wallet;
 use crate::db::DbPool;
 use crate::models::senseiguard::{CommunityReportedThreatItem, IngestActivityRequest};
-use crate::models::wallet::is_valid_eth_address;
+use crate::models::wallet::{is_valid_eth_address, wallet_display_name};
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
@@ -619,7 +619,11 @@ async fn extension_trade_insights(
             ExtensionTradeInsightItem {
                 id: row.id.to_string(),
                 wallet_or_dapp: extension_wallet_or_dapp(
-                    row.wallet_type.as_str(),
+                    &wallet_display_name(
+                        row.wallet_type.as_str(),
+                        row.wallet_provider.as_deref(),
+                        row.wallet_name.as_deref(),
+                    ),
                     row.metadata.as_ref(),
                 ),
                 network: chain_id_to_network_name(row.chain_id),
@@ -919,7 +923,7 @@ fn parse_period_to_since(period: &str) -> Option<DateTime<Utc>> {
         .map(|d| Utc::now() - Duration::days(d.clamp(1, 365)))
 }
 
-fn extension_wallet_or_dapp(wallet_type: &str, metadata: Option<&Value>) -> String {
+fn extension_wallet_or_dapp(wallet_label: &str, metadata: Option<&Value>) -> String {
     let dapp = metadata
         .and_then(|m| m.get("dapp_name"))
         .and_then(Value::as_str)
@@ -936,25 +940,7 @@ fn extension_wallet_or_dapp(wallet_type: &str, metadata: Option<&Value>) -> Stri
     if let Some(cp) = counterparty {
         return cp.to_string();
     }
-    wallet_type_to_display(wallet_type)
-}
-
-fn wallet_type_to_display(wallet_type: &str) -> String {
-    match wallet_type.to_ascii_lowercase().as_str() {
-        "metamask" => "MetaMask Wallet".to_string(),
-        "coinbase" => "Coinbase Wallet".to_string(),
-        "trust" | "trust wallet" | "trustwallet" => "Trust Wallet".to_string(),
-        "walletconnect" => "WalletConnect".to_string(),
-        "ledger" => "Ledger Wallet".to_string(),
-        other if !other.is_empty() => {
-            let mut s = other.to_string();
-            if let Some(first) = s.get_mut(0..1) {
-                first.make_ascii_uppercase();
-            }
-            format!("{s} Wallet")
-        }
-        _ => "Wallet".to_string(),
-    }
+    wallet_label.to_string()
 }
 
 fn extension_activity_type_label(activity_type: &str) -> String {
@@ -2045,13 +2031,12 @@ async fn list_unread_alerts(
                 .await
                 .ok()
                 .flatten()
-                .map(|w| match w.wallet_type.to_lowercase().as_str() {
-                    "metamask" => "MetaMask".to_string(),
-                    "coinbase" => "Coinbase".to_string(),
-                    "trustwallet" => "Trust Wallet".to_string(),
-                    "binance" => "Binance".to_string(),
-                    s if !s.is_empty() => s[..1].to_uppercase() + &s[1..],
-                    _ => "Wallet".to_string(),
+                .map(|w| {
+                    wallet_display_name(
+                        &w.wallet_type,
+                        w.wallet_provider.as_deref(),
+                        w.wallet_name.as_deref(),
+                    )
                 })
                 .unwrap_or_else(|| "Wallet".to_string());
             Ok(Json(json!({

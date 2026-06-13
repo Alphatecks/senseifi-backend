@@ -10,16 +10,20 @@ impl WalletRepository {
         address: &str,
         chain_id: i64,
         wallet_type: &str,
+        wallet_provider: Option<&str>,
+        wallet_name: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<Wallet, Error> {
         let wallet = sqlx::query_as::<_, Wallet>(
             r#"
-            INSERT INTO wallets (address, chain_id, wallet_type, connected_at, is_active, user_id)
-            VALUES ($1, $2, $3, NOW(), true, $4)
+            INSERT INTO wallets (address, chain_id, wallet_type, wallet_provider, wallet_name, connected_at, is_active, user_id)
+            VALUES ($1, $2, $3, $4, $5, NOW(), true, $6)
             ON CONFLICT (address)
             DO UPDATE SET
                 chain_id = EXCLUDED.chain_id,
                 wallet_type = EXCLUDED.wallet_type,
+                wallet_provider = EXCLUDED.wallet_provider,
+                wallet_name = EXCLUDED.wallet_name,
                 is_active = true,
                 user_id = EXCLUDED.user_id,
                 updated_at = NOW()
@@ -29,6 +33,8 @@ impl WalletRepository {
         .bind(address)
         .bind(chain_id)
         .bind(wallet_type)
+        .bind(wallet_provider)
+        .bind(wallet_name)
         .bind(user_id)
         .fetch_one(pool)
         .await?;

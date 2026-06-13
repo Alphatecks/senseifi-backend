@@ -14,8 +14,7 @@ use crate::db::DbPool;
 use crate::models::wallet::{
     is_valid_eth_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
     ChainFamily, ALLOWED_EVM_WALLET_TYPES, ALLOWED_SOLANA_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
-    normalize_evm_wallet_type,
-    SOLANA_MAINNET_CHAIN_ID,
+    resolve_connect_wallet_metadata, WalletConnectValidationError, SOLANA_MAINNET_CHAIN_ID,
 };
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -73,41 +72,40 @@ async fn connect_wallet(
         ));
     }
 
-    let wt_raw = request.wallet_type.to_lowercase();
-    let wt = match chain_family {
-        ChainFamily::Evm => match normalize_evm_wallet_type(&wt_raw) {
-            Some(canonical) => canonical.to_string(),
-            None => {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "success": false,
-                        "message": format!(
-                            "Invalid wallet_type; allowed for {}: {}",
-                            chain_family.as_str(),
-                            ALLOWED_EVM_WALLET_TYPES.join(", ")
-                        ),
-                        "error": "Invalid wallet_type"
-                    })),
-                ));
-            }
-        },
-        ChainFamily::Solana => {
-            if !ALLOWED_SOLANA_WALLET_TYPES.contains(&wt_raw.as_str()) {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "success": false,
-                        "message": format!(
-                            "Invalid wallet_type; allowed for {}: {}",
-                            chain_family.as_str(),
-                            ALLOWED_SOLANA_WALLET_TYPES.join(", ")
-                        ),
-                        "error": "Invalid wallet_type"
-                    })),
-                ));
-            }
-            wt_raw
+    let resolved = match resolve_connect_wallet_metadata(
+        chain_family,
+        &request.wallet_type,
+        request.wallet_provider.as_deref(),
+        request.wallet_name.as_deref(),
+    ) {
+        Ok(fields) => fields,
+        Err(WalletConnectValidationError::InvalidWalletType) => {
+            let allowed = match chain_family {
+                ChainFamily::Evm => ALLOWED_EVM_WALLET_TYPES.join(", "),
+                ChainFamily::Solana => ALLOWED_SOLANA_WALLET_TYPES.join(", "),
+            };
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "message": format!(
+                        "Invalid wallet_type; allowed for {}: {}",
+                        chain_family.as_str(),
+                        allowed
+                    ),
+                    "error": WalletConnectValidationError::InvalidWalletType.message()
+                })),
+            ));
+        }
+        Err(err) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "message": err.message(),
+                    "error": err.message()
+                })),
+            ));
         }
     };
 
@@ -144,7 +142,9 @@ async fn connect_wallet(
     };
 
     let mut req = request;
-    req.wallet_type = wt.clone();
+    req.wallet_type = resolved.wallet_type;
+    req.wallet_provider = resolved.wallet_provider;
+    req.wallet_name = resolved.wallet_name;
     req.chain_id = effective_chain_id;
 
     // If frontend doesn't send user_id, create/get dashboard user (random user_id, display_name, user_number).

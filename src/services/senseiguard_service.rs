@@ -17,6 +17,7 @@ use crate::repositories::senseiguard_repository::{
     ActivityFeedRowLive, SenseiguardRepository, ThreatDetectionRow,
 };
 use crate::repositories::wallet_repository::WalletRepository;
+use crate::models::wallet::wallet_display_name;
 use crate::services::protection_engine;
 use crate::services::threat_scoring_v2::{ThreatScoringV2, SCORING_MODEL_V2};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
@@ -1990,7 +1991,11 @@ impl SenseiguardService {
                 let last_dt = r.last_scan_at.unwrap_or(r.connected_at);
                 ActivityMonitorWalletResponse {
                     address: r.address,
-                    wallet_type_display: wallet_type_to_display(&r.wallet_type),
+                    wallet_type_display: wallet_display_name(
+                        &r.wallet_type,
+                        r.wallet_provider.as_deref(),
+                        r.wallet_name.as_deref(),
+                    ),
                     chain_id: r.chain_id,
                     chain_name: Self::activity_monitor_chain_name(r.chain_id),
                     status: if r.is_active { "Active" } else { "Inactive" }.to_string(),
@@ -2112,18 +2117,11 @@ impl SenseiguardService {
         let activity =
             SenseiguardRepository::list_activity(pool, wallet.id, activity_limit).await?;
 
-        let provider = match wallet.wallet_type.to_lowercase().as_str() {
-            "metamask" => "MetaMask".to_string(),
-            "coinbase" => "Coinbase".to_string(),
-            "trustwallet" => "Trust Wallet".to_string(),
-            _ => {
-                let mut s = wallet.wallet_type.clone();
-                if let Some(r) = s.get_mut(0..1) {
-                    r.make_ascii_uppercase();
-                }
-                s
-            }
-        };
+        let provider = wallet_display_name(
+            &wallet.wallet_type,
+            wallet.wallet_provider.as_deref(),
+            wallet.wallet_name.as_deref(),
+        );
         let network = chain_id_to_network(wallet.chain_id);
         let security_status = match security.status.as_str() {
             "strong" => "Secured",
@@ -2186,7 +2184,11 @@ fn chain_id_to_network(chain_id: i64) -> String {
 }
 
 fn row_to_live_feed_item(r: ActivityFeedRowLive) -> LiveActivityFeedItem {
-    let wallet = wallet_type_to_display(&r.wallet_type);
+    let wallet = wallet_display_name(
+        &r.wallet_type,
+        r.wallet_provider.as_deref(),
+        r.wallet_name.as_deref(),
+    );
     let type_display = activity_type_to_display(&r.activity_type);
     let (asset, amount, counterparty, risk_level, status) =
         r.metadata
@@ -2217,25 +2219,6 @@ fn row_to_live_feed_item(r: ActivityFeedRowLive) -> LiveActivityFeedItem {
         status,
         title: r.title,
         description: r.description,
-    }
-}
-
-fn wallet_type_to_display(wt: &str) -> String {
-    match wt.to_lowercase().as_str() {
-        "metamask" => "MetaMask".to_string(),
-        "coinbase" => "Coinbase".to_string(),
-        "binance" => "Binance".to_string(),
-        "walletconnect" => "WalletConnect".to_string(),
-        "kraken" => "Kraken".to_string(),
-        "trust wallet" | "trust" | "trustwallet" => "Trust Wallet".to_string(),
-        "gemini" => "Gemini".to_string(),
-        _ => {
-            let mut s = wt.to_string();
-            if let Some(r) = s.get_mut(0..1) {
-                r.make_ascii_uppercase();
-            }
-            s
-        }
     }
 }
 
