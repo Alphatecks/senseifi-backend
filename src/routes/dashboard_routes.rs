@@ -14,7 +14,7 @@ use uuid::Uuid;
 use crate::clients::moralis_wallet;
 use crate::db::DbPool;
 use crate::models::senseiguard::{CommunityReportedThreatItem, IngestActivityRequest};
-use crate::models::wallet::{is_valid_eth_address, wallet_display_name};
+use crate::models::wallet::{is_valid_dashboard_wallet_address, is_valid_eth_address, wallet_display_name};
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
@@ -1308,7 +1308,7 @@ async fn dashboard_summary(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::dashboard_summary(&pool, &address).await {
@@ -2366,7 +2366,7 @@ async fn list_assets(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::list_assets(&pool, &address).await {
@@ -2392,7 +2392,7 @@ async fn sync_wallet_indexed_tokens(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     if !moralis_wallet::has_moralis_config() {

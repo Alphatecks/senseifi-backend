@@ -1746,6 +1746,20 @@ impl SenseiguardRepository {
         .await
     }
 
+    /// Remove all indexed rows for one chain (native + SPL) before re-syncing.
+    pub async fn delete_all_assets_for_chain(
+        pool: &DbPool,
+        wallet_id: Uuid,
+        chain_id: i32,
+    ) -> Result<u64, Error> {
+        let r = sqlx::query("DELETE FROM wallet_assets WHERE wallet_id = $1 AND chain_id = $2")
+            .bind(wallet_id)
+            .bind(chain_id)
+            .execute(pool)
+            .await?;
+        Ok(r.rows_affected())
+    }
+
     /// Remove Moralis-synced rows for one chain before re-inserting (avoids stale tokens).
     pub async fn delete_indexed_assets_for_chain(
         pool: &DbPool,

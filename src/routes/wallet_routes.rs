@@ -12,7 +12,7 @@ use sqlx::Error;
 use crate::clients::{etherscan, rpc};
 use crate::db::DbPool;
 use crate::models::wallet::{
-    is_valid_eth_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
+    is_valid_eth_address, is_valid_dashboard_wallet_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
     ChainFamily, ALLOWED_EVM_WALLET_TYPES, ALLOWED_SOLANA_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
     resolve_connect_wallet_metadata, WalletConnectValidationError, SOLANA_MAINNET_CHAIN_ID,
 };
@@ -355,7 +355,7 @@ async fn get_connected_wallet_modal(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_request_address());
     }
     const ACTIVITY_LIMIT: i64 = 20;

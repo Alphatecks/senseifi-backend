@@ -104,7 +104,21 @@ Indexed token balances are stored in **`wallet_assets`** and included in **`GET 
 
 **On-demand sync:** `POST /api/dashboard/:address/assets/sync` — uses Moralis `chain` as **hex** (e.g. `0x38` for BSC), **`exclude_native=true`**, and skips `native_token` rows so **gas-token USD is not double-counted** (native remains from RPC in `native_usd` / `total_asset_usd`). Paginates with `cursor` until exhausted. Respect Moralis rate limits; add a cron or debounce on the client if needed.
 
-**`total_asset_usd` / modal `total_usd`:** Portfolio headline uses **per-chain deduping**: if the same chain has both RPC **native** balance USD and the **wrapped** gas token (WETH, WBNB, WMATIC, …) in `wallet_assets`, only **`max(native, wrapped)`** counts for that chain’s gas position (aligned with typical MetaMask-style totals). Sub-fields `wallet_assets_usd` and `native_usd` are still raw sums and can overlap — **do not add them** to reconstruct the headline; use `total_asset_usd` / `total_usd` only.
+### Solana SOL + SPL token balances (Moralis)
+
+Solana-connected wallets sync **native SOL** and **SPL tokens** via the [Moralis Solana gateway](https://docs.moralis.io/web3-data-api/solana). EVM behavior above is unchanged.
+
+- **`MORALIS_API_KEY`** (required): same key as EVM Moralis.
+- **`MORALIS_SOLANA_API_BASE_URL`** (optional): default `https://solana-gateway.moralis.io`.
+- **`SOLANA_NETWORK`** (optional): server default when a wallet row has no stored network (`mainnet` or `devnet`; default `mainnet`).
+
+**Connect (Solana):** `POST /api/wallets/connect` with `chain_family: "solana"`, `chain_id: 101`, and `network: "mainnet-beta"` or `"devnet"`. The backend normalizes `mainnet-beta` → `mainnet` and persists `wallets.network`.
+
+**On-demand sync:** After connect, call `POST /api/dashboard/{solanaAddress}/assets/sync`. The backend fetches Moralis `/account/{network}/{address}/balance` (SOL) and `/account/{network}/{address}/tokens` (SPL), stores rows in **`wallet_assets`** with `chain_id: 101`. Native SOL uses `contract_address: "native"`, `symbol: "SOL"`.
+
+**Read paths (Solana-aware):** `GET /api/dashboard/{address}/assets`, `GET /api/dashboard/{address}/summary`, and `GET /api/wallets/{address}/modal` accept Solana base58 addresses. Solana totals come from synced `wallet_assets` only (no EVM RPC `eth_getBalance`).
+
+**`total_asset_usd` / modal `total_usd`:** Portfolio headline uses **per-chain deduping**: if the same chain has both RPC **native** balance USD and the **wrapped** gas token (WETH, WBNB, WMATIC, …) in `wallet_assets`, only **`max(native, wrapped)`** counts for that chain’s gas position (aligned with typical MetaMask-style totals). Sub-fields `wallet_assets_usd` and `native_usd` are still raw sums and can overlap — **do not add them** to reconstruct the headline; use `total_asset_usd` / `total_usd` only. For Solana wallets, `native_balance_eth` / `native_usd` reflect the synced SOL row.
 
 ### Native token USD price (optional)
 

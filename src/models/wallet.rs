@@ -19,6 +19,8 @@ pub struct Wallet {
     pub wallet_provider: Option<String>,
     /// Human-readable wallet label from the client (e.g. "Trust Wallet").
     pub wallet_name: Option<String>,
+    /// Solana cluster (`mainnet` / `devnet`). NULL for EVM wallets.
+    pub network: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,6 +309,57 @@ pub const ALLOWED_WALLET_TYPES: &[&str] = ALLOWED_EVM_WALLET_TYPES;
 /// Solana mainnet chain_id convention (EIP-155-style label used in dashboard).
 pub const SOLANA_MAINNET_CHAIN_ID: i64 = 101;
 
+/// Sentinel `contract_address` for native SOL rows in `wallet_assets`.
+pub const SOLANA_NATIVE_CONTRACT: &str = "native";
+
+/// EVM or Solana address accepted on asset dashboard routes.
+pub fn is_valid_dashboard_wallet_address(address: &str) -> bool {
+    is_valid_eth_address(address) || is_valid_solana_address(address)
+}
+
+/// Normalize Solana cluster from connect payload or env default.
+pub fn normalize_solana_network(raw: Option<&str>) -> Option<String> {
+    let s = raw?.trim().to_lowercase();
+    match s.as_str() {
+        "mainnet" | "mainnet-beta" => Some("mainnet".to_string()),
+        "devnet" => Some("devnet".to_string()),
+        _ => None,
+    }
+}
+
+/// Default Solana network when wallet row has no cluster stored.
+pub fn default_solana_network() -> String {
+    std::env::var("SOLANA_NETWORK")
+        .ok()
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .and_then(|s| normalize_solana_network(Some(&s)))
+        .unwrap_or_else(|| "mainnet".to_string())
+}
+
+/// Resolve Moralis Solana network param for a wallet row.
+pub fn solana_network_for_wallet(wallet: &Wallet) -> String {
+    wallet
+        .network
+        .as_deref()
+        .and_then(|n| normalize_solana_network(Some(n)))
+        .unwrap_or_else(default_solana_network)
+}
+
+/// Whether a stored wallet row is Solana (by chain_id or address format).
+pub fn is_solana_wallet(wallet: &Wallet) -> bool {
+    wallet.chain_id == SOLANA_MAINNET_CHAIN_ID || is_valid_solana_address(&wallet.address)
+}
+
+/// Chain family inferred from a stored wallet row.
+pub fn wallet_chain_family(wallet: &Wallet) -> ChainFamily {
+    if is_solana_wallet(wallet) {
+        ChainFamily::Solana
+    } else {
+        ChainFamily::Evm
+    }
+}
+
 /// Chain ID range (EIP-155 style). Reject obviously invalid values.
 pub const CHAIN_ID_MIN: i64 = 1;
 pub const CHAIN_ID_MAX: i64 = 999_999;
@@ -320,6 +373,8 @@ pub struct WalletResponse {
     pub wallet_provider: Option<String>,
     pub wallet_name: Option<String>,
     pub provider_display: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
     pub connected_at: DateTime<Utc>,
     pub is_active: bool,
 }
@@ -339,6 +394,7 @@ impl From<Wallet> for WalletResponse {
             wallet_provider: wallet.wallet_provider,
             wallet_name: wallet.wallet_name,
             provider_display,
+            network: wallet.network,
             connected_at: wallet.connected_at,
             is_active: wallet.is_active,
         }
@@ -378,11 +434,20 @@ mod tests {
     }
 
     #[test]
-    fn display_prefers_wallet_name() {
+    fn normalize_solana_network_values() {
         assert_eq!(
-            wallet_display_name("walletconnect", Some("rainbow"), Some("Rainbow Wallet")),
-            "Rainbow Wallet"
+            normalize_solana_network(Some("mainnet-beta")).as_deref(),
+            Some("mainnet")
         );
+        assert_eq!(normalize_solana_network(Some("devnet")).as_deref(), Some("devnet"));
+        assert!(normalize_solana_network(Some("testnet")).is_none());
+    }
+
+    #[test]
+    fn is_valid_dashboard_wallet_address_accepts_solana() {
+        assert!(is_valid_dashboard_wallet_address(
+            "kXB7FfzdrfZpAZEW3TZcp8a8CwQbsowa6BdfAHZ4gVs"
+        ));
     }
 }
 

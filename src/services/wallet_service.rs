@@ -1,7 +1,8 @@
 use crate::db::DbPool;
 use crate::models::wallet::{
-    canonical_eth_address, is_valid_wallet_address, parse_chain_family, wallet_display_name,
-    ConnectWalletRequest, ChainFamily, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
+    canonical_eth_address, is_valid_wallet_address, normalize_solana_network, parse_chain_family,
+    wallet_display_name, ConnectWalletRequest, ChainFamily, ConnectedWalletItem, WalletResponse,
+    WalletStatusResponse,
 };
 use crate::repositories::wallet_repository::WalletRepository;
 use sqlx::Error;
@@ -22,6 +23,10 @@ impl WalletService {
             ChainFamily::Evm => canonical_eth_address(&request.address),
             ChainFamily::Solana => request.address.clone(),
         };
+        let network = match chain_family {
+            ChainFamily::Solana => normalize_solana_network(request.network.as_deref()),
+            ChainFamily::Evm => None,
+        };
         // Create or update wallet (user_id scopes dashboard to this user)
         let wallet = WalletRepository::create_wallet(
             pool,
@@ -30,6 +35,7 @@ impl WalletService {
             &request.wallet_type,
             request.wallet_provider.as_deref(),
             request.wallet_name.as_deref(),
+            network.as_deref(),
             request.user_id.as_deref(),
         )
         .await?;
@@ -163,6 +169,7 @@ fn chain_id_to_currency(chain_id: i64) -> String {
         250 => "Fantom".to_string(),
         5 => "Goerli".to_string(),
         11155111 => "Sepolia".to_string(),
+        101 => "Solana".to_string(),
         _ => format!("Chain {}", chain_id),
     }
 }

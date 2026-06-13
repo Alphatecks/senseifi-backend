@@ -1,4 +1,4 @@
-use crate::clients::{moralis_wallet, native_price, rpc};
+use crate::clients::{moralis_solana, moralis_wallet, native_price, rpc};
 use crate::db::DbPool;
 use crate::models::senseiguard::{
     threat_types, ActiveAlertsOverview, ActiveThreatsCard, ActivityFeedItem,
@@ -17,7 +17,10 @@ use crate::repositories::senseiguard_repository::{
     ActivityFeedRowLive, SenseiguardRepository, ThreatDetectionRow,
 };
 use crate::repositories::wallet_repository::WalletRepository;
-use crate::models::wallet::wallet_display_name;
+use crate::models::wallet::{
+    is_solana_wallet, solana_network_for_wallet, wallet_display_name, SOLANA_MAINNET_CHAIN_ID,
+    SOLANA_NATIVE_CONTRACT,
+};
 use crate::services::protection_engine;
 use crate::services::threat_scoring_v2::{ThreatScoringV2, SCORING_MODEL_V2};
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
@@ -882,10 +885,42 @@ impl SenseiguardService {
             SenseiguardRepository::count_scans_previous_period(pool, wallet_id).await?;
         let total_db_usd = SenseiguardRepository::total_asset_usd(pool, wallet_id).await?;
         let db_asset_rows = SenseiguardRepository::list_assets(pool, wallet_id).await?;
-        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
-        let total_asset_usd =
-            Self::portfolio_total_usd_deduped(&db_asset_rows, &agg, wallet.chain_id);
-        let (rpc_err, pricing_err, price_src) = Self::aggregate_summary_errors(&agg);
+
+        let (
+            total_asset_usd,
+            native_balance_eth,
+            native_usd,
+            native_price_source,
+            rpc_error,
+            native_pricing_error,
+            native_per_chain,
+        ) = if is_solana_wallet(&wallet) {
+            let (sol_balance, sol_usd) = sol_native_metrics(&db_asset_rows);
+            (
+                total_db_usd.max(0.0),
+                sol_balance,
+                sol_usd,
+                Some("moralis".to_string()),
+                None,
+                None,
+                vec![],
+            )
+        } else {
+            let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+            let total =
+                Self::portfolio_total_usd_deduped(&db_asset_rows, &agg, wallet.chain_id);
+            let (rpc_err, pricing_err, price_src) = Self::aggregate_summary_errors(&agg);
+            (
+                total,
+                agg.primary.native_balance_eth,
+                agg.total_usd,
+                price_src,
+                rpc_err,
+                pricing_err,
+                agg.per_chain,
+            )
+        };
+
         let unread_alerts = SenseiguardRepository::unread_alerts_count(pool, wallet_id).await?;
         let high_risk_alerts =
             SenseiguardRepository::high_risk_alerts_count(pool, wallet_id).await?;
@@ -906,14 +941,12 @@ impl SenseiguardService {
             total_asset_usd: format!("{:.2}", total_asset_usd),
             total_asset_trend_percent: 0.0, // no historical asset snapshots in DB
             wallet_assets_usd: total_db_usd,
-            // Legacy: native on DB `chain_id` only (e.g. Ethereum 0 while BNB lives on 56).
-            native_balance_eth: agg.primary.native_balance_eth,
-            // Total native USD across all scanned chains with RPC.
-            native_usd: agg.total_usd,
-            native_price_source: price_src,
-            rpc_error: rpc_err,
-            native_pricing_error: pricing_err,
-            native_per_chain: agg.per_chain,
+            native_balance_eth,
+            native_usd,
+            native_price_source,
+            rpc_error,
+            native_pricing_error,
+            native_per_chain,
             unread_alerts,
             high_risk_alerts,
             alerts_trend_percent: Self::change_percent(alerts_created_this, alerts_created_prev),
@@ -1471,14 +1504,90 @@ impl SenseiguardService {
             .await?
             .ok_or(Error::RowNotFound)?;
         let mut assets = SenseiguardRepository::list_assets(pool, wallet.id).await?;
-        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
-        Self::merge_live_native_into_assets(&mut assets, wallet.id, wallet.chain_id, &agg);
+        if !is_solana_wallet(&wallet) {
+            let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+            Self::merge_live_native_into_assets(&mut assets, wallet.id, wallet.chain_id, &agg);
+        }
         assets.sort_by(|a, b| {
             b.usd_value
                 .partial_cmp(&a.usd_value)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         Ok(assets)
+    }
+
+    async fn sync_solana_wallet_assets(
+        pool: &DbPool,
+        wallet: &crate::models::wallet::Wallet,
+    ) -> Result<Vec<IndexedTokenSyncChainOutcome>, Error> {
+        let wallet_id = wallet.id;
+        let chain_id = SOLANA_MAINNET_CHAIN_ID as i32;
+        let network = solana_network_for_wallet(wallet);
+        let address = wallet.address.as_str();
+
+        let native = moralis_solana::fetch_native_balance(address, &network).await;
+        let spl = moralis_solana::fetch_spl_tokens(address, &network).await;
+
+        match (&native, &spl) {
+            (Err(e1), Err(e2)) => {
+                return Ok(vec![IndexedTokenSyncChainOutcome {
+                    chain_id: SOLANA_MAINNET_CHAIN_ID as u64,
+                    status: "error".to_string(),
+                    tokens_upserted: 0,
+                    detail: Some(format!("native: {e1}; spl: {e2}")),
+                }]);
+            }
+            _ => {}
+        }
+
+        SenseiguardRepository::delete_all_assets_for_chain(pool, wallet_id, chain_id).await?;
+
+        let mut n: u32 = 0;
+        if let Ok(ref native) = native {
+            SenseiguardRepository::upsert_indexed_token(
+                pool,
+                wallet_id,
+                chain_id,
+                SOLANA_NATIVE_CONTRACT,
+                "SOL",
+                "Solana",
+                &native.balance_display,
+                native.usd_value,
+                0.0,
+            )
+            .await?;
+            n = n.saturating_add(1);
+        }
+        if let Ok(ref tokens) = spl {
+            for t in tokens {
+                SenseiguardRepository::upsert_indexed_token(
+                    pool,
+                    wallet_id,
+                    chain_id,
+                    &t.mint,
+                    &t.symbol,
+                    &t.name,
+                    &t.balance_display,
+                    t.usd_value,
+                    0.0,
+                )
+                .await?;
+                n = n.saturating_add(1);
+            }
+        }
+
+        let detail = match (native.as_ref().err(), spl.as_ref().err()) {
+            (Some(e), None) => Some(format!("SPL ok; native error: {e}")),
+            (None, Some(e)) => Some(format!("native ok; SPL error: {e}")),
+            _ => None,
+        };
+
+        Ok(vec![IndexedTokenSyncChainOutcome {
+            chain_id: SOLANA_MAINNET_CHAIN_ID as u64,
+            status: "ok".to_string(),
+            tokens_upserted: n,
+            detail,
+        }])
     }
 
     /// Moralis aggregated token balances → `wallet_assets` (per chain: delete indexed rows, then upsert).
@@ -1489,6 +1598,11 @@ impl SenseiguardService {
         let wallet = WalletRepository::get_wallet_by_address(pool, address)
             .await?
             .ok_or(Error::RowNotFound)?;
+
+        if is_solana_wallet(&wallet) {
+            return Self::sync_solana_wallet_assets(pool, &wallet).await;
+        }
+
         let wallet_id = wallet.id;
         let ids = Self::merge_wallet_chain_id(
             Self::default_token_balance_scan_chain_ids(),
@@ -2103,16 +2217,47 @@ impl SenseiguardService {
             0.0
         };
 
-        let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
-        let (_, pricing_err, _) = Self::aggregate_summary_errors(&agg);
-        let total_usd = Self::portfolio_total_usd_deduped(&assets, &agg, wallet.chain_id);
-        Self::merge_live_native_into_assets(&mut assets, wallet.id, wallet.chain_id, &agg);
-        assets.sort_by(|a, b| {
-            b.usd_value
-                .partial_cmp(&a.usd_value)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let primary = &agg.primary;
+        let (
+            total_usd,
+            native_balance_eth,
+            native_usd,
+            native_balance_wei,
+            native_price_source,
+            rpc_error,
+            native_pricing_error,
+            native_per_chain,
+        ) = if is_solana_wallet(&wallet) {
+            let (sol_balance, sol_usd) = sol_native_metrics(&assets);
+            (wallet_assets_usd.max(0.0), sol_balance, sol_usd, "0".to_string(), Some("moralis".to_string()), None, None, vec![])
+        } else {
+            let agg = Self::multi_chain_native_aggregate(address, wallet.chain_id).await;
+            let (_, pricing_err, _) = Self::aggregate_summary_errors(&agg);
+            let total = Self::portfolio_total_usd_deduped(&assets, &agg, wallet.chain_id);
+            Self::merge_live_native_into_assets(&mut assets, wallet.id, wallet.chain_id, &agg);
+            assets.sort_by(|a, b| {
+                b.usd_value
+                    .partial_cmp(&a.usd_value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            (
+                total,
+                agg.primary.native_balance_eth,
+                agg.total_usd,
+                agg.primary.native_balance_wei.clone(),
+                agg.primary.price_source.clone(),
+                agg.primary.rpc_error.clone(),
+                pricing_err.or_else(|| agg.primary.pricing_error.clone()),
+                agg.per_chain,
+            )
+        };
+
+        if is_solana_wallet(&wallet) {
+            assets.sort_by(|a, b| {
+                b.usd_value
+                    .partial_cmp(&a.usd_value)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
 
         let activity =
             SenseiguardRepository::list_activity(pool, wallet.id, activity_limit).await?;
@@ -2122,7 +2267,7 @@ impl SenseiguardService {
             wallet.wallet_provider.as_deref(),
             wallet.wallet_name.as_deref(),
         );
-        let network = chain_id_to_network(wallet.chain_id);
+        let network = solana_network_label(&wallet);
         let security_status = match security.status.as_str() {
             "strong" => "Secured",
             "moderate" => "Moderate",
@@ -2147,13 +2292,13 @@ impl SenseiguardService {
             balance: ConnectedWalletModalBalance {
                 total_usd,
                 wallet_assets_usd,
-                native_balance_eth: primary.native_balance_eth,
-                native_usd: agg.total_usd,
-                native_balance_wei: primary.native_balance_wei.clone(),
-                native_price_source: primary.price_source.clone(),
-                rpc_error: primary.rpc_error.clone(),
-                native_pricing_error: pricing_err.or_else(|| primary.pricing_error.clone()),
-                native_per_chain: agg.per_chain,
+                native_balance_eth,
+                native_usd,
+                native_balance_wei,
+                native_price_source,
+                rpc_error,
+                native_pricing_error,
+                native_per_chain,
                 assets,
             },
             security: ConnectedWalletModalSecurity {
@@ -2179,7 +2324,33 @@ fn chain_id_to_network(chain_id: i64) -> String {
         10 => "Optimism".to_string(),
         5 => "Goerli".to_string(),
         11155111 => "Sepolia".to_string(),
+        101 => "Solana Mainnet".to_string(),
         _ => format!("Chain {}", chain_id),
+    }
+}
+
+fn solana_network_label(wallet: &crate::models::wallet::Wallet) -> String {
+    if is_solana_wallet(wallet) {
+        match wallet.network.as_deref() {
+            Some("devnet") => "Solana Devnet".to_string(),
+            _ => "Solana Mainnet".to_string(),
+        }
+    } else {
+        chain_id_to_network(wallet.chain_id)
+    }
+}
+
+fn sol_native_metrics(assets: &[WalletAsset]) -> (f64, f64) {
+    let cid = SOLANA_MAINNET_CHAIN_ID as i32;
+    let row = assets.iter().find(|a| {
+        a.contract_address.as_deref() == Some(SOLANA_NATIVE_CONTRACT) && a.chain_id == Some(cid)
+    });
+    match row {
+        Some(r) => (
+            r.balance.trim().parse::<f64>().unwrap_or(0.0),
+            r.usd_value.max(0.0),
+        ),
+        None => (0.0, 0.0),
     }
 }
 

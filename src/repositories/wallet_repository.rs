@@ -1,5 +1,5 @@
 use crate::db::DbPool;
-use crate::models::wallet::Wallet;
+use crate::models::wallet::{is_valid_solana_address, Wallet};
 use sqlx::Error;
 
 pub struct WalletRepository;
@@ -12,18 +12,20 @@ impl WalletRepository {
         wallet_type: &str,
         wallet_provider: Option<&str>,
         wallet_name: Option<&str>,
+        network: Option<&str>,
         user_id: Option<&str>,
     ) -> Result<Wallet, Error> {
         let wallet = sqlx::query_as::<_, Wallet>(
             r#"
-            INSERT INTO wallets (address, chain_id, wallet_type, wallet_provider, wallet_name, connected_at, is_active, user_id)
-            VALUES ($1, $2, $3, $4, $5, NOW(), true, $6)
+            INSERT INTO wallets (address, chain_id, wallet_type, wallet_provider, wallet_name, network, connected_at, is_active, user_id)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), true, $7)
             ON CONFLICT (address)
             DO UPDATE SET
                 chain_id = EXCLUDED.chain_id,
                 wallet_type = EXCLUDED.wallet_type,
                 wallet_provider = EXCLUDED.wallet_provider,
                 wallet_name = EXCLUDED.wallet_name,
+                network = EXCLUDED.network,
                 is_active = true,
                 user_id = EXCLUDED.user_id,
                 updated_at = NOW()
@@ -35,6 +37,7 @@ impl WalletRepository {
         .bind(wallet_type)
         .bind(wallet_provider)
         .bind(wallet_name)
+        .bind(network)
         .bind(user_id)
         .fetch_one(pool)
         .await?;
@@ -46,11 +49,17 @@ impl WalletRepository {
         pool: &DbPool,
         address: &str,
     ) -> Result<Option<Wallet>, Error> {
-        let wallet =
+        let wallet = if is_valid_solana_address(address) {
+            sqlx::query_as::<_, Wallet>("SELECT * FROM wallets WHERE address = $1")
+                .bind(address)
+                .fetch_optional(pool)
+                .await?
+        } else {
             sqlx::query_as::<_, Wallet>("SELECT * FROM wallets WHERE LOWER(address) = LOWER($1)")
                 .bind(address)
                 .fetch_optional(pool)
-                .await?;
+                .await?
+        };
 
         Ok(wallet)
     }
@@ -60,13 +69,21 @@ impl WalletRepository {
         address: &str,
         is_active: bool,
     ) -> Result<(), Error> {
-        sqlx::query(
-            "UPDATE wallets SET is_active = $1, updated_at = NOW() WHERE LOWER(address) = LOWER($2)",
-        )
-        .bind(is_active)
-        .bind(address)
-        .execute(pool)
-        .await?;
+        if is_valid_solana_address(address) {
+            sqlx::query("UPDATE wallets SET is_active = $1, updated_at = NOW() WHERE address = $2")
+                .bind(is_active)
+                .bind(address)
+                .execute(pool)
+                .await?;
+        } else {
+            sqlx::query(
+                "UPDATE wallets SET is_active = $1, updated_at = NOW() WHERE LOWER(address) = LOWER($2)",
+            )
+            .bind(is_active)
+            .bind(address)
+            .execute(pool)
+            .await?;
+        }
 
         Ok(())
     }
@@ -77,13 +94,21 @@ impl WalletRepository {
         address: &str,
         user_id: &str,
     ) -> Result<(), Error> {
-        sqlx::query(
-            "UPDATE wallets SET user_id = $1, updated_at = NOW() WHERE LOWER(address) = LOWER($2)",
-        )
-        .bind(user_id)
-        .bind(address)
-        .execute(pool)
-        .await?;
+        if is_valid_solana_address(address) {
+            sqlx::query("UPDATE wallets SET user_id = $1, updated_at = NOW() WHERE address = $2")
+                .bind(user_id)
+                .bind(address)
+                .execute(pool)
+                .await?;
+        } else {
+            sqlx::query(
+                "UPDATE wallets SET user_id = $1, updated_at = NOW() WHERE LOWER(address) = LOWER($2)",
+            )
+            .bind(user_id)
+            .bind(address)
+            .execute(pool)
+            .await?;
+        }
         Ok(())
     }
 
@@ -142,12 +167,21 @@ impl WalletRepository {
         pool: &DbPool,
         address: &str,
     ) -> Result<(Vec<Wallet>, i64), Error> {
-        let wallet = sqlx::query_as::<_, Wallet>(
-            "SELECT * FROM wallets WHERE LOWER(address) = LOWER($1) AND is_active = true",
-        )
-        .bind(address)
-        .fetch_optional(pool)
-        .await?;
+        let wallet = if is_valid_solana_address(address) {
+            sqlx::query_as::<_, Wallet>(
+                "SELECT * FROM wallets WHERE address = $1 AND is_active = true",
+            )
+            .bind(address)
+            .fetch_optional(pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, Wallet>(
+                "SELECT * FROM wallets WHERE LOWER(address) = LOWER($1) AND is_active = true",
+            )
+            .bind(address)
+            .fetch_optional(pool)
+            .await?
+        };
         let (list, total) = match wallet {
             Some(w) => (vec![w], 1i64),
             None => (vec![], 0i64),
