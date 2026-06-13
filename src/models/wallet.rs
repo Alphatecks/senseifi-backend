@@ -106,7 +106,24 @@ pub fn canonical_eth_address(address: &str) -> String {
 }
 
 /// Allowed EVM wallet types (allowlist to prevent injection).
-pub const ALLOWED_EVM_WALLET_TYPES: &[&str] = &["metamask", "coinbase"];
+pub const ALLOWED_EVM_WALLET_TYPES: &[&str] = &[
+    "metamask",
+    "coinbase",
+    "trustwallet",
+    "trust",
+    "walletconnect",
+];
+
+/// Canonical stored value for EVM wallet_type (aliases normalized on connect).
+pub fn normalize_evm_wallet_type(wallet_type: &str) -> Option<&'static str> {
+    match wallet_type.trim().to_lowercase().as_str() {
+        "metamask" => Some("metamask"),
+        "coinbase" => Some("coinbase"),
+        "trustwallet" | "trust wallet" | "trust" => Some("trustwallet"),
+        "walletconnect" | "wallet connect" => Some("walletconnect"),
+        _ => None,
+    }
+}
 
 /// Allowed Solana wallet types for popup connect.
 pub const ALLOWED_SOLANA_WALLET_TYPES: &[&str] = &["phantom", "solflare", "backpack"];

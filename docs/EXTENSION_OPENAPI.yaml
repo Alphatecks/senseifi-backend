@@ -754,7 +754,7 @@ components:
           minimum: 1
         wallet_type:
           type: string
-          enum: [metamask, coinbase]
+          enum: [metamask, coinbase, trustwallet, trust, walletconnect]
         user_id:
           type: string
 

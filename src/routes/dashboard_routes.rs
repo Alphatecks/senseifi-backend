@@ -943,7 +943,8 @@ fn wallet_type_to_display(wallet_type: &str) -> String {
     match wallet_type.to_ascii_lowercase().as_str() {
         "metamask" => "MetaMask Wallet".to_string(),
         "coinbase" => "Coinbase Wallet".to_string(),
-        "trust" | "trust wallet" => "Trust Wallet".to_string(),
+        "trust" | "trust wallet" | "trustwallet" => "Trust Wallet".to_string(),
+        "walletconnect" => "WalletConnect".to_string(),
         "ledger" => "Ledger Wallet".to_string(),
         other if !other.is_empty() => {
             let mut s = other.to_string();
@@ -2047,6 +2048,7 @@ async fn list_unread_alerts(
                 .map(|w| match w.wallet_type.to_lowercase().as_str() {
                     "metamask" => "MetaMask".to_string(),
                     "coinbase" => "Coinbase".to_string(),
+                    "trustwallet" => "Trust Wallet".to_string(),
                     "binance" => "Binance".to_string(),
                     s if !s.is_empty() => s[..1].to_uppercase() + &s[1..],
                     _ => "Wallet".to_string(),

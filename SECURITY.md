@@ -26,7 +26,7 @@
 - **Input validation**  
   - Wallet `address`: must be `0x` + 40 hex chars (Ethereum style).  
   - `chain_id`: must be in `1..=999_999`.  
-  - `wallet_type`: allowlist `metamask`, `coinbase`.  
+  - `wallet_type`: allowlist `metamask`, `coinbase`, `trustwallet` (aliases: `trust`, `trust wallet`), `walletconnect`.  
   Path and JSON inputs are validated before use.
 
 - **No sensitive error detail**  

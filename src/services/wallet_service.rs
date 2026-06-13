@@ -149,6 +149,8 @@ fn wallet_type_to_provider(wallet_type: &str) -> String {
     match wallet_type.to_lowercase().as_str() {
         "metamask" => "MetaMask".to_string(),
         "coinbase" => "Coinbase".to_string(),
+        "trustwallet" => "Trust Wallet".to_string(),
+        "walletconnect" => "WalletConnect".to_string(),
         "binance" => "Binance".to_string(),
         "kraken" => "Kraken".to_string(),
         "bitstamp" => "Bitstamp".to_string(),

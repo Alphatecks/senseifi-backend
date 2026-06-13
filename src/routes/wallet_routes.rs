@@ -14,6 +14,7 @@ use crate::db::DbPool;
 use crate::models::wallet::{
     is_valid_eth_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
     ChainFamily, ALLOWED_EVM_WALLET_TYPES, ALLOWED_SOLANA_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
+    normalize_evm_wallet_type,
     SOLANA_MAINNET_CHAIN_ID,
 };
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
@@ -72,25 +73,43 @@ async fn connect_wallet(
         ));
     }
 
-    let wt = request.wallet_type.to_lowercase();
-    let allowed = match chain_family {
-        ChainFamily::Evm => ALLOWED_EVM_WALLET_TYPES,
-        ChainFamily::Solana => ALLOWED_SOLANA_WALLET_TYPES,
+    let wt_raw = request.wallet_type.to_lowercase();
+    let wt = match chain_family {
+        ChainFamily::Evm => match normalize_evm_wallet_type(&wt_raw) {
+            Some(canonical) => canonical.to_string(),
+            None => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "success": false,
+                        "message": format!(
+                            "Invalid wallet_type; allowed for {}: {}",
+                            chain_family.as_str(),
+                            ALLOWED_EVM_WALLET_TYPES.join(", ")
+                        ),
+                        "error": "Invalid wallet_type"
+                    })),
+                ));
+            }
+        },
+        ChainFamily::Solana => {
+            if !ALLOWED_SOLANA_WALLET_TYPES.contains(&wt_raw.as_str()) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "success": false,
+                        "message": format!(
+                            "Invalid wallet_type; allowed for {}: {}",
+                            chain_family.as_str(),
+                            ALLOWED_SOLANA_WALLET_TYPES.join(", ")
+                        ),
+                        "error": "Invalid wallet_type"
+                    })),
+                ));
+            }
+            wt_raw
+        }
     };
-    if !allowed.contains(&wt.as_str()) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "message": format!(
-                    "Invalid wallet_type; allowed for {}: {}",
-                    chain_family.as_str(),
-                    allowed.join(", ")
-                ),
-                "error": "Invalid wallet_type"
-            })),
-        ));
-    }
 
     let effective_chain_id = match chain_family {
         ChainFamily::Evm => {

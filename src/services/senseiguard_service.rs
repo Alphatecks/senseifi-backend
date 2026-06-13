@@ -2115,6 +2115,7 @@ impl SenseiguardService {
         let provider = match wallet.wallet_type.to_lowercase().as_str() {
             "metamask" => "MetaMask".to_string(),
             "coinbase" => "Coinbase".to_string(),
+            "trustwallet" => "Trust Wallet".to_string(),
             _ => {
                 let mut s = wallet.wallet_type.clone();
                 if let Some(r) = s.get_mut(0..1) {
@@ -2226,7 +2227,7 @@ fn wallet_type_to_display(wt: &str) -> String {
         "binance" => "Binance".to_string(),
         "walletconnect" => "WalletConnect".to_string(),
         "kraken" => "Kraken".to_string(),
-        "trust wallet" | "trust" => "Trust Wallet".to_string(),
+        "trust wallet" | "trust" | "trustwallet" => "Trust Wallet".to_string(),
         "gemini" => "Gemini".to_string(),
         _ => {
             let mut s = wt.to_string();
