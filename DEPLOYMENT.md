@@ -99,7 +99,7 @@ Indexed token balances are stored in **`wallet_assets`** and included in **`GET 
 
 - **`MORALIS_API_KEY`** (required for sync): [Moralis](https://moralis.io/) Web3 Data API key. Without it, **`POST /api/dashboard/:address/assets/sync`** returns **503**.
 - **`MORALIS_API_BASE_URL`** (optional): default `https://deep-index.moralis.io`.
-- **`TOKEN_BALANCE_SCAN_CHAIN_IDS`** (optional): comma-separated chain IDs to sync (e.g. `1,56,137`). If unset, defaults to the same list as **`NATIVE_BALANCE_SCAN_CHAIN_IDS`** (or its built-in default). Chains **not supported** by Moralis’ wallet token endpoint (e.g. **zkSync 324**, **Scroll 534352**) are reported as **`skipped`** — omit them from this env if you want fewer noise rows.
+- **`TOKEN_BALANCE_SCAN_CHAIN_IDS`** (optional): comma-separated chain IDs to sync (e.g. `1,56,137`). If unset, defaults to the same list as **`NATIVE_BALANCE_SCAN_CHAIN_IDS`** (or its built-in default). Chains **not supported** by Moralis’ wallet token endpoint (e.g. **zkSync 324**, **Scroll 534352**, **Fantom 250**) are reported as **`skipped`** — omit them from this env if you want fewer noise rows.
 - **`MORALIS_EXCLUDE_SPAM`** (optional): set to `true` to add Moralis `exclude_spam=true`. Default in this backend is **false** so balances match the Moralis docs default and fewer holdings are hidden.
 
 **On-demand sync:** `POST /api/dashboard/:address/assets/sync` — uses Moralis `chain` as **hex** (e.g. `0x38` for BSC), **`exclude_native=true`**, and skips `native_token` rows so **gas-token USD is not double-counted** (native remains from RPC in `native_usd` / `total_asset_usd`). Paginates with `cursor` until exhausted. Respect Moralis rate limits; add a cron or debounce on the client if needed.

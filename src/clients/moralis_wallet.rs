@@ -1,8 +1,9 @@
 //! Moralis Web3 Data API: wallet ERC-20 token balances (aggregated per chain).
 //!
 //! Moralis `GET /api/v2.2/wallets/{address}/tokens` returns **snake_case** JSON and accepts `chain`
-//! as a documented enum string or **hex** (e.g. `0x38` for BSC). zkSync (324) and Scroll (534352)
-//! are not in the wallet token balances chain list — we skip them.
+//! as a documented enum string or **hex** (e.g. `0x38` for BSC). zkSync (324), Scroll (534352), and
+//! Fantom (250) are not in the wallet token balances chain list — we skip them (native FTM still
+//! comes from RPC in `multi_chain_native_aggregate`).
 
 use num_bigint::BigUint;
 use num_traits::Num;
@@ -19,7 +20,6 @@ pub fn moralis_chain_param(chain_id: u64) -> Option<&'static str> {
         56 => Some("0x38"),
         137 => Some("0x89"),
         43114 => Some("0xa86a"),
-        250 => Some("0xfa"),
         42161 => Some("0xa4b1"),
         8453 => Some("0x2105"),
         10 => Some("0xa"),
@@ -205,7 +205,7 @@ pub async fn fetch_wallet_tokens(
         let body = res.text().await.map_err(|e| e.to_string())?;
         if !status.is_success() {
             return Err(format!(
-                "Moralis HTTP {status}: {}",
+                "chain_id {chain_id} (chain={chain}): Moralis HTTP {status}: {}",
                 body.chars().take(200).collect::<String>()
             ));
         }
@@ -282,4 +282,26 @@ pub async fn fetch_wallet_tokens(
 
 pub fn has_moralis_config() -> bool {
     moralis_api_key().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moralis_chain_param;
+
+    #[test]
+    fn fantom_not_in_wallet_token_balances_api() {
+        assert!(moralis_chain_param(250).is_none());
+    }
+
+    #[test]
+    fn zksync_and_scroll_not_supported() {
+        assert!(moralis_chain_param(324).is_none());
+        assert!(moralis_chain_param(534352).is_none());
+    }
+
+    #[test]
+    fn linea_and_avalanche_supported() {
+        assert_eq!(moralis_chain_param(59144), Some("0xe708"));
+        assert_eq!(moralis_chain_param(43114), Some("0xa86a"));
+    }
 }

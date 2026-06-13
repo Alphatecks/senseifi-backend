@@ -1617,7 +1617,7 @@ impl SenseiguardService {
                     status: "skipped".to_string(),
                     tokens_upserted: 0,
                     detail: Some(
-                        "chain not supported by Moralis wallet token API (e.g. zkSync 324, Scroll 534352)"
+                        "chain not supported by Moralis wallet token API (e.g. zkSync 324, Scroll 534352, Fantom 250)"
                             .to_string(),
                     ),
                 });
