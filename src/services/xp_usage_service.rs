@@ -2,7 +2,7 @@
 
 use crate::db::DbPool;
 use crate::models::waitlist::XpChargeResult;
-use crate::models::wallet::canonical_eth_address;
+use crate::models::wallet::normalize_wallet_address_for_lookup;
 use crate::repositories::waitlist_repository::WaitlistRepository;
 use serde_json::{json, Value};
 use sqlx::Error;
@@ -82,7 +82,7 @@ pub async fn charge_wallet_usage(
         return Ok(None);
     }
 
-    let wallet_address = canonical_eth_address(wallet_address);
+    let wallet_address = normalize_wallet_address_for_lookup(wallet_address);
     let Some(claim) = WaitlistRepository::get_claim_by_wallet(pool, &wallet_address).await? else {
         return Ok(None);
     };
@@ -185,7 +185,7 @@ pub async fn list_usage_for_account(
     let resolved_user_id = if let Some(uid) = user_id {
         uid.to_string()
     } else {
-        let addr = canonical_eth_address(wallet_address.unwrap_or_default());
+        let addr = normalize_wallet_address_for_lookup(wallet_address.unwrap_or_default());
         match WaitlistRepository::get_claim_by_wallet(pool, &addr).await? {
             Some(claim) => claim.user_id,
             None => {

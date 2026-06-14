@@ -117,6 +117,16 @@ pub fn canonical_eth_address(address: &str) -> String {
     }
 }
 
+/// Normalize wallet address for XP billing and scan-history lookups (case-sensitive for Solana).
+pub fn normalize_wallet_address_for_lookup(address: &str) -> String {
+    let s = address.trim();
+    if is_valid_eth_address(s) {
+        canonical_eth_address(s)
+    } else {
+        s.to_string()
+    }
+}
+
 /// Allowed EVM wallet types (allowlist to prevent injection).
 pub const ALLOWED_EVM_WALLET_TYPES: &[&str] = &[
     "metamask",

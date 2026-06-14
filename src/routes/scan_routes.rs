@@ -151,7 +151,16 @@ async fn scan_contract(
         solana_network.as_deref(),
     )
     .await {
-        Ok(res) => Ok(Json(res)),
+        Ok(res) => {
+            if let Some(wallet) = for_ref {
+                if let Err(e) =
+                    ScanService::record_wallet_scan_history(&pool, wallet, &res, chain_family).await
+                {
+                    eprintln!("wallet scan history: {}", e);
+                }
+            }
+            Ok(Json(res))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({

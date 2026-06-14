@@ -115,7 +115,20 @@ impl WaitlistRepository {
         pool: &DbPool,
         wallet_address: &str,
     ) -> Result<Option<UserXpClaim>, Error> {
-        Self::map_claim_row(
+        let lookup = crate::models::wallet::normalize_wallet_address_for_lookup(wallet_address);
+        let row = if crate::models::wallet::is_valid_solana_address(&lookup) {
+            sqlx::query_as::<_, ClaimRow>(
+                r#"
+                SELECT user_id, wallet_address, waitlist_entry_id, email, xp, xp_spent,
+                       direct_referrals, level2_referrals, claimed_at
+                FROM user_xp_claims
+                WHERE wallet_address = $1
+                "#,
+            )
+            .bind(&lookup)
+            .fetch_optional(pool)
+            .await?
+        } else {
             sqlx::query_as::<_, ClaimRow>(
                 r#"
                 SELECT user_id, wallet_address, waitlist_entry_id, email, xp, xp_spent,
@@ -124,10 +137,11 @@ impl WaitlistRepository {
                 WHERE LOWER(wallet_address) = LOWER($1)
                 "#,
             )
-            .bind(wallet_address)
+            .bind(&lookup)
             .fetch_optional(pool)
-            .await?,
-        )
+            .await?
+        };
+        Self::map_claim_row(row)
     }
 
     pub async fn insert_claim(

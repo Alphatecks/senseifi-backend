@@ -753,6 +753,21 @@ async fn extension_scan_smart_contract(
         ));
     }
 
+    if let Err(e) = xp_usage_service::charge_wallet_usage(
+        &pool,
+        &req.wallet_address,
+        XpUsageAction::ContractScan,
+        Some(json!({
+            "contract_address": contract_address,
+            "chain_family": chain_family.as_str(),
+            "source": "extension_scan_smart_contract"
+        })),
+    )
+    .await
+    {
+        return Err(xp_usage_route_error(e));
+    }
+
     let scan = ScanService::scan_contract(
         &pool,
         &contract_address,
@@ -763,6 +778,17 @@ async fn extension_scan_smart_contract(
     )
     .await
     .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+
+    if let Err(e) = ScanService::record_wallet_scan_history(
+        &pool,
+        &req.wallet_address,
+        &scan,
+        chain_family,
+    )
+    .await
+    {
+        eprintln!("wallet scan history: {}", e);
+    }
 
     let (contract_reputation_risk, trust_score, scam_reports, wallets_affected) =
         compute_contract_reputation_risk(&pool, &contract_address).await;
@@ -1143,6 +1169,20 @@ async fn extension_screen_action(
                     "Invalid wallet_address format",
                 ));
             }
+            if let Err(e) = xp_usage_service::charge_wallet_usage(
+                &pool,
+                &req.wallet_address,
+                XpUsageAction::ContractScan,
+                Some(json!({
+                    "contract_address": address,
+                    "chain_family": chain_family.as_str(),
+                    "source": "extension_analyze_contract"
+                })),
+            )
+            .await
+            {
+                return Err(xp_usage_route_error(e));
+            }
             let scan = ScanService::scan_contract(
                 &pool,
                 &address,
@@ -1153,6 +1193,16 @@ async fn extension_screen_action(
             )
             .await
             .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+            if let Err(e) = ScanService::record_wallet_scan_history(
+                &pool,
+                &req.wallet_address,
+                &scan,
+                chain_family,
+            )
+            .await
+            {
+                eprintln!("wallet scan history: {}", e);
+            }
             Ok(Json(json!({
                 "success": true,
                 "action": action,
@@ -1919,8 +1969,9 @@ async fn scan_history(
     if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
+    let wallet = crate::models::wallet::normalize_wallet_address_for_lookup(&q.wallet_address);
     let limit = q.limit.unwrap_or(20).min(100) as i64;
-    match SenseiguardRepository::list_wallet_scan_history(&pool, &q.wallet_address, limit).await {
+    match SenseiguardRepository::list_wallet_scan_history(&pool, &wallet, limit).await {
         Ok(rows) => {
             let data: Vec<serde_json::Value> = rows
                 .into_iter()

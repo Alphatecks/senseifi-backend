@@ -2942,13 +2942,24 @@ impl SenseiguardRepository {
         limit: i64,
     ) -> Result<Vec<WalletScanHistoryRow>, Error> {
         let limit = limit.clamp(1, 100);
-        sqlx::query_as(
-            "SELECT id, wallet_address, scan_type, risk_score, issues_found, details, scanned_at FROM wallet_scan_history WHERE wallet_address = $1 ORDER BY scanned_at DESC LIMIT $2",
-        )
-        .bind(wallet_address)
-        .bind(limit)
-        .fetch_all(pool)
-        .await
+        let lookup = crate::models::wallet::normalize_wallet_address_for_lookup(wallet_address);
+        if crate::models::wallet::is_valid_solana_address(&lookup) {
+            sqlx::query_as(
+                "SELECT id, wallet_address, scan_type, risk_score, issues_found, details, scanned_at FROM wallet_scan_history WHERE wallet_address = $1 ORDER BY scanned_at DESC LIMIT $2",
+            )
+            .bind(&lookup)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        } else {
+            sqlx::query_as(
+                "SELECT id, wallet_address, scan_type, risk_score, issues_found, details, scanned_at FROM wallet_scan_history WHERE LOWER(wallet_address) = LOWER($1) ORDER BY scanned_at DESC LIMIT $2",
+            )
+            .bind(&lookup)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
     }
 
     // ---- Wallet approval alerts ----

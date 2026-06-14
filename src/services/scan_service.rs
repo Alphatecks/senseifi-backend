@@ -11,7 +11,7 @@ use crate::services::analyzer_service::AnalyzerService;
 use crate::services::reputation_service::ReputationService;
 use crate::services::scoring_engine::ScoringEngine;
 use crate::services::simulation_service::SimulationService;
-use crate::models::wallet::ChainFamily;
+use crate::models::wallet::{normalize_wallet_address_for_lookup, ChainFamily};
 use crate::services::solana_program_scan;
 use sqlx::Error;
 
@@ -224,6 +224,41 @@ impl ScanService {
             details: row.details,
             ai_summary: Some(ai_summary),
         })
+    }
+
+    /// Append a row to `wallet_scan_history` for GET /api/protection/scan-history.
+    pub async fn record_wallet_scan_history(
+        pool: &DbPool,
+        wallet_address: &str,
+        response: &ScanContractResponse,
+        chain_family: ChainFamily,
+    ) -> Result<(), Error> {
+        let wallet = normalize_wallet_address_for_lookup(wallet_address);
+        let risk_score = (100 - response.trust_score).clamp(0, 100);
+        let scan_type = match chain_family {
+            ChainFamily::Solana => "solana_program_scan",
+            ChainFamily::Evm => "contract_scan",
+        };
+        let details = serde_json::json!({
+            "scan_id": response.scan_id,
+            "contract_address": response.contract_address,
+            "trust_score": response.trust_score,
+            "critical_risk_flags": response.critical_risk_flags,
+            "chain_family": chain_family.as_str(),
+            "network": response.network,
+            "contract_name": response.contract_name,
+            "detected_standard": response.detected_standard,
+        });
+        SenseiguardRepository::create_wallet_scan_history(
+            pool,
+            &wallet,
+            scan_type,
+            risk_score,
+            response.critical_risk_flags,
+            &details,
+        )
+        .await?;
+        Ok(())
     }
 
     fn chain_id_to_network_name(chain_id: u64) -> String {
