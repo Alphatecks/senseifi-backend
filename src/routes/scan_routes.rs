@@ -13,16 +13,25 @@ use crate::models::senseiguard::{
     CommunitySignalsResponse, ContractActivityResponse, ContractLiquidityResponse,
     ScamPatternResponse, ScanContractRequest, ScanContractResponse,
 };
-use crate::models::wallet::is_valid_eth_address;
+use crate::models::wallet::{
+    is_valid_scan_contract_address, is_valid_solana_address, is_valid_wallet_address,
+    normalize_solana_network, resolve_scan_chain_family,
+};
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::services::scan_service::ScanService;
 use crate::services::xp_usage_service::{self, XpUsageAction, XpUsageError};
 
-/// If input looks like a URL, try to extract 0x address; else return trimmed string for validation.
+/// Normalize EVM contract input (0x address or Etherscan-style URL) or Solana program ID / explorer URL.
 fn normalize_contract_input(input: &str) -> String {
     let s = input.trim();
     if s.is_empty() {
         return String::new();
+    }
+    if is_valid_solana_address(s) {
+        return s.to_string();
+    }
+    if let Some(addr) = extract_solana_from_url(s) {
+        return addr;
     }
     if s.len() >= 42 && s.starts_with("0x") && s[2..42].chars().all(|c| c.is_ascii_hexdigit()) {
         return s[..42].to_string();
@@ -38,6 +47,25 @@ fn normalize_contract_input(input: &str) -> String {
         }
     }
     s.to_string()
+}
+
+fn extract_solana_from_url(s: &str) -> Option<String> {
+    let lower = s.to_lowercase();
+    for marker in ["/account/", "/token/", "/address/"] {
+        if let Some(idx) = lower.find(marker) {
+            let rest = &s[idx + marker.len()..];
+            let candidate: String = rest
+                .chars()
+                .take_while(|c| {
+                    c.is_ascii_alphanumeric() && *c != '0' && *c != 'O' && *c != 'I' && *c != 'l'
+                })
+                .collect();
+            if is_valid_solana_address(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 fn scan_xp_error(err: XpUsageError) -> (StatusCode, Json<serde_json::Value>) {
@@ -85,34 +113,44 @@ async fn scan_contract(
     axum::Json(request): axum::Json<ScanContractRequest>,
 ) -> Result<Json<ScanContractResponse>, (StatusCode, Json<serde_json::Value>)> {
     let address = normalize_contract_input(&request.contract_address);
-    if !is_valid_eth_address(&address) {
+    if !is_valid_scan_contract_address(&address) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "success": false,
-                "error": "Invalid contract address or link. Use 0x + 40 hex chars or an Etherscan-style URL."
+                "error": "Invalid contract/program address or link. Use 0x + 40 hex chars (EVM) or a Solana base58 program ID."
             })),
         ));
     }
+    let chain_family = resolve_scan_chain_family(request.chain_family.as_deref(), &address);
     let for_address = request
         .for_address
         .as_ref()
         .map(|s| normalize_contract_input(s))
-        .filter(|s| is_valid_eth_address(s));
+        .filter(|s| is_valid_wallet_address(s, chain_family));
     let for_ref = for_address.as_deref();
     if let Some(wallet) = for_ref {
         if let Err(e) = xp_usage_service::charge_wallet_usage(
             &pool,
             wallet,
             XpUsageAction::ContractScan,
-            Some(json!({ "contract_address": address })),
+            Some(json!({ "contract_address": address, "chain_family": chain_family.as_str() })),
         )
         .await
         {
             return Err(scan_xp_error(e));
         }
     }
-    match ScanService::scan_contract(&pool, &address, for_ref, request.chain_id).await {
+    let solana_network = normalize_solana_network(request.network.as_deref());
+    match ScanService::scan_contract(
+        &pool,
+        &address,
+        for_ref,
+        request.chain_id,
+        chain_family,
+        solana_network.as_deref(),
+    )
+    .await {
         Ok(res) => Ok(Json(res)),
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -156,10 +194,10 @@ async fn contract_scam_pattern(
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let address = address.trim();
-    if !is_valid_eth_address(address) {
+    if !is_valid_scan_contract_address(address) {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({ "success": false, "error": "Invalid contract address" })),
+            Json(json!({ "success": false, "error": "Invalid contract or program address" })),
         ));
     }
     let scan =
@@ -218,7 +256,7 @@ async fn contract_activity(
     State(_pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(address.trim()) {
+    if !is_valid_scan_contract_address(address.trim()) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "success": false, "error": "Invalid contract address" })),
@@ -237,7 +275,7 @@ async fn contract_liquidity(
     State(_pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(address.trim()) {
+    if !is_valid_scan_contract_address(address.trim()) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({ "success": false, "error": "Invalid contract address" })),
@@ -257,10 +295,10 @@ async fn contract_community_signals(
     Path(address): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let address = address.trim();
-    if !is_valid_eth_address(address) {
+    if !is_valid_scan_contract_address(address) {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({ "success": false, "error": "Invalid contract address" })),
+            Json(json!({ "success": false, "error": "Invalid contract or program address" })),
         ));
     }
     let report_count = SenseiguardRepository::count_scam_reports(&pool, address)

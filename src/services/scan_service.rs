@@ -11,6 +11,8 @@ use crate::services::analyzer_service::AnalyzerService;
 use crate::services::reputation_service::ReputationService;
 use crate::services::scoring_engine::ScoringEngine;
 use crate::services::simulation_service::SimulationService;
+use crate::models::wallet::ChainFamily;
+use crate::services::solana_program_scan;
 use sqlx::Error;
 
 pub struct ScanService;
@@ -22,7 +24,23 @@ impl ScanService {
         contract_address: &str,
         for_address: Option<&str>,
         chain_id: Option<u64>,
+        chain_family: ChainFamily,
+        solana_network: Option<&str>,
     ) -> Result<ScanContractResponse, Error> {
+        if chain_family == ChainFamily::Solana {
+            let network = solana_network
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("mainnet");
+            return solana_program_scan::scan_solana_program(
+                pool,
+                contract_address,
+                for_address,
+                network,
+            )
+            .await;
+        }
+
         // 1. Analyzer: single Etherscan fetch → owner privileges, dangerous functions, tokens_controlled, abi_source
         let analysis = AnalyzerService::analyze_contract(contract_address, chain_id).await;
         let owner_privileges = analysis.owner_privileges;
@@ -221,6 +239,7 @@ impl ScanService {
             43114 => "Avalanche C-Chain".to_string(),
             8453 => "Base".to_string(),
             11155111 => "Sepolia".to_string(),
+            101 => "Solana Mainnet".to_string(),
             _ => format!("Chain {}", chain_id),
         }
     }

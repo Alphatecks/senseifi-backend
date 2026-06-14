@@ -14,12 +14,12 @@ use uuid::Uuid;
 use crate::clients::moralis_wallet;
 use crate::db::DbPool;
 use crate::models::senseiguard::{CommunityReportedThreatItem, IngestActivityRequest};
-use crate::models::wallet::{is_valid_dashboard_wallet_address, is_valid_eth_address, wallet_display_name};
+use crate::models::wallet::{is_valid_dashboard_wallet_address, is_valid_solana_address, parse_chain_family, wallet_display_name, ChainFamily};
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
 use crate::services::notification_service::NotificationService;
-use crate::services::protection_engine::analyze_tx_and_respond;
+use crate::services::protection_engine::{self, analyze_tx_and_respond};
 use crate::services::senseiguard_service::SenseiguardService;
 use crate::services::xp_usage_service::{self, parse_insufficient_xp_error, XpUsageAction};
 
@@ -126,7 +126,7 @@ fn default_extension_period() -> String {
     "7d".to_string()
 }
 
-/// Body for POST /api/dashboard/{address}/analyze-tx (doc: to, value, data, gas, chainId).
+/// Body for POST /api/dashboard/{address}/analyze-tx (EVM: to/value/data; Solana: method/params).
 #[derive(Debug, serde::Deserialize)]
 struct DashboardAnalyzeTxBody {
     #[serde(default)]
@@ -139,6 +139,12 @@ struct DashboardAnalyzeTxBody {
     pub gas: Option<String>,
     #[serde(default, rename = "chainId")]
     pub chain_id: Option<i64>,
+    #[serde(default)]
+    pub method: Option<String>,
+    #[serde(default)]
+    pub params: Option<Vec<Value>>,
+    #[serde(default)]
+    pub chain_family: Option<String>,
 }
 
 /// One actual threat detection for the "Threat Intelligence" modal (from threats table).
@@ -326,7 +332,7 @@ async fn dashboard_overview(
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            match addr.filter(|a| is_valid_eth_address(a)) {
+            match addr.filter(|a| is_valid_dashboard_wallet_address(a)) {
                 Some(address) => {
                     match WalletRepository::get_wallet_by_address(&pool, address).await {
                         Ok(Some(w)) => {
@@ -357,7 +363,7 @@ async fn dashboard_overview(
         if let Some(addr) = q
             .wallet_address
             .as_deref()
-            .filter(|a| is_valid_eth_address(a))
+            .filter(|a| is_valid_dashboard_wallet_address(a))
         {
             let _ = WalletRepository::update_wallet_user_id(&pool, addr, &user_id).await;
         }
@@ -1021,7 +1027,7 @@ async fn resolve_user_id_for_dashboard(
         Some(id) => id,
         None => {
             let addr = wallet_address.map(str::trim).filter(|s| !s.is_empty());
-            match addr.filter(|a| is_valid_eth_address(a)) {
+            match addr.filter(|a| is_valid_dashboard_wallet_address(a)) {
                 Some(address) => {
                     match WalletRepository::get_wallet_by_address(pool, address).await {
                         Ok(Some(w)) => {
@@ -1068,7 +1074,7 @@ async fn resolve_user_id_for_dashboard(
         user_id
     };
     if !user_id.is_empty() {
-        if let Some(addr) = wallet_address.filter(|a| is_valid_eth_address(a)) {
+        if let Some(addr) = wallet_address.filter(|a| is_valid_dashboard_wallet_address(a)) {
             let _ = WalletRepository::update_wallet_user_id(pool, addr, &user_id).await;
         }
     }
@@ -1094,7 +1100,7 @@ async fn activity_monitor_wallets(
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            match addr.filter(|a| is_valid_eth_address(a)) {
+            match addr.filter(|a| is_valid_dashboard_wallet_address(a)) {
                 Some(address) => {
                     match WalletRepository::get_wallet_by_address(&pool, address).await {
                         Ok(Some(w)) => w.user_id.unwrap_or_default(),
@@ -1155,7 +1161,7 @@ async fn activity_monitor_dapps(
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty());
-            match addr.filter(|a| is_valid_eth_address(a)) {
+            match addr.filter(|a| is_valid_dashboard_wallet_address(a)) {
                 Some(address) => {
                     match WalletRepository::get_wallet_by_address(&pool, address).await {
                         Ok(Some(w)) => w.user_id.unwrap_or_default(),
@@ -1282,7 +1288,7 @@ async fn dashboard_metrics(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::get_dashboard_metrics(&pool, &address).await {
@@ -1334,7 +1340,7 @@ async fn security_status(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::get_security_status(&pool, &address).await {
@@ -1360,7 +1366,7 @@ async fn risk_profile(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let wallet = match WalletRepository::get_wallet_by_address(&pool, &address).await {
@@ -1422,8 +1428,54 @@ async fn dashboard_analyze_tx(
     Path(address): Path<String>,
     Json(body): Json<DashboardAnalyzeTxBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
+    }
+    let chain_family = if body.chain_family.is_some() {
+        parse_chain_family(body.chain_family.as_deref())
+    } else if is_valid_solana_address(&address) {
+        ChainFamily::Solana
+    } else {
+        ChainFamily::Evm
+    };
+    if chain_family == ChainFamily::Solana {
+        let method = body.method.as_deref().ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "success": false,
+                    "error": "method is required for Solana analyze-tx (e.g. signTransaction)"
+                })),
+            )
+        })?;
+        return match protection_engine::analyze_solana_tx_and_respond(
+            &pool,
+            &address,
+            method,
+            body.params.as_deref(),
+            None,
+        )
+        .await
+        {
+            Ok(out) => Ok(Json(serde_json::to_value(&out).unwrap_or(json!({})))),
+            Err(e) => {
+                if let Some((xp_balance, xp_cost)) = parse_insufficient_xp_error(&e) {
+                    Err((
+                        StatusCode::PAYMENT_REQUIRED,
+                        Json(xp_usage_service::insufficient_xp_json(
+                            xp_balance,
+                            xp_cost,
+                            XpUsageAction::TxAnalysis.as_str(),
+                        )),
+                    ))
+                } else {
+                    Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "success": false, "error": e })),
+                    ))
+                }
+            }
+        };
     }
     match analyze_tx_and_respond(
         &pool,
@@ -1462,7 +1514,7 @@ async fn run_full_scan(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::run_full_scan(&pool, &address).await {
@@ -1495,7 +1547,7 @@ async fn get_latest_scan_report(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::get_latest_scan_report(&pool, &address).await {
@@ -1593,7 +1645,7 @@ async fn list_threats(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -1627,7 +1679,7 @@ async fn list_active_threats(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -1661,7 +1713,7 @@ async fn list_threat_history(
     Path(address): Path<String>,
     Query(q): Query<ThreatHistoryQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::list_threat_history(&pool, &address, q.page, q.per_page).await {
@@ -1699,7 +1751,7 @@ async fn resolve_threat(
     Path((address, threat_id)): Path<(String, Uuid)>,
     Json(req): Json<ResolveThreatRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::resolve_threat(
@@ -1737,7 +1789,7 @@ async fn dismiss_threat(
     Path((address, threat_id)): Path<(String, Uuid)>,
     Json(req): Json<DismissThreatRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::dismiss_threat(
@@ -1774,7 +1826,7 @@ async fn verify_threat(
     State(pool): State<DbPool>,
     Path((address, threat_id)): Path<(String, Uuid)>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::verify_threat_for_wallet(&pool, &address, threat_id).await {
@@ -1817,7 +1869,7 @@ async fn verify_all_threats(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::verify_all_open_threats_for_wallet(&pool, &address).await {
@@ -1862,7 +1914,7 @@ async fn record_threat_action(
     Path((address, threat_id)): Path<(String, Uuid)>,
     Json(req): Json<ThreatActionRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let action = req.action.trim().to_lowercase();
@@ -1905,7 +1957,7 @@ async fn where_to_fix(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -1965,7 +2017,7 @@ async fn list_risky_tokens(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -1993,7 +2045,7 @@ async fn list_scans(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -2021,7 +2073,7 @@ async fn list_unread_alerts(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -2067,7 +2119,7 @@ async fn list_alerts(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -2094,7 +2146,7 @@ async fn mark_alert_read(
     State(pool): State<DbPool>,
     Path((address, alert_id)): Path<(String, Uuid)>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::mark_alert_read(&pool, &address, alert_id).await {
@@ -2124,7 +2176,7 @@ async fn mark_all_alerts_read(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::mark_all_alerts_read(&pool, &address).await {
@@ -2150,7 +2202,7 @@ async fn refresh_health(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     match SenseiguardService::refresh_wallet_health(&pool, &address).await {
@@ -2231,7 +2283,7 @@ async fn list_approvals(
     Path(address): Path<String>,
     Query(q): Query<ApprovalsQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -2260,7 +2312,7 @@ async fn list_transaction_monitoring(
     Path(address): Path<String>,
     Query(q): Query<TransactionMonitoringQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let page = q.page.unwrap_or(1).max(1);
@@ -2290,7 +2342,7 @@ async fn list_activity(
     Path(address): Path<String>,
     Query(q): Query<LimitQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     let limit = q.limit.clamp(1, 100);
@@ -2319,7 +2371,7 @@ async fn ingest_activity(
     headers: HeaderMap,
     Json(body): Json<IngestActivityRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_address());
     }
     if let Ok(secret) = std::env::var("INGEST_SECRET") {

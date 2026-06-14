@@ -775,9 +775,15 @@ pub struct ScanContractRequest {
     /// Optional: wallet address for user-aware risk (behavioral anomaly) and trend.
     #[serde(default)]
     pub for_address: Option<String>,
-    /// Optional: chain ID for the contract (1=Ethereum, 56=BSC, 137=Polygon, 8453=Base, 42161=Arbitrum). If omitted, uses ETHERSCAN_CHAIN_ID env or 1.
+    /// Optional: chain ID for the contract (1=Ethereum, 56=BSC, 101=Solana convention). If omitted, uses ETHERSCAN_CHAIN_ID env or 1 for EVM.
     #[serde(default)]
     pub chain_id: Option<u64>,
+    /// `evm` (default) or `solana`. Auto-detected from address format when omitted.
+    #[serde(default)]
+    pub chain_family: Option<String>,
+    /// Solana cluster (`mainnet-beta`, `devnet`) for program scans. Informational in response.
+    #[serde(default)]
+    pub network: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

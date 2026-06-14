@@ -9,10 +9,11 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Error;
 
-use crate::clients::{etherscan, rpc};
+use crate::clients::{etherscan, moralis_solana, rpc};
 use crate::db::DbPool;
 use crate::models::wallet::{
-    is_valid_eth_address, is_valid_dashboard_wallet_address, is_valid_wallet_address, parse_chain_family, ConnectWalletRequest,
+    default_solana_network, is_valid_dashboard_wallet_address, is_valid_solana_address,
+    is_valid_wallet_address, parse_chain_family, solana_network_for_wallet, ConnectWalletRequest,
     ChainFamily, ALLOWED_EVM_WALLET_TYPES, ALLOWED_SOLANA_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
     resolve_connect_wallet_metadata, WalletConnectValidationError, SOLANA_MAINNET_CHAIN_ID,
 };
@@ -237,11 +238,43 @@ fn bad_request_address() -> (StatusCode, Json<Value>) {
 }
 
 async fn get_wallet_balance(
+    State(pool): State<DbPool>,
     Path(address): Path<String>,
     Query(q): Query<BalanceQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_request_address());
+    }
+    if is_valid_solana_address(&address) {
+        let network = match WalletRepository::get_wallet_by_address(&pool, &address).await {
+            Ok(Some(w)) => solana_network_for_wallet(&w),
+            _ => default_solana_network(),
+        };
+        match moralis_solana::fetch_native_balance(&address, &network).await {
+            Ok(native) => {
+                return Ok(Json(json!({
+                    "success": true,
+                    "data": {
+                        "balance_sol": native.balance_display,
+                        "balance_eth": native.balance_display,
+                        "balance_usd": native.usd_value,
+                        "chain_id": SOLANA_MAINNET_CHAIN_ID,
+                        "network": network,
+                        "chain_family": "solana"
+                    }
+                })));
+            }
+            Err(e) => {
+                eprintln!("fetch_native_balance (solana): {}", e);
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "success": false,
+                        "error": "Could not fetch Solana balance (MORALIS_API_KEY or network unavailable)"
+                    })),
+                ));
+            }
+        }
     }
     let chain_id = q.chain_id.unwrap_or(1);
     if chain_id < CHAIN_ID_MIN || chain_id > CHAIN_ID_MAX {
@@ -282,8 +315,24 @@ async fn get_wallet_age(
     Path(address): Path<String>,
     Query(q): Query<WalletAgeQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_request_address());
+    }
+    if is_valid_solana_address(&address) {
+        return Ok(Json(json!({
+            "success": true,
+            "data": {
+                "address": address,
+                "chain_id": SOLANA_MAINNET_CHAIN_ID,
+                "chain_family": "solana",
+                "first_activity_unix": Value::Null,
+                "first_activity_at": Value::Null,
+                "age_seconds": Value::Null,
+                "age_days": Value::Null,
+                "source": "none",
+                "methodology": "Solana wallet age indexer not wired yet. Use activity feed or future Helius/Solscan integration."
+            }
+        })));
     }
     let chain_id = q.chain_id.unwrap_or(1);
     if chain_id < CHAIN_ID_MIN || chain_id > CHAIN_ID_MAX {
@@ -388,7 +437,7 @@ async fn get_dashboard_user(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_request_address());
     }
     match DashboardUserRepository::get_by_wallet(&pool, &address).await {
@@ -437,7 +486,7 @@ async fn list_connected_wallets(
             ));
         }
     };
-    if !is_valid_eth_address(address) {
+    if !is_valid_dashboard_wallet_address(address) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(json!({
@@ -469,7 +518,7 @@ async fn get_wallet_status(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_request_address());
     }
     match WalletService::get_wallet_status(&pool, &address).await {
@@ -501,7 +550,7 @@ async fn get_wallet(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_request_address());
     }
     match WalletService::get_wallet(&pool, &address).await {
@@ -533,7 +582,7 @@ async fn disconnect_wallet(
     State(pool): State<DbPool>,
     Path(address): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&address) {
+    if !is_valid_dashboard_wallet_address(&address) {
         return Err(bad_request_address());
     }
     match WalletService::disconnect_wallet(&pool, &address).await {

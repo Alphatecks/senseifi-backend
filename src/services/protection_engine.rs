@@ -1261,6 +1261,112 @@ pub async fn analyze_tx_and_respond(
     Ok(build_analyze_tx_response(false, Some(r)))
 }
 
+/// Solana signing analysis for dashboard and protection analyze-tx endpoints.
+pub async fn analyze_solana_tx_and_respond(
+    pool: &DbPool,
+    wallet_address: &str,
+    method: &str,
+    params: Option<&[Value]>,
+    domain: Option<&str>,
+) -> Result<AnalyzeTxResponse, String> {
+    use crate::services::goplus_intel_service;
+    use crate::services::solana_tx_analysis::{analyze_solana_request, is_solana_sign_method};
+    use crate::services::threat_intel_service::{get_malicious_programs, record_solana_analysis_signals};
+
+    if !is_solana_sign_method(method) {
+        return Err("Unsupported method for Solana transaction analysis".to_string());
+    }
+
+    let settings = match SenseiguardRepository::get_protection_settings(pool, wallet_address).await
+    {
+        Ok(Some(s)) => s,
+        Ok(None) => return Ok(build_analyze_tx_response(true, None)),
+        Err(e) => return Err(e.to_string()),
+    };
+    if !settings.high_risk_tx_warnings {
+        return Ok(build_analyze_tx_response(true, None));
+    }
+
+    if let Err(e) = charge_wallet_for_tx_analysis(pool, wallet_address).await {
+        return Err(e);
+    }
+
+    let mut domain_risk_score = 0i32;
+    if let Some(target) = domain.filter(|s| !s.trim().is_empty()) {
+        if let Ok(dapp_eval) = evaluate_dapp_connection(pool, wallet_address, target, None).await
+        {
+            domain_risk_score = dapp_eval.risk_score;
+        }
+    }
+
+    let malicious_programs = get_malicious_programs(pool).await;
+    let solana = analyze_solana_request(method, params, &malicious_programs, domain_risk_score);
+
+    let goplus_programs = goplus_intel_service::enrich_addresses(
+        pool,
+        &solana.program_ids,
+        "solana",
+        "program",
+        Some("solana"),
+        8,
+    )
+    .await;
+
+    let mut score = solana.risk_score;
+    let mut malicious_program_detected = solana.malicious_program_detected;
+    if goplus_programs.malicious_detected {
+        score = score.max(goplus_programs.risk_boost);
+        malicious_program_detected = true;
+    }
+
+    record_solana_analysis_signals(
+        pool,
+        wallet_address,
+        domain,
+        score,
+        &solana.program_ids,
+        &solana.flagged_programs,
+        malicious_program_detected,
+        method,
+    )
+    .await;
+
+    let band = score_to_band(score).to_string();
+    let explanation = if solana.findings.is_empty() {
+        None
+    } else {
+        Some(solana.findings.join("\n"))
+    };
+
+    Ok(AnalyzeTxResponse {
+        skipped: false,
+        risk_score: Some(score),
+        band: Some(band),
+        threat_types: Some(solana.threat_types),
+        explanation,
+        recommendation: Some(solana.recommendation),
+        risk_breakdown: Some(json!(solana.breakdown)),
+        warning: if score >= HIGH_WARNING_THRESHOLD {
+            Some(format!("Solana signing risk score: {score}"))
+        } else {
+            None
+        },
+        recommended_action: Some(if score >= BLOCK_THRESHOLD {
+            "Block".to_string()
+        } else if score >= HIGH_WARNING_THRESHOLD {
+            "Review carefully".to_string()
+        } else {
+            "Proceed".to_string()
+        }),
+        reason: None,
+        elite_assessment: None,
+        correlation: None,
+        scoring_model: Some("solana_v1".to_string()),
+        kill_chain_stage: None,
+        signal_groups: None,
+    })
+}
+
 #[cfg(test)]
 mod threat_model_v2_tests {
     use super::*;

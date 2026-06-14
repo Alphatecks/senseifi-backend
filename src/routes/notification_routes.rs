@@ -13,7 +13,7 @@ use crate::models::notification::{
     notification_list_json, MarkAllNotificationsReadRequest, MarkNotificationReadRequest,
     WalletNotificationQuery,
 };
-use crate::models::wallet::is_valid_eth_address;
+use crate::models::wallet::is_valid_dashboard_wallet_address;
 use crate::services::notification_service::NotificationService;
 
 pub fn notification_routes() -> Router<DbPool> {
@@ -27,7 +27,7 @@ async fn list_notifications(
     State(pool): State<DbPool>,
     Query(q): Query<WalletNotificationQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_dashboard_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
 
@@ -53,7 +53,7 @@ async fn mark_notification_read(
     State(pool): State<DbPool>,
     axum::Json(body): axum::Json<MarkNotificationReadRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&body.wallet_address) {
+    if !is_valid_dashboard_wallet_address(&body.wallet_address) {
         return Err(bad_address());
     }
 
@@ -88,7 +88,7 @@ async fn mark_all_notifications_read(
     State(pool): State<DbPool>,
     axum::Json(body): axum::Json<MarkAllNotificationsReadRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&body.wallet_address) {
+    if !is_valid_dashboard_wallet_address(&body.wallet_address) {
         return Err(bad_address());
     }
 
@@ -116,7 +116,7 @@ fn bad_address() -> (StatusCode, Json<Value>) {
         StatusCode::BAD_REQUEST,
         Json(json!({
             "success": false,
-            "error": "Invalid wallet address format (0x + 40 hex)"
+            "error": "Invalid wallet address format (EVM or Solana)"
         })),
     )
 }

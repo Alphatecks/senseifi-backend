@@ -20,8 +20,9 @@ use crate::models::senseiguard::{
     UserRiskProfile, WatchlistContractRequest,
 };
 use crate::models::wallet::{
-    is_valid_eth_address, is_valid_solana_address, is_valid_wallet_address, parse_chain_family,
-    ChainFamily,
+    is_valid_scan_contract_address, is_valid_security_contract_address,
+    is_valid_security_wallet_address, is_valid_solana_address, is_valid_wallet_address,
+    normalize_solana_network, parse_chain_family, resolve_scan_chain_family, ChainFamily,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -31,8 +32,8 @@ use crate::services::elite_intelligence_service::{
 };
 use crate::services::goplus_intel_service;
 use crate::services::protection_engine::{
-    analyze_tx_and_respond, evaluate_approval, evaluate_dapp_connection, run_monitor_cycle,
-    score_to_band, DappEvalResult,
+    analyze_solana_tx_and_respond, analyze_tx_and_respond, evaluate_approval, evaluate_dapp_connection,
+    run_monitor_cycle, score_to_band, DappEvalResult,
 };
 use crate::services::solana_tx_analysis::{analyze_solana_request, is_solana_sign_method};
 use crate::services::threat_intel_service::{
@@ -243,6 +244,12 @@ fn normalize_contract_input(input: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
+    if is_valid_solana_address(s) {
+        return s.to_string();
+    }
+    if let Some(addr) = extract_solana_from_scan_url(s) {
+        return addr;
+    }
     if s.len() >= 42 && s.starts_with("0x") && s[2..42].chars().all(|c| c.is_ascii_hexdigit()) {
         return s[..42].to_string();
     }
@@ -257,6 +264,25 @@ fn normalize_contract_input(input: &str) -> String {
         }
     }
     s.to_string()
+}
+
+fn extract_solana_from_scan_url(s: &str) -> Option<String> {
+    let lower = s.to_lowercase();
+    for marker in ["/account/", "/token/", "/address/"] {
+        if let Some(idx) = lower.find(marker) {
+            let rest = &s[idx + marker.len()..];
+            let candidate: String = rest
+                .chars()
+                .take_while(|c| {
+                    c.is_ascii_alphanumeric() && *c != '0' && *c != 'O' && *c != 'I' && *c != 'l'
+                })
+                .collect();
+            if is_valid_solana_address(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 pub fn protection_routes() -> Router<DbPool> {
@@ -367,6 +393,10 @@ struct ExtensionScanSmartContractRequest {
     contract_link: String,
     #[serde(default)]
     chain_id: Option<u64>,
+    #[serde(default)]
+    chain_family: Option<String>,
+    #[serde(default)]
+    network: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -384,6 +414,8 @@ struct ExtensionAnalyzeTxScreenRequest {
     data: Option<String>,
     #[serde(default)]
     chain_id: Option<i64>,
+    #[serde(default)]
+    chain_family: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -420,6 +452,10 @@ struct ExtensionScreenActionRequest {
     contract_address: Option<String>,
     #[serde(default)]
     chain_id: Option<i64>,
+    #[serde(default)]
+    chain_family: Option<String>,
+    #[serde(default)]
+    network: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -571,7 +607,7 @@ async fn get_settings(
     State(pool): State<DbPool>,
     Query(q): Query<WalletQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::get_protection_settings(&pool, &q.wallet_address).await {
@@ -614,7 +650,7 @@ async fn update_settings(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<UpdateProtectionSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(bad_address());
     }
     let existing = SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address)
@@ -701,17 +737,19 @@ async fn extension_scan_smart_contract(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<ExtensionScanSmartContractRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
-        return Err(extension_error(
-            StatusCode::BAD_REQUEST,
-            "Invalid wallet_address format",
-        ));
-    }
     let contract_address = normalize_contract_input(&req.contract_link);
-    if !is_valid_eth_address(&contract_address) {
+    if !is_valid_scan_contract_address(&contract_address) {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid contract link/address",
+        ));
+    }
+    let chain_family =
+        resolve_scan_chain_family(req.chain_family.as_deref(), &contract_address);
+    if !is_valid_wallet_address(&req.wallet_address, chain_family) {
+        return Err(extension_error(
+            StatusCode::BAD_REQUEST,
+            "Invalid wallet_address format",
         ));
     }
 
@@ -720,6 +758,8 @@ async fn extension_scan_smart_contract(
         &contract_address,
         Some(req.wallet_address.as_str()),
         req.chain_id,
+        chain_family,
+        normalize_solana_network(req.network.as_deref()).as_deref(),
     )
     .await
     .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -766,25 +806,51 @@ async fn extension_analyze_transaction_screen(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<ExtensionAnalyzeTxScreenRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid wallet_address format",
         ));
     }
 
-    let result = analyze_tx_and_respond(
-        &pool,
-        &req.wallet_address,
-        req.to.as_deref(),
-        req.value.as_deref(),
-        req.data.as_deref(),
-        req.method.as_deref(),
-        req.params.as_ref(),
-        None,
-    )
-    .await
-    .map_err(analyze_tx_route_error)?;
+    let chain_family = if req.chain_family.is_some() {
+        parse_chain_family(req.chain_family.as_deref())
+    } else if is_valid_solana_address(&req.wallet_address) {
+        ChainFamily::Solana
+    } else {
+        ChainFamily::Evm
+    };
+
+    let result = if chain_family == ChainFamily::Solana {
+        let method = req.method.as_deref().ok_or_else(|| {
+            extension_error(
+                StatusCode::BAD_REQUEST,
+                "method is required for Solana transaction analysis",
+            )
+        })?;
+        analyze_solana_tx_and_respond(
+            &pool,
+            &req.wallet_address,
+            method,
+            req.params.as_deref(),
+            None,
+        )
+        .await
+        .map_err(analyze_tx_route_error)?
+    } else {
+        analyze_tx_and_respond(
+            &pool,
+            &req.wallet_address,
+            req.to.as_deref(),
+            req.value.as_deref(),
+            req.data.as_deref(),
+            req.method.as_deref(),
+            req.params.as_ref(),
+            None,
+        )
+        .await
+        .map_err(analyze_tx_route_error)?
+    };
 
     let transaction_risk_score = result.risk_score.unwrap_or(0).clamp(0, 100);
     let policy_enforcement_active = result
@@ -797,7 +863,7 @@ async fn extension_analyze_transaction_screen(
         })
         .unwrap_or(false);
     let contract_risk_score = if let Some(to) = req.to.as_deref() {
-        if is_valid_eth_address(to) {
+        if is_valid_security_contract_address(to) {
             let (contract_reputation_risk, trust_score, _reports, _wallets) =
                 compute_contract_reputation_risk(&pool, to).await;
             let trust_based = trust_score.map(|t| (100 - t).clamp(0, 100)).unwrap_or(0);
@@ -877,7 +943,7 @@ async fn extension_risk_panel(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<ExtensionRiskPanelRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid wallet_address format",
@@ -899,7 +965,7 @@ async fn extension_risk_panel(
     let mut user_reports: i64 = 0;
     if let Some(addr) = req.contract_address.as_deref() {
         let address = normalize_contract_input(addr);
-        if is_valid_eth_address(&address) {
+        if is_valid_security_contract_address(&address) {
             let (risk, _trust, reports, _wallets) =
                 compute_contract_reputation_risk(&pool, &address).await;
             user_reports = reports;
@@ -930,7 +996,7 @@ async fn extension_scam_token_detected(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<ExtensionScamTokenDetectedRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid wallet_address format",
@@ -945,7 +1011,7 @@ async fn extension_scam_token_detected(
     let mut risk_score = 85;
     let mut user_reports = 0i64;
     if let Some(addr) = contract_address.as_deref() {
-        if is_valid_eth_address(addr) {
+        if is_valid_security_contract_address(addr) {
             let (risk, _trust, reports, _wallets) =
                 compute_contract_reputation_risk(&pool, addr).await;
             risk_score = (60 + risk).clamp(0, 100);
@@ -997,7 +1063,8 @@ async fn extension_screen_action(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<ExtensionScreenActionRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    let chain_family = parse_chain_family(req.chain_family.as_deref());
+    if !is_valid_wallet_address(&req.wallet_address, chain_family) {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid wallet_address format",
@@ -1034,7 +1101,7 @@ async fn extension_screen_action(
                 ));
             };
             let address = normalize_contract_input(contract);
-            if !is_valid_eth_address(&address) {
+            if !is_valid_security_contract_address(&address) {
                 return Err(extension_error(
                     StatusCode::BAD_REQUEST,
                     "Invalid contract_address",
@@ -1062,10 +1129,18 @@ async fn extension_screen_action(
                 ));
             };
             let address = normalize_contract_input(contract);
-            if !is_valid_eth_address(&address) {
+            let chain_family =
+                resolve_scan_chain_family(req.chain_family.as_deref(), &address);
+            if !is_valid_scan_contract_address(&address) {
                 return Err(extension_error(
                     StatusCode::BAD_REQUEST,
                     "Invalid contract_address",
+                ));
+            }
+            if !is_valid_wallet_address(&req.wallet_address, chain_family) {
+                return Err(extension_error(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid wallet_address format",
                 ));
             }
             let scan = ScanService::scan_contract(
@@ -1073,6 +1148,8 @@ async fn extension_screen_action(
                 &address,
                 Some(req.wallet_address.as_str()),
                 req.chain_id.map(|v| v as u64),
+                chain_family,
+                normalize_solana_network(req.network.as_deref()).as_deref(),
             )
             .await
             .map_err(|e| extension_error(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
@@ -1285,7 +1362,7 @@ async fn transaction_analyze(
         .clone()
         .ok_or_else(|| extension_error(StatusCode::BAD_REQUEST, "wallet_address is required"))?;
 
-    if !is_valid_eth_address(&wallet_address) {
+    if !is_valid_security_wallet_address(&wallet_address) {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid wallet_address format",
@@ -1328,7 +1405,7 @@ async fn transaction_analyze(
             let mut wallets_drained_estimate: i64 = 0;
             let mut goplus_evm_findings: Vec<String> = Vec::new();
             if let Some(ref to_addr) = to {
-                if is_valid_eth_address(to_addr) {
+                if is_valid_security_contract_address(to_addr) {
                     let (rep_risk, trust, reports, wallets_affected) =
                         compute_contract_reputation_risk(&pool, to_addr).await;
                     contract_reputation_risk = rep_risk;
@@ -1656,7 +1733,7 @@ async fn monitor_run(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<MonitorRunRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(bad_address());
     }
     match run_monitor_cycle(&pool, &req.wallet_address).await {
@@ -1674,11 +1751,11 @@ async fn approvals_ingest(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<IngestApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.spender_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) || !is_valid_security_contract_address(&req.spender_address) {
         return Err(bad_address());
     }
     if let Some(ref t) = req.token_address {
-        if !is_valid_eth_address(t) {
+        if !is_valid_security_contract_address(t) {
             return Err(bad_address());
         }
     }
@@ -1775,7 +1852,7 @@ async fn security_alerts(
     State(pool): State<DbPool>,
     Query(q): Query<SecurityAlertsQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     let limit = q.limit.unwrap_or(20).min(100) as i64;
@@ -1839,7 +1916,7 @@ async fn scan_history(
     State(pool): State<DbPool>,
     Query(q): Query<ScanHistoryQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     let limit = q.limit.unwrap_or(20).min(100) as i64;
@@ -2041,7 +2118,7 @@ async fn address_safety(
     State(pool): State<DbPool>,
     Query(q): Query<AddressSafetyQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
 
@@ -2090,7 +2167,7 @@ async fn list_rules(
     State(pool): State<DbPool>,
     Query(q): Query<WalletQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::list_security_rules(&pool, &q.wallet_address).await {
@@ -2106,7 +2183,7 @@ async fn create_rule(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<CreateSecurityRuleRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(bad_address());
     }
     let condition = req.condition_json.unwrap_or(serde_json::json!({}));
@@ -2134,7 +2211,7 @@ async fn update_rule(
     Query(q): Query<WalletQuery>,
     axum::Json(req): axum::Json<UpdateSecurityRuleRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::update_security_rule(
@@ -2164,7 +2241,7 @@ async fn delete_rule(
     Path(rule_id): Path<Uuid>,
     Query(q): Query<WalletQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::delete_security_rule(&pool, rule_id, &q.wallet_address).await {
@@ -2180,12 +2257,12 @@ async fn emergency_lock(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<EmergencyLockRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(bad_address());
     }
     if let Some(ref addrs) = req.whitelisted_addresses {
         for a in addrs {
-            if !is_valid_eth_address(a) {
+            if !is_valid_security_wallet_address(a) {
                 return Err(bad_address());
             }
         }
@@ -2249,7 +2326,7 @@ async fn emergency_freeze(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<EmergencyFreezeRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(bad_address());
     }
     let existing = SenseiguardRepository::get_protection_settings(&pool, &req.wallet_address)
@@ -2311,7 +2388,7 @@ async fn emergency_freeze(
 async fn simulate_tx(
     axum::Json(req): axum::Json<SimulateTxRequest>,
 ) -> Result<Json<SimulateTxResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(bad_address());
     }
     let out = SimulateTxResponse {
@@ -2328,7 +2405,7 @@ async fn block_malicious(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<BlockContractRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) || !is_valid_security_contract_address(&req.contract_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::block_contract(&pool, &req.wallet_address, &req.contract_address)
@@ -2349,7 +2426,7 @@ async fn block_contract(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<BlockContractRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) || !is_valid_security_contract_address(&req.contract_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::block_contract(&pool, &req.wallet_address, &req.contract_address)
@@ -2370,7 +2447,7 @@ async fn unblock_contract(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<BlockContractRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) || !is_valid_security_contract_address(&req.contract_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::unblock_contract(&pool, &req.wallet_address, &req.contract_address)
@@ -2388,7 +2465,7 @@ async fn list_blocked(
     State(pool): State<DbPool>,
     Query(q): Query<WalletQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::list_blocked_contracts(&pool, &q.wallet_address).await {
@@ -2404,7 +2481,7 @@ async fn add_watchlist(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<WatchlistContractRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) || !is_valid_security_contract_address(&req.contract_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::add_to_watchlist(&pool, &req.wallet_address, &req.contract_address)
@@ -2425,7 +2502,7 @@ async fn remove_from_watchlist(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<WatchlistContractRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) || !is_valid_security_contract_address(&req.contract_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::remove_from_watchlist(
@@ -2447,7 +2524,7 @@ async fn list_watchlist(
     State(pool): State<DbPool>,
     Query(q): Query<WalletQuery>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&q.wallet_address) {
+    if !is_valid_security_wallet_address(&q.wallet_address) {
         return Err(bad_address());
     }
     match SenseiguardRepository::list_watchlist(&pool, &q.wallet_address).await {
@@ -2463,11 +2540,11 @@ async fn report_scam(
     State(pool): State<DbPool>,
     axum::Json(req): axum::Json<ReportScamRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.contract_address) {
+    if !is_valid_security_contract_address(&req.contract_address) {
         return Err(bad_address());
     }
     if let Some(ref w) = req.reporter_wallet_address {
-        if !is_valid_eth_address(w) {
+        if !is_valid_security_wallet_address(w) {
             return Err(bad_address());
         }
     }
@@ -2492,7 +2569,7 @@ async fn report_scam(
 async fn revoke_approval(
     axum::Json(req): axum::Json<RevokeApprovalRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    if !is_valid_eth_address(&req.wallet_address) || !is_valid_eth_address(&req.contract_address) {
+    if !is_valid_security_wallet_address(&req.wallet_address) || !is_valid_security_contract_address(&req.contract_address) {
         return Err(bad_address());
     }
     let chain_id = req.chain_id.unwrap_or(1);

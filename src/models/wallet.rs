@@ -317,6 +317,33 @@ pub fn is_valid_dashboard_wallet_address(address: &str) -> bool {
     is_valid_eth_address(address) || is_valid_solana_address(address)
 }
 
+/// EVM contract or Solana program ID accepted by the contract scanner.
+pub fn is_valid_scan_contract_address(address: &str) -> bool {
+    is_valid_eth_address(address) || is_valid_solana_address(address)
+}
+
+/// Alias: wallet pubkey on dashboard + protection routes (EVM or Solana).
+pub fn is_valid_security_wallet_address(address: &str) -> bool {
+    is_valid_dashboard_wallet_address(address)
+}
+
+/// Contract, token mint, or program ID on block/watchlist/report routes.
+pub fn is_valid_security_contract_address(address: &str) -> bool {
+    is_valid_scan_contract_address(address)
+}
+
+/// Infer scan target family from explicit request field or address format.
+pub fn resolve_scan_chain_family(chain_family: Option<&str>, address: &str) -> ChainFamily {
+    if chain_family.is_some() {
+        return parse_chain_family(chain_family);
+    }
+    if is_valid_solana_address(address) {
+        ChainFamily::Solana
+    } else {
+        ChainFamily::Evm
+    }
+}
+
 /// Normalize Solana cluster from connect payload or env default.
 pub fn normalize_solana_network(raw: Option<&str>) -> Option<String> {
     let s = raw?.trim().to_lowercase();
