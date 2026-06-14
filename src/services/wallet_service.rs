@@ -1,8 +1,9 @@
 use crate::db::DbPool;
 use crate::models::wallet::{
-    canonical_eth_address, is_valid_wallet_address, normalize_solana_network, parse_chain_family,
-    wallet_display_name, ConnectWalletRequest, ChainFamily, ConnectedWalletItem, WalletResponse,
-    WalletStatusResponse,
+    canonical_eth_address, is_valid_wallet_address, normalize_solana_network,
+    resolve_connect_chain_family, wallet_chain_family, wallet_display_name, wallet_network_label,
+    ConnectWalletRequest, ChainFamily, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
+    SOLANA_MAINNET_CHAIN_ID,
 };
 use crate::repositories::wallet_repository::WalletRepository;
 use sqlx::Error;
@@ -14,7 +15,7 @@ impl WalletService {
         pool: &DbPool,
         request: ConnectWalletRequest,
     ) -> Result<WalletResponse, Error> {
-        let chain_family = parse_chain_family(request.chain_family.as_deref());
+        let chain_family = resolve_connect_chain_family(request.chain_family.as_deref(), &request.address);
         if !is_valid_wallet_address(&request.address, chain_family) {
             return Err(Error::RowNotFound);
         }
@@ -22,6 +23,10 @@ impl WalletService {
         let addr = match chain_family {
             ChainFamily::Evm => canonical_eth_address(&request.address),
             ChainFamily::Solana => request.address.clone(),
+        };
+        let chain_id = match chain_family {
+            ChainFamily::Solana => SOLANA_MAINNET_CHAIN_ID,
+            ChainFamily::Evm => request.chain_id,
         };
         let network = match chain_family {
             ChainFamily::Solana => normalize_solana_network(request.network.as_deref()),
@@ -31,7 +36,7 @@ impl WalletService {
         let wallet = WalletRepository::create_wallet(
             pool,
             &addr,
-            request.chain_id,
+            chain_id,
             &request.wallet_type,
             request.wallet_provider.as_deref(),
             request.wallet_name.as_deref(),
@@ -117,16 +122,24 @@ impl WalletService {
         let (wallets, total) = WalletRepository::list_wallets_for_address(pool, address).await?;
         let items = wallets
             .into_iter()
-            .map(|w| ConnectedWalletItem {
-                id: w.id,
-                address: w.address,
-                provider: wallet_display_name(
-                    &w.wallet_type,
-                    w.wallet_provider.as_deref(),
-                    w.wallet_name.as_deref(),
-                ),
-                currency: chain_id_to_currency(w.chain_id),
-                connected_at: w.connected_at,
+            .map(|w| {
+                let family = wallet_chain_family(&w);
+                ConnectedWalletItem {
+                    id: w.id,
+                    address: w.address.clone(),
+                    provider: wallet_display_name(
+                        &w.wallet_type,
+                        w.wallet_provider.as_deref(),
+                        w.wallet_name.as_deref(),
+                    ),
+                    chain_family: family.as_str().to_string(),
+                    currency: wallet_network_label(
+                        w.chain_id,
+                        &w.address,
+                        w.network.as_deref(),
+                    ),
+                    connected_at: w.connected_at,
+                }
             })
             .collect();
         Ok((items, total))
@@ -154,22 +167,5 @@ impl WalletService {
         .await?;
 
         Ok(())
-    }
-}
-
-fn chain_id_to_currency(chain_id: i64) -> String {
-    match chain_id {
-        1 => "Ethereum".to_string(),
-        56 => "BNB".to_string(),
-        137 => "Polygon".to_string(),
-        43114 => "Avalanche".to_string(),
-        8453 => "Base".to_string(),
-        42161 => "Arbitrum".to_string(),
-        10 => "Optimism".to_string(),
-        250 => "Fantom".to_string(),
-        5 => "Goerli".to_string(),
-        11155111 => "Sepolia".to_string(),
-        101 => "Solana".to_string(),
-        _ => format!("Chain {}", chain_id),
     }
 }

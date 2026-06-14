@@ -12,10 +12,11 @@ use sqlx::Error;
 use crate::clients::{etherscan, moralis_solana, rpc};
 use crate::db::DbPool;
 use crate::models::wallet::{
-    default_solana_network, is_valid_dashboard_wallet_address, is_valid_solana_address,
-    is_valid_wallet_address, parse_chain_family, solana_network_for_wallet, ConnectWalletRequest,
-    ChainFamily, ALLOWED_EVM_WALLET_TYPES, ALLOWED_SOLANA_WALLET_TYPES, CHAIN_ID_MAX, CHAIN_ID_MIN,
-    resolve_connect_wallet_metadata, WalletConnectValidationError, SOLANA_MAINNET_CHAIN_ID,
+    connect_chain_id, default_solana_network, is_valid_dashboard_wallet_address,
+    is_valid_solana_address, is_valid_wallet_address, resolve_connect_chain_family,
+    solana_network_for_wallet, ConnectWalletRequest, ChainFamily, ALLOWED_EVM_WALLET_TYPES,
+    ALLOWED_SOLANA_WALLET_TYPES, resolve_connect_wallet_metadata, WalletConnectValidationError,
+    CHAIN_ID_MAX, CHAIN_ID_MIN, SOLANA_MAINNET_CHAIN_ID,
 };
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::repositories::wallet_repository::WalletRepository;
@@ -60,7 +61,7 @@ async fn connect_wallet(
     State(pool): State<DbPool>,
     Json(request): Json<ConnectWalletRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let chain_family = parse_chain_family(request.chain_family.as_deref());
+    let chain_family = resolve_connect_chain_family(request.chain_family.as_deref(), &request.address);
 
     if !is_valid_wallet_address(&request.address, chain_family) {
         return Err((
@@ -110,37 +111,16 @@ async fn connect_wallet(
         }
     };
 
-    let effective_chain_id = match chain_family {
-        ChainFamily::Evm => {
-            if request.chain_id < CHAIN_ID_MIN || request.chain_id > CHAIN_ID_MAX {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "success": false,
-                        "message": "Invalid chain_id",
-                        "error": "Invalid chain_id"
-                    })),
-                ));
-            }
-            request.chain_id
-        }
-        ChainFamily::Solana => {
-            if request.chain_id == 0 {
-                SOLANA_MAINNET_CHAIN_ID
-            } else if request.chain_id < CHAIN_ID_MIN || request.chain_id > CHAIN_ID_MAX {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "success": false,
-                        "message": "Invalid chain_id",
-                        "error": "Invalid chain_id"
-                    })),
-                ));
-            } else {
-                request.chain_id
-            }
-        }
-    };
+    let effective_chain_id = connect_chain_id(chain_family, request.chain_id).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "success": false,
+                "message": "Invalid chain_id",
+                "error": "Invalid chain_id"
+            })),
+        )
+    })?;
 
     let mut req = request;
     req.wallet_type = resolved.wallet_type;

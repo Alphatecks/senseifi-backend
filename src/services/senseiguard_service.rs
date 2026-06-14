@@ -18,8 +18,8 @@ use crate::repositories::senseiguard_repository::{
 };
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::models::wallet::{
-    is_solana_wallet, solana_network_for_wallet, wallet_display_name, SOLANA_MAINNET_CHAIN_ID,
-    SOLANA_NATIVE_CONTRACT,
+    is_solana_wallet, is_valid_solana_address, solana_network_for_wallet, wallet_display_name,
+    wallet_network_label, ChainFamily, SOLANA_MAINNET_CHAIN_ID, SOLANA_NATIVE_CONTRACT,
 };
 use crate::services::protection_engine;
 use crate::services::threat_scoring_v2::{ThreatScoringV2, SCORING_MODEL_V2};
@@ -2103,15 +2103,32 @@ impl SenseiguardService {
             .map(|r| {
                 let score = r.security_score.unwrap_or(100);
                 let last_dt = r.last_scan_at.unwrap_or(r.connected_at);
+                let chain_family = if is_valid_solana_address(&r.address)
+                    || r.chain_id == SOLANA_MAINNET_CHAIN_ID
+                {
+                    ChainFamily::Solana
+                } else {
+                    ChainFamily::Evm
+                };
+                let chain_id = if chain_family == ChainFamily::Solana {
+                    SOLANA_MAINNET_CHAIN_ID
+                } else {
+                    r.chain_id
+                };
                 ActivityMonitorWalletResponse {
-                    address: r.address,
+                    address: r.address.clone(),
                     wallet_type_display: wallet_display_name(
                         &r.wallet_type,
                         r.wallet_provider.as_deref(),
                         r.wallet_name.as_deref(),
                     ),
-                    chain_id: r.chain_id,
-                    chain_name: Self::activity_monitor_chain_name(r.chain_id),
+                    chain_id,
+                    chain_family: chain_family.as_str().to_string(),
+                    chain_name: wallet_network_label(
+                        r.chain_id,
+                        &r.address,
+                        r.network.as_deref(),
+                    ),
                     status: if r.is_active { "Active" } else { "Inactive" }.to_string(),
                     security_level: Self::security_level_from_score(score),
                     last_activity: Self::format_relative_time(last_dt),
@@ -2150,18 +2167,6 @@ impl SenseiguardService {
             )
         } else {
             format!("{} days ago", d.num_days())
-        }
-    }
-
-    fn activity_monitor_chain_name(chain_id: i64) -> String {
-        match chain_id {
-            1 => "Ethereum".to_string(),
-            56 => "Binance Smart Chain".to_string(),
-            137 => "Polygon".to_string(),
-            8453 => "Base".to_string(),
-            42161 => "Arbitrum".to_string(),
-            10 => "Optimism".to_string(),
-            _ => format!("Chain {}", chain_id),
         }
     }
 
@@ -2330,14 +2335,11 @@ fn chain_id_to_network(chain_id: i64) -> String {
 }
 
 fn solana_network_label(wallet: &crate::models::wallet::Wallet) -> String {
-    if is_solana_wallet(wallet) {
-        match wallet.network.as_deref() {
-            Some("devnet") => "Solana Devnet".to_string(),
-            _ => "Solana Mainnet".to_string(),
-        }
-    } else {
-        chain_id_to_network(wallet.chain_id)
-    }
+    wallet_network_label(
+        wallet.chain_id,
+        &wallet.address,
+        wallet.network.as_deref(),
+    )
 }
 
 fn sol_native_metrics(assets: &[WalletAsset]) -> (f64, f64) {

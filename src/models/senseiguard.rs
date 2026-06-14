@@ -512,6 +512,7 @@ pub struct ActivityMonitorWalletResponse {
     pub address: String,
     pub wallet_type_display: String,
     pub chain_id: i64,
+    pub chain_family: String,
     pub chain_name: String,
     pub status: String,
     pub security_level: String,

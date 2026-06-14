@@ -69,6 +69,64 @@ pub fn parse_chain_family(raw: Option<&str>) -> ChainFamily {
     }
 }
 
+/// Resolve chain family from an explicit request field or wallet address format.
+pub fn resolve_connect_chain_family(chain_family: Option<&str>, address: &str) -> ChainFamily {
+    if chain_family.is_some() {
+        return parse_chain_family(chain_family);
+    }
+    if is_valid_solana_address(address) {
+        ChainFamily::Solana
+    } else {
+        ChainFamily::Evm
+    }
+}
+
+/// Canonical chain_id stored for a connect request (Solana always uses 101).
+pub fn connect_chain_id(chain_family: ChainFamily, request_chain_id: i64) -> Result<i64, ()> {
+    match chain_family {
+        ChainFamily::Solana => Ok(SOLANA_MAINNET_CHAIN_ID),
+        ChainFamily::Evm => {
+            if request_chain_id < CHAIN_ID_MIN || request_chain_id > CHAIN_ID_MAX {
+                Err(())
+            } else {
+                Ok(request_chain_id)
+            }
+        }
+    }
+}
+
+/// Human-readable network label for connected-wallet UI (address-aware for Solana).
+pub fn wallet_network_label(chain_id: i64, address: &str, network: Option<&str>) -> String {
+    if is_solana_wallet_row(chain_id, address) {
+        match network.map(str::trim).filter(|s| !s.is_empty()) {
+            Some("devnet") => "Solana Devnet".to_string(),
+            _ => "Solana".to_string(),
+        }
+    } else {
+        evm_chain_id_to_network_label(chain_id)
+    }
+}
+
+fn is_solana_wallet_row(chain_id: i64, address: &str) -> bool {
+    chain_id == SOLANA_MAINNET_CHAIN_ID || is_valid_solana_address(address)
+}
+
+fn evm_chain_id_to_network_label(chain_id: i64) -> String {
+    match chain_id {
+        1 => "Ethereum".to_string(),
+        56 => "BNB".to_string(),
+        137 => "Polygon".to_string(),
+        43114 => "Avalanche".to_string(),
+        8453 => "Base".to_string(),
+        42161 => "Arbitrum".to_string(),
+        10 => "Optimism".to_string(),
+        250 => "Fantom".to_string(),
+        5 => "Goerli".to_string(),
+        11155111 => "Sepolia".to_string(),
+        _ => format!("Chain {}", chain_id),
+    }
+}
+
 /// Valid Ethereum address: 0x + 40 hex chars. Used to reject path/body injection and malformed input.
 pub fn is_valid_eth_address(s: &str) -> bool {
     s.len() == 42 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit())
@@ -385,7 +443,7 @@ pub fn solana_network_for_wallet(wallet: &Wallet) -> String {
 
 /// Whether a stored wallet row is Solana (by chain_id or address format).
 pub fn is_solana_wallet(wallet: &Wallet) -> bool {
-    wallet.chain_id == SOLANA_MAINNET_CHAIN_ID || is_valid_solana_address(&wallet.address)
+    is_solana_wallet_row(wallet.chain_id, &wallet.address)
 }
 
 /// Chain family inferred from a stored wallet row.
@@ -406,12 +464,14 @@ pub struct WalletResponse {
     pub id: Uuid,
     pub address: String,
     pub chain_id: i64,
+    pub chain_family: String,
     pub wallet_type: String,
     pub wallet_provider: Option<String>,
     pub wallet_name: Option<String>,
     pub provider_display: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<String>,
+    pub network_label: String,
     pub connected_at: DateTime<Utc>,
     pub is_active: bool,
 }
@@ -423,15 +483,26 @@ impl From<Wallet> for WalletResponse {
             wallet.wallet_provider.as_deref(),
             wallet.wallet_name.as_deref(),
         );
+        let chain_family = wallet_chain_family(&wallet);
         WalletResponse {
             id: wallet.id,
-            address: wallet.address,
-            chain_id: wallet.chain_id,
+            address: wallet.address.clone(),
+            chain_id: if chain_family == ChainFamily::Solana {
+                SOLANA_MAINNET_CHAIN_ID
+            } else {
+                wallet.chain_id
+            },
+            chain_family: chain_family.as_str().to_string(),
             wallet_type: wallet.wallet_type,
             wallet_provider: wallet.wallet_provider,
             wallet_name: wallet.wallet_name,
             provider_display,
-            network: wallet.network,
+            network: wallet.network.clone(),
+            network_label: wallet_network_label(
+                wallet.chain_id,
+                &wallet.address,
+                wallet.network.as_deref(),
+            ),
             connected_at: wallet.connected_at,
             is_active: wallet.is_active,
         }
@@ -486,6 +557,34 @@ mod tests {
             "kXB7FfzdrfZpAZEW3TZcp8a8CwQbsowa6BdfAHZ4gVs"
         ));
     }
+
+    #[test]
+    fn resolve_connect_chain_family_from_solana_address() {
+        assert_eq!(
+            resolve_connect_chain_family(None, "kXB7FfzdrfZpAZEW3TZcp8a8CwQbsowa6BdfAHZ4gVs"),
+            ChainFamily::Solana
+        );
+    }
+
+    #[test]
+    fn wallet_network_label_solana_despite_wrong_chain_id() {
+        assert_eq!(
+            wallet_network_label(
+                1,
+                "kXB7FfzdrfZpAZEW3TZcp8a8CwQbsowa6BdfAHZ4gVs",
+                Some("mainnet")
+            ),
+            "Solana"
+        );
+    }
+
+    #[test]
+    fn connect_chain_id_solana_ignores_evm_chain_id() {
+        assert_eq!(
+            connect_chain_id(ChainFamily::Solana, 1).expect("solana"),
+            SOLANA_MAINNET_CHAIN_ID
+        );
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -503,6 +602,7 @@ pub struct ConnectedWalletItem {
     pub id: Uuid,
     pub address: String,
     pub provider: String,
+    pub chain_family: String,
     pub currency: String,
     pub connected_at: DateTime<Utc>,
 }
