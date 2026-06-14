@@ -746,7 +746,7 @@ async fn extension_scan_smart_contract(
     }
     let chain_family =
         resolve_scan_chain_family(req.chain_family.as_deref(), &contract_address);
-    if !is_valid_wallet_address(&req.wallet_address, chain_family) {
+    if !is_valid_security_wallet_address(&req.wallet_address) {
         return Err(extension_error(
             StatusCode::BAD_REQUEST,
             "Invalid wallet_address format",
@@ -1163,7 +1163,7 @@ async fn extension_screen_action(
                     "Invalid contract_address",
                 ));
             }
-            if !is_valid_wallet_address(&req.wallet_address, chain_family) {
+            if !is_valid_security_wallet_address(&req.wallet_address) {
                 return Err(extension_error(
                     StatusCode::BAD_REQUEST,
                     "Invalid wallet_address format",

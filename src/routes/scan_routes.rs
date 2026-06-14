@@ -14,7 +14,7 @@ use crate::models::senseiguard::{
     ScamPatternResponse, ScanContractRequest, ScanContractResponse,
 };
 use crate::models::wallet::{
-    is_valid_scan_contract_address, is_valid_solana_address, is_valid_wallet_address,
+    is_valid_scan_contract_address, is_valid_security_wallet_address, is_valid_solana_address,
     normalize_solana_network, resolve_scan_chain_family,
 };
 use crate::repositories::senseiguard_repository::SenseiguardRepository;
@@ -123,11 +123,12 @@ async fn scan_contract(
         ));
     }
     let chain_family = resolve_scan_chain_family(request.chain_family.as_deref(), &address);
+    // Bill XP against the connected wallet's chain, not the scan target's chain.
     let for_address = request
         .for_address
         .as_ref()
         .map(|s| normalize_contract_input(s))
-        .filter(|s| is_valid_wallet_address(s, chain_family));
+        .filter(|s| is_valid_security_wallet_address(s));
     let for_ref = for_address.as_deref();
     if let Some(wallet) = for_ref {
         if let Err(e) = xp_usage_service::charge_wallet_usage(
