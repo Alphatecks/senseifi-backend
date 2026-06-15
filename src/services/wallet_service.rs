@@ -120,29 +120,20 @@ impl WalletService {
         address: &str,
     ) -> Result<(Vec<ConnectedWalletItem>, i64), Error> {
         let (wallets, total) = WalletRepository::list_wallets_for_address(pool, address).await?;
-        let items = wallets
-            .into_iter()
-            .map(|w| {
-                let family = wallet_chain_family(&w);
-                ConnectedWalletItem {
-                    id: w.id,
-                    address: w.address.clone(),
-                    provider: wallet_display_name(
-                        &w.wallet_type,
-                        w.wallet_provider.as_deref(),
-                        w.wallet_name.as_deref(),
-                    ),
-                    chain_family: family.as_str().to_string(),
-                    currency: wallet_network_label(
-                        w.chain_id,
-                        &w.address,
-                        w.network.as_deref(),
-                    ),
-                    connected_at: w.connected_at,
-                }
-            })
-            .collect();
-        Ok((items, total))
+        Ok((wallets.into_iter().map(wallet_to_connected_item).collect(), total))
+    }
+
+    /// All active connected networks for one user (EVM + Solana).
+    pub async fn list_connected_wallets_for_user(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<(Vec<ConnectedWalletItem>, i64), Error> {
+        let wallets = WalletRepository::get_all_active_wallets_by_user(pool, user_id).await?;
+        let total = wallets.len() as i64;
+        Ok((
+            wallets.into_iter().map(wallet_to_connected_item).collect(),
+            total,
+        ))
     }
 
     pub async fn disconnect_wallet(pool: &DbPool, address: &str) -> Result<(), Error> {
@@ -167,5 +158,29 @@ impl WalletService {
         .await?;
 
         Ok(())
+    }
+}
+
+fn wallet_to_connected_item(w: crate::models::wallet::Wallet) -> ConnectedWalletItem {
+    let family = wallet_chain_family(&w);
+    let network_label = wallet_network_label(w.chain_id, &w.address, w.network.as_deref());
+    ConnectedWalletItem {
+        id: w.id,
+        address: w.address.clone(),
+        provider: wallet_display_name(
+            &w.wallet_type,
+            w.wallet_provider.as_deref(),
+            w.wallet_name.as_deref(),
+        ),
+        chain_family: family.as_str().to_string(),
+        chain_id: if family == ChainFamily::Solana {
+            SOLANA_MAINNET_CHAIN_ID
+        } else {
+            w.chain_id
+        },
+        currency: network_label.clone(),
+        network: w.network.clone(),
+        network_label,
+        connected_at: w.connected_at,
     }
 }

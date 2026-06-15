@@ -42,6 +42,9 @@ pub struct ConnectWalletRequest {
     /// Human-readable wallet name from the client (optional; used for dashboard display).
     #[serde(default)]
     pub wallet_name: Option<String>,
+    /// When adding another network, inherit `user_id` from this already-connected wallet address.
+    #[serde(default)]
+    pub link_wallet_address: Option<String>,
 }
 
 /// Supported chain families for multi-chain protection and wallet connect.
@@ -596,14 +599,18 @@ pub struct WalletStatusResponse {
     pub connected_at: DateTime<Utc>,
 }
 
-/// One row for Connected Wallet list UI: provider name, currency, address.
+/// One row for Connected Wallet list UI: provider name, network, address.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConnectedWalletItem {
     pub id: Uuid,
     pub address: String,
     pub provider: String,
     pub chain_family: String,
+    pub chain_id: i64,
     pub currency: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<String>,
+    pub network_label: String,
     pub connected_at: DateTime<Utc>,
 }
 

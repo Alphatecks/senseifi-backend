@@ -29,6 +29,8 @@ use crate::services::wallet_service::WalletService;
 struct ListWalletsQuery {
     /// Active account address: only this wallet is returned (the one used for security checks).
     for_address: Option<String>,
+    /// All active connected networks for this user (EVM + Solana). Preferred for "Connected networks" UI.
+    user_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +129,31 @@ async fn connect_wallet(
     req.wallet_provider = resolved.wallet_provider;
     req.wallet_name = resolved.wallet_name;
     req.chain_id = effective_chain_id;
+
+    // Link another network to the same dashboard user when adding Solana/EVM alongside an existing wallet.
+    let user_id_missing = req
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_none();
+    if user_id_missing {
+        if let Some(link_addr) = req
+            .link_wallet_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if is_valid_dashboard_wallet_address(link_addr) {
+                if let Ok(Some(linked)) = WalletRepository::get_wallet_by_address(&pool, link_addr).await
+                {
+                    if let Some(uid) = linked.user_id.filter(|s| !s.is_empty()) {
+                        req.user_id = Some(uid);
+                    }
+                }
+            }
+        }
+    }
 
     // If frontend doesn't send user_id, create/get dashboard user (random user_id, display_name, user_number).
     let dashboard_user = if req.user_id.is_none()
@@ -454,28 +481,43 @@ async fn list_connected_wallets(
     State(pool): State<DbPool>,
     Query(q): Query<ListWalletsQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let address = match &q.for_address {
-        Some(a) if !a.is_empty() => a.as_str(),
-        _ => {
+    let user_id = q
+        .user_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let for_address = q
+        .for_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let result = match (user_id, for_address) {
+        (Some(uid), _) => WalletService::list_connected_wallets_for_user(&pool, uid).await,
+        (None, Some(address)) => {
+            if !is_valid_dashboard_wallet_address(address) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "success": false,
+                        "error": "Invalid wallet address format"
+                    })),
+                ));
+            }
+            WalletService::list_connected_wallets_for_account(&pool, address).await
+        }
+        (None, None) => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "success": false,
-                    "error": "for_address is required (active account address used for security checks)"
+                    "error": "user_id or for_address is required (user_id lists all connected networks)"
                 })),
             ));
         }
     };
-    if !is_valid_dashboard_wallet_address(address) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "success": false,
-                "error": "Invalid wallet address format"
-            })),
-        ));
-    }
-    match WalletService::list_connected_wallets_for_account(&pool, address).await {
+
+    match result {
         Ok((data, total)) => Ok(Json(json!({
             "success": true,
             "data": data,
