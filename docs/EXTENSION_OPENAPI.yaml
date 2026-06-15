@@ -1,11 +1,16 @@
 openapi: 3.1.0
 info:
   title: SenseiGuard Extension Backend API
-  version: 1.0.0
+  version: 1.1.0
   summary: Backend contracts for the SenseiGuard extension background service worker
   description: |
     Canonical OpenAPI contract for extension runtime calls.
     This document reflects implemented backend endpoints and compatibility fields.
+
+    **Multi-network wallets:** One `user_id` can own multiple wallet rows (one per unique
+    address). Same EVM `0x` address on different EIP-155 chains is still **one row**
+    (upsert on `address`; `chain_id` is last-connected chain). EVM + Solana = two rows.
+    Use `GET /wallets?user_id=` for the Connected networks panel.
 
 servers:
   - url: https://senseifi-backend.onrender.com/api
@@ -328,18 +333,129 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /wallets:
+    get:
+      tags: [Wallet]
+      operationId: listConnectedWallets
+      summary: List connected wallets (one address or all networks for a user)
+      description: |
+        **Connected networks UI:** use `user_id` to return all active wallets (EVM + Solana).
+
+        `for_address` returns at most one row for that address (legacy / active-account scope).
+        One of `user_id` or `for_address` is required.
+      parameters:
+        - in: query
+          name: user_id
+          schema:
+            type: string
+          description: Dashboard user id from connect response. Lists all connected networks.
+        - in: query
+          name: for_address
+          schema:
+            $ref: "#/components/schemas/DashboardWalletAddress"
+          description: Single-wallet lookup by address (0 or 1 row).
+      responses:
+        "200":
+          description: Connected wallet list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectedWalletListResponse"
+              examples:
+                evmAndSolana:
+                  summary: One user with Ethereum + Solana
+                  value:
+                    success: true
+                    data:
+                      - id: "a1111111-1111-4111-8111-111111111111"
+                        address: "0xb5311dc5d23cb2ea942feca4c7880a111795d494"
+                        provider: "WalletConnect"
+                        chain_family: "evm"
+                        chain_id: 1
+                        currency: "Ethereum"
+                        network: null
+                        network_label: "Ethereum"
+                        connected_at: "2026-03-14T10:00:00Z"
+                      - id: "b2222222-2222-4222-8222-222222222222"
+                        address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+                        provider: "Phantom"
+                        chain_family: "solana"
+                        chain_id: 101
+                        currency: "Solana"
+                        network: "mainnet"
+                        network_label: "Solana"
+                        connected_at: "2026-03-14T10:05:00Z"
+                    pagination:
+                      page: 1
+                      per_page: 2
+                      total: 2
+        "400":
+          description: Missing user_id/for_address or invalid address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /wallets/connect:
     post:
       tags: [Wallet]
       operationId: connectWallet
-      summary: Register connected wallet session
-      description: Called by extension popup and web wallet flow.
+      summary: Register or refresh a connected wallet (upsert by address)
+      description: |
+        Called by extension popup and web wallet flow.
+
+        **Upsert:** `address` is unique. Re-connecting the same address updates metadata
+        (`chain_id`, `wallet_type`, `user_id`, etc.).
+
+        **Multi-network:** Pass the same `user_id` on every connect, or use
+        `link_wallet_address` when adding Solana after EVM (or vice versa).
+
+        **EVM WalletConnect:** `wallet_type` must be `walletconnect`. Optional
+        `wallet_provider` / `wallet_name` carry the underlying app (e.g. Trust Wallet).
+
+        **Solana:** `chain_family: solana`, `wallet_type` one of `phantom` | `solflare` |
+        `backpack`. Server stores `chain_id: 101` regardless of body `chain_id`.
       requestBody:
         required: true
         content:
           application/json:
             schema:
               $ref: "#/components/schemas/WalletConnectRequest"
+            examples:
+              evmWalletConnect:
+                summary: EVM via WalletConnect (Ethereum mainnet)
+                value:
+                  address: "0xb5311dc5d23cb2ea942feca4c7880a111795d494"
+                  chain_id: 1
+                  chain_family: evm
+                  wallet_type: walletconnect
+                  wallet_provider: trustwallet
+                  wallet_name: "Trust Wallet"
+              solanaPhantomLinked:
+                summary: Solana Phantom linked to existing EVM wallet
+                value:
+                  address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+                  chain_id: 101
+                  chain_family: solana
+                  wallet_type: phantom
+                  wallet_provider: phantom
+                  network: mainnet-beta
+                  link_wallet_address: "0xb5311dc5d23cb2ea942feca4c7880a111795d494"
+              solanaPhantomWithUserId:
+                summary: Solana with explicit user_id (preferred)
+                value:
+                  address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+                  chain_id: 101
+                  chain_family: solana
+                  wallet_type: phantom
+                  network: mainnet-beta
+                  user_id: "fetrtwgebejhss"
       responses:
         "200":
           description: Wallet connected
@@ -347,6 +463,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/WalletConnectResponse"
+              examples:
+                evmConnect:
+                  summary: EVM connect response (save dashboard_user.user_id)
+                  value:
+                    success: true
+                    data:
+                      id: "a1111111-1111-4111-8111-111111111111"
+                      address: "0xb5311dc5d23cb2ea942feca4c7880a111795d494"
+                      chain_id: 1
+                      chain_family: evm
+                      wallet_type: walletconnect
+                      wallet_provider: trustwallet
+                      wallet_name: "Trust Wallet"
+                      provider_display: "Trust Wallet"
+                      network: null
+                      network_label: "Ethereum"
+                      connected_at: "2026-03-14T10:00:00Z"
+                      is_active: true
+                    dashboard_user:
+                      user_id: "fetrtwgebejhss"
+                      display_name: "Stealth bag"
+                      user_number: 2314
+                      user_label: "User 2314"
+                solanaConnect:
+                  summary: Solana connect (same user_id as EVM)
+                  value:
+                    success: true
+                    data:
+                      id: "b2222222-2222-4222-8222-222222222222"
+                      address: "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+                      chain_id: 101
+                      chain_family: solana
+                      wallet_type: phantom
+                      wallet_provider: phantom
+                      wallet_name: null
+                      provider_display: "Phantom"
+                      network: mainnet
+                      network_label: "Solana"
+                      connected_at: "2026-03-14T10:05:00Z"
+                      is_active: true
         "400":
           description: Validation error
           content:
@@ -361,6 +517,69 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /wallets/{address}:
+    get:
+      tags: [Wallet]
+      operationId: getWallet
+      summary: Get one connected wallet by address
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/DashboardWalletAddress"
+      responses:
+        "200":
+          description: Wallet row
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success, data]
+                properties:
+                  success:
+                    type: boolean
+                  data:
+                    $ref: "#/components/schemas/WalletData"
+        "404":
+          description: Wallet not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    delete:
+      tags: [Wallet]
+      operationId: disconnectWallet
+      summary: Disconnect one wallet (EVM or Solana)
+      description: Sets `is_active=false` for this address only. Other networks under the same user_id remain active.
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/DashboardWalletAddress"
+      responses:
+        "200":
+          description: Wallet disconnected
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [success]
+                properties:
+                  success:
+                    type: boolean
+                  message:
+                    type: string
+        "404":
+          description: Wallet not found
           content:
             application/json:
               schema:
@@ -897,23 +1116,169 @@ components:
           maxLength: 64
         user_id:
           type: string
+          description: |
+            Dashboard user id. Reuse the same value when connecting additional networks.
+            If omitted, backend may create a new dashboard user per address unless
+            `link_wallet_address` resolves an existing user.
+        link_wallet_address:
+          description: |
+            When adding a second network, inherit `user_id` from this already-connected
+            wallet (EVM or Solana). Alternative to passing `user_id` directly.
+          oneOf:
+            - $ref: "#/components/schemas/EvmAddress"
+            - $ref: "#/components/schemas/SolanaAddress"
 
-    WalletConnectResponse:
+    WalletData:
       type: object
-      additionalProperties: true
+      additionalProperties: false
       required:
-        - success
+        - id
+        - address
+        - chain_id
+        - chain_family
+        - wallet_type
+        - provider_display
+        - network_label
+        - connected_at
+        - is_active
+      properties:
+        id:
+          type: string
+          format: uuid
+        address:
+          oneOf:
+            - $ref: "#/components/schemas/EvmAddress"
+            - $ref: "#/components/schemas/SolanaAddress"
+        chain_id:
+          type: integer
+          description: EIP-155 chain id for EVM; always 101 for Solana rows.
+        chain_family:
+          type: string
+          enum: [evm, solana]
+        wallet_type:
+          type: string
+          description: |
+            EVM connection method (`walletconnect`, `metamask`, …) or Solana app slug
+            (`phantom`, `solflare`, `backpack`).
+        wallet_provider:
+          type: string
+          nullable: true
+        wallet_name:
+          type: string
+          nullable: true
+        provider_display:
+          type: string
+          description: UI label (prefers wallet_name, then provider, then wallet_type).
+        network:
+          type: string
+          nullable: true
+          description: Solana cluster (`mainnet` | `devnet`). Null for EVM.
+        network_label:
+          type: string
+          description: Human-readable network for UI (e.g. Ethereum, Solana).
+        connected_at:
+          type: string
+          format: date-time
+        is_active:
+          type: boolean
+
+    DashboardUser:
+      type: object
+      additionalProperties: false
+      required: [user_id, display_name, user_number, user_label]
+      properties:
+        user_id:
+          type: string
+          description: Persist in frontend after first connect; pass on subsequent connects.
+        display_name:
+          type: string
+        user_number:
+          type: integer
+        user_label:
+          type: string
+          description: e.g. "User 2314"
+
+    ConnectedWalletItem:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - address
+        - provider
+        - chain_family
+        - chain_id
+        - currency
+        - network_label
+        - connected_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        address:
+          oneOf:
+            - $ref: "#/components/schemas/EvmAddress"
+            - $ref: "#/components/schemas/SolanaAddress"
+        provider:
+          type: string
+          description: Same as WalletData.provider_display.
+        chain_family:
+          type: string
+          enum: [evm, solana]
+        chain_id:
+          type: integer
+        currency:
+          type: string
+          description: Network label (duplicate of network_label for backward compatibility).
+        network:
+          type: string
+          nullable: true
+        network_label:
+          type: string
+        connected_at:
+          type: string
+          format: date-time
+
+    ConnectedWalletListResponse:
+      type: object
+      additionalProperties: false
+      required: [success, data, pagination]
       properties:
         success:
           type: boolean
         data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ConnectedWalletItem"
+        pagination:
           type: object
-          additionalProperties: true
+          additionalProperties: false
+          required: [page, per_page, total]
+          properties:
+            page:
+              type: integer
+            per_page:
+              type: integer
+            total:
+              type: integer
+
+    WalletConnectResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - success
+        - data
+      properties:
+        success:
+          type: boolean
+        data:
+          $ref: "#/components/schemas/WalletData"
         dashboard_user:
           oneOf:
-            - type: object
-              additionalProperties: true
+            - $ref: "#/components/schemas/DashboardUser"
             - type: "null"
+          description: |
+            Present when backend created or resolved dashboard identity on connect.
+            Store `user_id` client-side for multi-network listing and overview APIs.
         message:
           type: string
 
@@ -923,12 +1288,27 @@ components:
       required: [contract_address]
       properties:
         contract_address:
-          $ref: "#/components/schemas/EvmAddress"
+          description: EVM contract (0x…) or Solana program ID (base58).
+          oneOf:
+            - $ref: "#/components/schemas/EvmAddress"
+            - $ref: "#/components/schemas/SolanaAddress"
         for_address:
-          $ref: "#/components/schemas/EvmAddress"
+          description: Billing / scan-history wallet (EVM or Solana).
+          oneOf:
+            - $ref: "#/components/schemas/EvmAddress"
+            - $ref: "#/components/schemas/SolanaAddress"
         chain_id:
           type: integer
           minimum: 1
+          description: EVM chain id; 101 convention for Solana.
+        chain_family:
+          type: string
+          enum: [evm, solana]
+          description: Auto-detected from address when omitted.
+        network:
+          type: string
+          enum: [mainnet, mainnet-beta, devnet]
+          description: Solana cluster (informational in scan response).
 
     ScanContractResponse:
       type: object
