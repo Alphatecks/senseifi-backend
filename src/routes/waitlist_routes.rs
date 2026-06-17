@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 use crate::db::DbPool;
 use crate::models::waitlist::{xp_breakdown_json, xp_claim_json};
-use crate::models::wallet::is_valid_eth_address;
+use crate::models::wallet::is_valid_dashboard_wallet_address;
 use crate::services::waitlist_service::{self, WaitlistXpError};
 use crate::services::xp_usage_service::{self, XpUsageError};
 
@@ -133,7 +133,7 @@ async fn get_xp_status(
 
     let result = match (wallet_address, user_id) {
         (Some(addr), _) => {
-            if !is_valid_eth_address(addr) {
+            if !is_valid_dashboard_wallet_address(addr) {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(json!({
@@ -187,7 +187,7 @@ async fn get_xp_usage(
         .filter(|s| !s.is_empty());
 
     if let Some(addr) = wallet_address {
-        if !is_valid_eth_address(addr) {
+        if !is_valid_dashboard_wallet_address(addr) {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(json!({

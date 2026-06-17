@@ -83,8 +83,18 @@ pub async fn charge_wallet_usage(
     }
 
     let wallet_address = normalize_wallet_address_for_lookup(wallet_address);
-    let Some(claim) = WaitlistRepository::get_claim_by_wallet(pool, &wallet_address).await? else {
-        return Ok(None);
+    let claim = match crate::services::waitlist_service::get_claim_for_connected_wallet(
+        pool,
+        &wallet_address,
+    )
+    .await
+    {
+        Ok(Some(c)) => c,
+        Ok(None) => return Ok(None),
+        Err(crate::services::waitlist_service::WaitlistXpError::Database(e)) => {
+            return Err(XpUsageError::Database(e));
+        }
+        Err(_) => return Ok(None),
     };
 
     charge_user_usage(pool, &claim.user_id, &wallet_address, action, metadata).await
@@ -186,16 +196,31 @@ pub async fn list_usage_for_account(
         uid.to_string()
     } else {
         let addr = normalize_wallet_address_for_lookup(wallet_address.unwrap_or_default());
-        match WaitlistRepository::get_claim_by_wallet(pool, &addr).await? {
-            Some(claim) => claim.user_id,
-            None => {
+        let claim = match crate::services::waitlist_service::get_claim_for_connected_wallet(
+            pool,
+            &addr,
+        )
+        .await
+        {
+            Ok(Some(c)) => c,
+            Ok(None) => {
                 return Ok(json!({
                     "success": true,
                     "claimed": false,
                     "data": []
                 }));
             }
-        }
+            Err(crate::services::waitlist_service::WaitlistXpError::Database(e)) => {
+                return Err(XpUsageError::Database(e));
+            }
+            Err(_) => {
+                return Ok(json!({
+                    "success": false,
+                    "error": "Invalid wallet address format"
+                }));
+            }
+        };
+        claim.user_id
     };
 
     let claim = WaitlistRepository::get_claim_by_user_id(pool, &resolved_user_id).await?;

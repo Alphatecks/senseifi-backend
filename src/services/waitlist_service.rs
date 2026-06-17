@@ -2,7 +2,9 @@
 
 use crate::db::DbPool;
 use crate::models::waitlist::{ClaimXpResult, UserXpClaim, WaitlistXpBreakdown};
-use crate::models::wallet::{canonical_eth_address, is_valid_eth_address};
+use crate::models::wallet::{
+    is_valid_dashboard_wallet_address, normalize_wallet_address_for_lookup,
+};
 use crate::repositories::waitlist_repository::{WaitlistRepository, WELCOME_WAITLIST_ENTRY_ID};
 use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::dashboard_user_service;
@@ -71,6 +73,36 @@ pub fn welcome_xp_amount() -> i32 {
         .unwrap_or(100)
 }
 
+fn normalize_xp_wallet_address(wallet_address: &str) -> String {
+    normalize_wallet_address_for_lookup(wallet_address)
+}
+
+/// Resolve XP claim for a connected wallet (EVM or Solana). Falls back to user_id on the wallet row
+/// so multi-chain users see welcome XP granted on their other linked network.
+pub async fn get_claim_for_connected_wallet(
+    pool: &DbPool,
+    wallet_address: &str,
+) -> Result<Option<UserXpClaim>, WaitlistXpError> {
+    if !is_valid_dashboard_wallet_address(wallet_address) {
+        return Err(WaitlistXpError::InvalidWalletAddress);
+    }
+    let lookup = normalize_xp_wallet_address(wallet_address);
+    if let Some(claim) = WaitlistRepository::get_claim_by_wallet(pool, &lookup).await? {
+        return Ok(Some(claim));
+    }
+    if let Some(wallet) = WalletRepository::get_wallet_by_address(pool, &lookup)
+        .await?
+        .filter(|w| w.is_active)
+    {
+        if let Some(uid) = wallet.user_id.filter(|s| !s.is_empty()) {
+            return WaitlistRepository::get_claim_by_user_id(pool, &uid)
+                .await
+                .map_err(WaitlistXpError::from);
+        }
+    }
+    Ok(None)
+}
+
 fn welcome_claim_email(user_id: &str) -> String {
     format!("welcome+{user_id}@senseifi.internal")
 }
@@ -94,10 +126,11 @@ pub async fn ensure_welcome_xp_claim(
     }
 
     let email = welcome_claim_email(user_id);
+    let wallet_address = normalize_xp_wallet_address(wallet_address);
     WaitlistRepository::insert_claim(
         pool,
         user_id,
-        wallet_address,
+        &wallet_address,
         WELCOME_WAITLIST_ENTRY_ID,
         &email,
         amount,
@@ -143,10 +176,10 @@ pub async fn claim_xp(
     wallet_address: &str,
 ) -> Result<ClaimXpResult, WaitlistXpError> {
     let email = normalize_email(email).ok_or(WaitlistXpError::InvalidEmail)?;
-    if !is_valid_eth_address(wallet_address) {
+    if !is_valid_dashboard_wallet_address(wallet_address) {
         return Err(WaitlistXpError::InvalidWalletAddress);
     }
-    let wallet_address = canonical_eth_address(wallet_address);
+    let wallet_address = normalize_xp_wallet_address(wallet_address);
 
     let wallet = WalletRepository::get_wallet_by_address(pool, &wallet_address)
         .await?
@@ -239,13 +272,7 @@ pub async fn get_claim_for_wallet(
     pool: &DbPool,
     wallet_address: &str,
 ) -> Result<Option<UserXpClaim>, WaitlistXpError> {
-    if !is_valid_eth_address(wallet_address) {
-        return Err(WaitlistXpError::InvalidWalletAddress);
-    }
-    let wallet_address = canonical_eth_address(wallet_address);
-    WaitlistRepository::get_claim_by_wallet(pool, &wallet_address)
-        .await
-        .map_err(WaitlistXpError::from)
+    get_claim_for_connected_wallet(pool, wallet_address).await
 }
 
 pub async fn get_claim_for_user_id(
