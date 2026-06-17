@@ -1,7 +1,7 @@
 //! Creates or returns dashboard identity (user_id, display_name, user_number) when user connects wallet.
 
 use crate::db::DbPool;
-use crate::models::wallet::{canonical_eth_address, DashboardUser};
+use crate::models::wallet::{canonical_eth_address, is_valid_solana_address, DashboardUser};
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::services::waitlist_service;
 use rand::Rng;
@@ -46,7 +46,11 @@ pub async fn get_or_create_for_wallet(
     pool: &DbPool,
     wallet_address: &str,
 ) -> Result<DashboardUser, Error> {
-    let addr = canonical_eth_address(wallet_address);
+    let addr = if is_valid_solana_address(wallet_address) {
+        wallet_address.trim().to_string()
+    } else {
+        canonical_eth_address(wallet_address)
+    };
     if let Some(du) = DashboardUserRepository::get_by_wallet(pool, &addr).await? {
         if let Err(e) = waitlist_service::ensure_welcome_xp_claim(pool, &du.user_id, &addr).await {
             eprintln!("ensure_welcome_xp_claim (existing user): {}", e);

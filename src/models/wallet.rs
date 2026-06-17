@@ -66,22 +66,29 @@ impl ChainFamily {
 
 /// Parse optional chain_family request field; defaults to EVM for backward compatibility.
 pub fn parse_chain_family(raw: Option<&str>) -> ChainFamily {
-    match raw.unwrap_or("evm").trim().to_lowercase().as_str() {
+    match raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("evm")
+        .to_lowercase()
+        .as_str()
+    {
         "solana" => ChainFamily::Solana,
         _ => ChainFamily::Evm,
     }
 }
 
 /// Resolve chain family from an explicit request field or wallet address format.
+/// Address shape wins when unambiguous (e.g. Solana pubkey even if client sends chain_family: evm).
 pub fn resolve_connect_chain_family(chain_family: Option<&str>, address: &str) -> ChainFamily {
-    if chain_family.is_some() {
-        return parse_chain_family(chain_family);
-    }
+    let address = address.trim();
     if is_valid_solana_address(address) {
-        ChainFamily::Solana
-    } else {
-        ChainFamily::Evm
+        return ChainFamily::Solana;
     }
+    if is_valid_eth_address(address) {
+        return ChainFamily::Evm;
+    }
+    parse_chain_family(chain_family)
 }
 
 /// Canonical chain_id stored for a connect request (Solana always uses 101).
@@ -132,11 +139,13 @@ fn evm_chain_id_to_network_label(chain_id: i64) -> String {
 
 /// Valid Ethereum address: 0x + 40 hex chars. Used to reject path/body injection and malformed input.
 pub fn is_valid_eth_address(s: &str) -> bool {
+    let s = s.trim();
     s.len() == 42 && s.starts_with("0x") && s[2..].chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Valid Solana pubkey: base58-encoded 32-byte key (32–44 chars, no 0/O/I/l).
 pub fn is_valid_solana_address(s: &str) -> bool {
+    let s = s.trim();
     if s.len() < 32 || s.len() > 44 {
         return false;
     }
@@ -565,6 +574,24 @@ mod tests {
     fn resolve_connect_chain_family_from_solana_address() {
         assert_eq!(
             resolve_connect_chain_family(None, "kXB7FfzdrfZpAZEW3TZcp8a8CwQbsowa6BdfAHZ4gVs"),
+            ChainFamily::Solana
+        );
+    }
+
+    #[test]
+    fn solana_address_preserves_mixed_case() {
+        let addr = "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU";
+        assert!(is_valid_solana_address(addr));
+        assert_ne!(addr, &addr.to_lowercase());
+    }
+
+    #[test]
+    fn resolve_connect_chain_family_evm_hint_ignored_for_solana_address() {
+        assert_eq!(
+            resolve_connect_chain_family(
+                Some("evm"),
+                "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+            ),
             ChainFamily::Solana
         );
     }

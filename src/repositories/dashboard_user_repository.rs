@@ -1,5 +1,5 @@
 use crate::db::DbPool;
-use crate::models::wallet::DashboardUser;
+use crate::models::wallet::{is_valid_solana_address, DashboardUser};
 use sqlx::Error;
 
 pub struct DashboardUserRepository;
@@ -9,12 +9,21 @@ impl DashboardUserRepository {
         pool: &DbPool,
         wallet_address: &str,
     ) -> Result<Option<DashboardUser>, Error> {
-        let row = sqlx::query_as::<_, (String, String, i32)>(
-            "SELECT user_id, display_name, user_number FROM dashboard_users WHERE LOWER(wallet_address) = LOWER($1)",
-        )
-        .bind(wallet_address)
-        .fetch_optional(pool)
-        .await?;
+        let row = if is_valid_solana_address(wallet_address) {
+            sqlx::query_as::<_, (String, String, i32)>(
+                "SELECT user_id, display_name, user_number FROM dashboard_users WHERE wallet_address = $1",
+            )
+            .bind(wallet_address.trim())
+            .fetch_optional(pool)
+            .await?
+        } else {
+            sqlx::query_as::<_, (String, String, i32)>(
+                "SELECT user_id, display_name, user_number FROM dashboard_users WHERE LOWER(wallet_address) = LOWER($1)",
+            )
+            .bind(wallet_address)
+            .fetch_optional(pool)
+            .await?
+        };
         Ok(
             row.map(|(user_id, display_name, user_number)| DashboardUser {
                 user_id,
