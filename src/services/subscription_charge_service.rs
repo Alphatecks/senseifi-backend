@@ -39,10 +39,17 @@ impl SubscriptionChargeService {
     }
 
     pub fn validate_base_only_chain(chain_id: i32) -> Result<(), String> {
-        if chain_id != 8453 {
-            return Err("Only Base chain_id=8453 is supported for onchain billing".to_string());
+        let expected = crate::models::wallet::onchain_billing_chain_id();
+        if chain_id != expected {
+            return Err(format!(
+                "Only Base chain_id={expected} is supported for onchain billing"
+            ));
         }
         Ok(())
+    }
+
+    pub fn configured_onchain_chain_id() -> i32 {
+        crate::models::wallet::onchain_billing_chain_id()
     }
 
     pub fn build_idempotency_key(
@@ -61,7 +68,8 @@ impl SubscriptionChargeService {
         pool: &DbPool,
         cycle: &SubscriptionCycle,
     ) -> Result<SubscriptionChargeAttempt, String> {
-        Self::validate_base_only_chain(8453)?;
+        let chain_id = Self::configured_onchain_chain_id();
+        Self::validate_base_only_chain(chain_id)?;
         let period_end = cycle.due_at
             + if cycle.billing_cycle == "annual" {
                 Duration::days(365)
@@ -74,7 +82,7 @@ impl SubscriptionChargeService {
             CreateChargeAttemptInput {
                 user_id: &cycle.user_id,
                 subscription_id: cycle.subscription_id,
-                chain_id: 8453,
+                chain_id,
                 period_start: cycle.due_at,
                 period_end,
                 amount_usdc: cycle.amount_due_usdc,

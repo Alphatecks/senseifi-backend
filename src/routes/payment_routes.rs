@@ -25,6 +25,7 @@ use crate::services::plan_catalog::OnchainPriceTable;
 pub fn payment_routes() -> Router<DbPool> {
     Router::new()
         .route("/plans", get(list_onchain_plans))
+        .route("/billing-context", get(get_billing_context))
         .route("/billing-history", get(list_billing_history))
         .route("/onchain-subscribe", post(onchain_subscribe))
         .route("/profile", post(upsert_payment_profile))
@@ -33,6 +34,32 @@ pub fn payment_routes() -> Router<DbPool> {
         .route("/jobs/expire-grace", post(trigger_grace_expiry_job))
         .route("/webhooks/base-indexer", post(base_indexer_webhook))
         .route("/webhooks/payment-contract", post(payment_contract_webhook))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct BillingContextQuery {
+    user_id: String,
+}
+
+/// Which connected wallet to use for onchain USDC billing (EVM on Base / Base Sepolia).
+async fn get_billing_context(
+    State(pool): State<DbPool>,
+    Query(q): Query<BillingContextQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let user_id = q.user_id.trim();
+    if user_id.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": "user_id is required" })),
+        ));
+    }
+    match OnchainSubscribeService::billing_context(&pool, user_id).await {
+        Ok(data) => Ok(Json(json!({ "success": true, "data": data }))),
+        Err(e) => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "success": false, "error": e })),
+        )),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -146,7 +173,7 @@ async fn upsert_payment_profile(
             Json(json!({ "success": false, "error": "Onchain payments are disabled" })),
         ));
     }
-    let chain_id = req.chain_id.unwrap_or(8453);
+    let chain_id = req.chain_id.unwrap_or_else(crate::models::wallet::onchain_billing_chain_id);
     let max_charge_usdc = req.max_charge_usdc.and_then(Decimal::from_f64_retain);
     match OnchainPaymentWebhookService::upsert_payment_profile(
         &pool,
@@ -402,6 +429,7 @@ fn build_receipt_url(chain_id: i32, tx_hash: Option<&str>) -> Option<String> {
     let base = match chain_id {
         1 => "https://etherscan.io/tx/",
         8453 => "https://basescan.org/tx/",
+        84532 => "https://sepolia.basescan.org/tx/",
         56 => "https://bscscan.com/tx/",
         137 => "https://polygonscan.com/tx/",
         42161 => "https://arbiscan.io/tx/",

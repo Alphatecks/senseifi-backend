@@ -1,19 +1,86 @@
 use crate::db::DbPool;
 use crate::models::onchain_payment::{OnchainSubscribeRequest, OnchainSubscribeResponse};
-use crate::models::wallet::is_valid_eth_address;
+use crate::models::wallet::{
+    canonical_eth_address, is_valid_eth_address, onchain_billing_chain_id,
+    onchain_billing_network_label, wallet_eligible_for_onchain_billing,
+};
 use crate::repositories::dashboard_user_repository::DashboardUserRepository;
 use crate::repositories::subscription_repository::{
     SubscriptionRepository, UpsertSubscriptionInput,
 };
+use crate::repositories::wallet_repository::WalletRepository;
 use crate::services::onchain_payment_webhook_service::OnchainPaymentWebhookService;
 use crate::services::plan_catalog::{
     normalize_billing_cycle, normalize_plan, subscription_id_bytes32_hex, OnchainPriceTable,
 };
 use rust_decimal::Decimal;
+use serde::Serialize;
+
+#[derive(Debug, Serialize)]
+pub struct BillingContextResponse {
+    pub onchain_enabled: bool,
+    pub chain_id: i32,
+    pub network_label: String,
+    pub requires_evm_wallet: bool,
+    pub payer_address: Option<String>,
+    pub can_subscribe: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
 
 pub struct OnchainSubscribeService;
 
 impl OnchainSubscribeService {
+    /// Tells the client which wallet to use for USDC billing (may differ from the active Solana wallet).
+    pub async fn billing_context(
+        pool: &DbPool,
+        user_id: &str,
+    ) -> Result<BillingContextResponse, String> {
+        let chain_id = onchain_billing_chain_id();
+        let network_label = onchain_billing_network_label(chain_id).to_string();
+        let onchain_enabled = OnchainPaymentWebhookService::is_onchain_enabled();
+
+        if !onchain_enabled {
+            return Ok(BillingContextResponse {
+                onchain_enabled: false,
+                chain_id,
+                network_label,
+                requires_evm_wallet: true,
+                payer_address: None,
+                can_subscribe: false,
+                message: Some("Onchain payments are disabled".to_string()),
+            });
+        }
+
+        let wallets = WalletRepository::get_all_active_wallets_by_user(pool, user_id)
+            .await
+            .map_err(|e| format!("Failed to load wallets: {e}"))?;
+
+        let payer_address = wallets
+            .iter()
+            .find(|w| wallet_eligible_for_onchain_billing(w.chain_id, &w.address))
+            .map(|w| canonical_eth_address(&w.address));
+
+        let can_subscribe = payer_address.is_some();
+        let message = if can_subscribe {
+            None
+        } else {
+            Some(format!(
+                "Billing currently supports EVM wallets (0x…) on {network_label}. Connect an EVM wallet to continue."
+            ))
+        };
+
+        Ok(BillingContextResponse {
+            onchain_enabled: true,
+            chain_id,
+            network_label,
+            requires_evm_wallet: true,
+            payer_address,
+            can_subscribe,
+            message,
+        })
+    }
+
     pub async fn subscribe(
         pool: &DbPool,
         req: OnchainSubscribeRequest,
@@ -50,12 +117,7 @@ impl OnchainSubscribeService {
             .price_usd(&normalized_plan, &normalized_cycle)
             .ok_or_else(|| "Plan is missing onchain price mapping.".to_string())?;
 
-        let chain_id = req.chain_id.unwrap_or_else(|| {
-            std::env::var("ONCHAIN_BASE_CHAIN_ID")
-                .ok()
-                .and_then(|v| v.trim().parse().ok())
-                .unwrap_or(8453)
-        });
+        let chain_id = req.chain_id.unwrap_or_else(onchain_billing_chain_id);
 
         let token_contract = req
             .token_contract
