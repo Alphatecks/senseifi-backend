@@ -413,8 +413,8 @@ pub fn onchain_billing_network_label(chain_id: i32) -> &'static str {
 }
 
 /// Whether this connected wallet can sign USDC subscription charges on Base.
-pub fn wallet_eligible_for_onchain_billing(chain_id: i64, address: &str) -> bool {
-    is_valid_eth_address(address) && chain_id != SOLANA_MAINNET_CHAIN_ID
+pub fn wallet_eligible_for_onchain_billing(_chain_id: i64, address: &str) -> bool {
+    is_valid_eth_address(address)
 }
 
 /// Sentinel `contract_address` for native SOL rows in `wallet_assets`.

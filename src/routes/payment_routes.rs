@@ -38,7 +38,10 @@ pub fn payment_routes() -> Router<DbPool> {
 
 #[derive(Debug, serde::Deserialize)]
 struct BillingContextQuery {
-    user_id: String,
+    #[serde(default)]
+    user_id: Option<String>,
+    #[serde(default)]
+    wallet_address: Option<String>,
 }
 
 /// Which connected wallet to use for onchain USDC billing (EVM on Base / Base Sepolia).
@@ -46,14 +49,22 @@ async fn get_billing_context(
     State(pool): State<DbPool>,
     Query(q): Query<BillingContextQuery>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let user_id = q.user_id.trim();
-    if user_id.is_empty() {
+    let user_id = q.user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let wallet_address = q
+        .wallet_address
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if user_id.is_none() && wallet_address.is_none() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(json!({ "success": false, "error": "user_id is required" })),
+            Json(json!({
+                "success": false,
+                "error": "user_id or wallet_address is required"
+            })),
         ));
     }
-    match OnchainSubscribeService::billing_context(&pool, user_id).await {
+    match OnchainSubscribeService::billing_context(&pool, user_id, wallet_address).await {
         Ok(data) => Ok(Json(json!({ "success": true, "data": data }))),
         Err(e) => Err((
             StatusCode::BAD_REQUEST,

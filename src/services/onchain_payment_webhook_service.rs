@@ -1,7 +1,8 @@
 use crate::db::DbPool;
 use crate::models::onchain_payment::{OnchainWebhookRequest, SubscriptionChargeAttempt};
 use crate::repositories::onchain_payment_repository::{
-    InsertEventLogInput, OnchainPaymentRepository, UpsertPaymentProfileInput,
+    CreateSubscriptionCycleInput, InsertEventLogInput, OnchainPaymentRepository,
+    UpsertPaymentProfileInput,
 };
 use crate::repositories::subscription_repository::SubscriptionRepository;
 use crate::services::subscription_charge_service::{
@@ -264,11 +265,49 @@ impl OnchainPaymentWebhookService {
         let cycles = OnchainPaymentRepository::get_due_cycles(pool, Utc::now(), 500)
             .await
             .map_err(|e| format!("Failed to fetch due cycles: {e}"))?;
-        cycles
-            .into_iter()
-            .find(|c| c.subscription_id == attempt.subscription_id && c.user_id == attempt.user_id)
-            .map(|c| c.id)
-            .ok_or_else(|| "No matching subscription cycle found for charge attempt".to_string())
+        if let Some(cycle) = cycles.into_iter().find(|c| {
+            c.subscription_id == attempt.subscription_id && c.user_id == attempt.user_id
+        }) {
+            return Ok(cycle.id);
+        }
+
+        Self::backfill_cycle_for_attempt(pool, attempt).await
+    }
+
+    async fn backfill_cycle_for_attempt(
+        pool: &DbPool,
+        attempt: &SubscriptionChargeAttempt,
+    ) -> Result<Uuid, String> {
+        let subscription = SubscriptionRepository::get_by_id(pool, attempt.subscription_id)
+            .await
+            .map_err(|e| format!("Failed to load subscription for cycle backfill: {e}"))?
+            .ok_or_else(|| "Subscription row not found for cycle backfill".to_string())?;
+
+        let cycle = OnchainPaymentRepository::create_subscription_cycle(
+            pool,
+            CreateSubscriptionCycleInput {
+                user_id: &attempt.user_id,
+                subscription_id: attempt.subscription_id,
+                plan: &subscription.plan,
+                billing_cycle: &subscription.billing_cycle,
+                amount_due_usdc: attempt.amount_usdc,
+                due_at: attempt.period_start,
+                grace_expires_at: None,
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to backfill subscription cycle: {e}"))?;
+
+        OnchainPaymentRepository::update_subscription_cycle_status(
+            pool,
+            cycle.id,
+            "charging",
+            Some(attempt.id),
+        )
+        .await
+        .map_err(|e| format!("Failed to link backfilled cycle to charge attempt: {e}"))?;
+
+        Ok(cycle.id)
     }
 
     pub async fn trigger_due_charge_job(pool: &DbPool, limit: i64) -> Result<Vec<Uuid>, String> {

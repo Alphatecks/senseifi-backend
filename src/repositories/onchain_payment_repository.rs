@@ -151,6 +151,19 @@ impl OnchainPaymentRepository {
         .await
     }
 
+    pub async fn count_cycles_for_subscription(
+        pool: &DbPool,
+        subscription_id: Uuid,
+    ) -> Result<i64, Error> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*)::bigint FROM subscription_cycles WHERE subscription_id = $1",
+        )
+        .bind(subscription_id)
+        .fetch_one(pool)
+        .await?;
+        Ok(row.0)
+    }
+
     pub async fn create_subscription_cycle(
         pool: &DbPool,
         input: CreateSubscriptionCycleInput<'_>,
