@@ -5,6 +5,8 @@ use crate::repositories::onchain_payment_repository::{
     UpsertPaymentProfileInput,
 };
 use crate::repositories::subscription_repository::SubscriptionRepository;
+use crate::services::onchain_subscribe_service::OnchainSubscribeService;
+use crate::services::plan_catalog::OnchainPriceTable;
 use crate::services::subscription_charge_service::{
     RelayerSubmissionResult, SubscriptionChargeService,
 };
@@ -248,6 +250,29 @@ impl OnchainPaymentWebhookService {
         OnchainPaymentRepository::update_allowance_status(pool, user_id, status)
             .await
             .map_err(|e| format!("Failed to update allowance status: {e}"))?;
+
+        if status == "active" {
+            if let Some(sub) = SubscriptionRepository::get_by_user_id(pool, user_id)
+                .await
+                .map_err(|e| format!("Failed to load subscription for billing cycle: {e}"))?
+            {
+                let prices = OnchainPriceTable::from_env_or_default();
+                if let Some(amount_usdc) = prices.price_usd(&sub.plan, &sub.billing_cycle) {
+                    if let Some(amount_dec) = Decimal::from_f64_retain(amount_usdc) {
+                        OnchainSubscribeService::ensure_initial_billing_cycle(
+                            pool,
+                            user_id,
+                            sub.id,
+                            &sub.plan,
+                            &sub.billing_cycle,
+                            amount_dec,
+                        )
+                        .await?;
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 

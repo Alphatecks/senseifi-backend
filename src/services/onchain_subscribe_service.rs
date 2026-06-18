@@ -318,7 +318,7 @@ impl OnchainSubscribeService {
     }
 
     /// Billing history reads from `subscription_cycles`; create the first cycle when missing.
-    async fn ensure_initial_billing_cycle(
+    pub async fn ensure_initial_billing_cycle(
         pool: &DbPool,
         user_id: &str,
         subscription_id: uuid::Uuid,
