@@ -1,6 +1,7 @@
 import express from 'express';
 import { ethers } from 'ethers';
-import { PAYMENT_ABI } from './abi.js';
+import { BILLER_ABI, RELAYER_ABI } from './abi.js';
+import { abiForStyle, resolveContractStyle } from './contract-style.js';
 import {
   buildChargeRequest,
   submitCharge,
@@ -28,6 +29,7 @@ function loadConfig() {
     chainId,
     rpcUrl,
     paymentContract: requiredEnv('PAYMENT_CONTRACT'),
+    contractStyle: process.env.PAYMENT_CONTRACT_STYLE?.trim(),
   };
 }
 
@@ -40,14 +42,44 @@ function bearerToken(req) {
   return token.trim();
 }
 
-function createApp(config) {
+async function createRuntime(config) {
   const provider = new ethers.JsonRpcProvider(config.rpcUrl, config.chainId);
   const wallet = new ethers.Wallet(config.privateKey, provider);
+  const billerProbe = new ethers.Contract(
+    config.paymentContract,
+    BILLER_ABI,
+    provider,
+  );
+  const relayerProbe = new ethers.Contract(
+    config.paymentContract,
+    RELAYER_ABI,
+    provider,
+  );
+
+  const contractStyle = await resolveContractStyle(
+    billerProbe,
+    relayerProbe,
+    wallet.address,
+    config.contractStyle,
+  );
   const contract = new ethers.Contract(
     config.paymentContract,
-    PAYMENT_ABI,
+    abiForStyle(contractStyle),
     wallet,
   );
+
+  let operatorAllowed = false;
+  if (contractStyle === 'biller') {
+    operatorAllowed = Boolean(await contract.billers(wallet.address));
+  } else {
+    operatorAllowed = Boolean(await contract.relayers(wallet.address));
+  }
+
+  return { provider, wallet, contract, contractStyle, operatorAllowed };
+}
+
+function createApp(runtime, config) {
+  const { provider, wallet, contract, contractStyle, operatorAllowed } = runtime;
 
   const app = express();
   app.use(express.json({ limit: '64kb' }));
@@ -55,13 +87,15 @@ function createApp(config) {
   app.get('/health', async (_req, res) => {
     try {
       const network = await provider.getNetwork();
-      const allowed = await contract.relayers(wallet.address);
       res.json({
         ok: true,
+        contract_style: contractStyle,
+        operator_address: wallet.address,
         relayer_address: wallet.address,
         chain_id: Number(network.chainId),
         payment_contract: config.paymentContract,
-        relayer_allowed_on_contract: Boolean(allowed),
+        operator_allowed_on_contract: operatorAllowed,
+        relayer_allowed_on_contract: operatorAllowed,
       });
     } catch (err) {
       res.status(503).json({
@@ -85,22 +119,23 @@ function createApp(config) {
         });
       }
 
-      const allowed = await contract.relayers(wallet.address);
-      if (!allowed) {
+      if (!operatorAllowed) {
         return res.status(503).json({
-          error: `Relayer wallet ${wallet.address} is not allowed on payment contract`,
+          error: `${contractStyle} wallet ${wallet.address} is not allowed on payment contract`,
         });
       }
 
-      const chargeReq = await buildChargeRequest(contract, body);
+      const chargeReq = await buildChargeRequest(contract, body, contractStyle);
       const txHash = await submitCharge(contract, chargeReq);
 
       return res.json({
         tx_hash: txHash,
+        contract_style: contractStyle,
+        operator_address: wallet.address,
         relayer_address: wallet.address,
         payer: chargeReq.payer,
         subscription_id_bytes32: chargeReq.subscriptionId,
-        charge_id: chargeReq.chargeId,
+        charge_id: chargeReq.chargeId ?? null,
       });
     } catch (err) {
       if (err && typeof err === 'object' && err.code === 'ALREADY_PROCESSED') {
@@ -117,11 +152,11 @@ function createApp(config) {
 }
 
 const config = loadConfig();
-const app = createApp(config);
+const runtime = await createRuntime(config);
+const app = createApp(runtime, config);
 
 app.listen(config.port, () => {
-  const wallet = new ethers.Wallet(config.privateKey);
   console.log(
-    `senseifi relayer listening on :${config.port} chain=${config.chainId} relayer=${wallet.address}`,
+    `senseifi relayer listening on :${config.port} chain=${config.chainId} style=${runtime.contractStyle} operator=${runtime.wallet.address}`,
   );
 });

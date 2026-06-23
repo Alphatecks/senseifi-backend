@@ -1,5 +1,4 @@
 import { ethers } from 'ethers';
-import { PAYMENT_ABI } from './abi.js';
 
 /**
  * keccak256(UTF-8 hyphenated UUID) — matches backend `subscription_id_bytes32`.
@@ -9,8 +8,7 @@ export function subscriptionIdBytes32(subscriptionUuid) {
 }
 
 /**
- * keccak256(UTF-8 idempotency key) — deterministic on-chain charge id.
- * Backend key format: `{subscription_uuid}:{period_start_unix}:{period_end_unix}`
+ * keccak256(UTF-8 idempotency key) — used by the relayer-style contract only.
  */
 export function chargeIdBytes32(idempotencyKey) {
   return ethers.keccak256(ethers.toUtf8Bytes(idempotencyKey.trim()));
@@ -67,32 +65,60 @@ export function validateChargeBody(body) {
   return { idempotencyKey, userId, subscriptionId, amountUsdc, chainId };
 }
 
+async function readBilling(contract, subscriptionIdHash, style) {
+  if (style === 'biller') {
+    return contract.getBilling(subscriptionIdHash);
+  }
+  return contract.billingBySubscription(subscriptionIdHash);
+}
+
+function unpackBilling(billing) {
+  return {
+    payer: billing.payer ?? billing[0],
+    maxCharge: billing.maxChargeAmount ?? billing[1],
+    active: billing.active ?? billing[2],
+  };
+}
+
 /**
  * @param {import('ethers').Contract} contract
  * @param {object} input
+ * @param {'biller' | 'relayer'} style
  */
-export async function buildChargeRequest(contract, input) {
+export async function buildChargeRequest(contract, input, style) {
   const { idempotencyKey, subscriptionId, amountUsdc } = input;
-  const { periodStart, periodEnd } = parseIdempotencyKey(idempotencyKey);
-
   const subscriptionIdHash = subscriptionIdBytes32(subscriptionId);
-  const chargeId = chargeIdBytes32(idempotencyKey);
   const amount = usdcToBaseUnits(amountUsdc);
 
-  const billing = await contract.billingBySubscription(subscriptionIdHash);
-  const payer = billing.payer ?? billing[0];
-  const maxCharge = billing.maxChargeAmount ?? billing[1];
-  const active = billing.active ?? billing[2];
+  const billing = unpackBilling(
+    await readBilling(contract, subscriptionIdHash, style),
+  );
 
-  if (!active) {
-    throw new Error('On-chain billing is not active for this subscription (upsertBilling missing or revoked)');
+  if (!billing.active) {
+    throw new Error(
+      'On-chain billing is not active for this subscription (upsertBilling missing or cancelled)',
+    );
   }
-  if (!payer || payer === ethers.ZeroAddress) {
+  if (!billing.payer || billing.payer === ethers.ZeroAddress) {
     throw new Error('No payer registered on-chain for this subscription');
   }
-  if (maxCharge < amount) {
-    throw new Error(`On-chain max charge ${maxCharge} is less than requested amount ${amount}`);
+  if (billing.maxCharge < amount) {
+    throw new Error(
+      `On-chain max charge ${billing.maxCharge} is less than requested amount ${amount}`,
+    );
   }
+
+  if (style === 'biller') {
+    return {
+      style,
+      subscriptionId: subscriptionIdHash,
+      payer: billing.payer,
+      amount,
+    };
+  }
+
+  const { periodStart, periodEnd } = parseIdempotencyKey(idempotencyKey);
+  const chargeId = chargeIdBytes32(idempotencyKey);
 
   const alreadyProcessed = await contract.processedCharges(chargeId);
   if (alreadyProcessed) {
@@ -102,9 +128,10 @@ export async function buildChargeRequest(contract, input) {
   }
 
   return {
+    style,
     chargeId,
     subscriptionId: subscriptionIdHash,
-    payer,
+    payer: billing.payer,
     amount,
     periodStart,
     periodEnd,
@@ -112,7 +139,20 @@ export async function buildChargeRequest(contract, input) {
 }
 
 export async function submitCharge(contract, req) {
-  const tx = await contract.chargeSubscription(req);
+  if (req.style === 'biller') {
+    const tx = await contract.charge(req.subscriptionId, req.amount);
+    const receipt = await tx.wait();
+    return receipt.hash;
+  }
+
+  const tx = await contract.chargeSubscription({
+    chargeId: req.chargeId,
+    subscriptionId: req.subscriptionId,
+    payer: req.payer,
+    amount: req.amount,
+    periodStart: req.periodStart,
+    periodEnd: req.periodEnd,
+  });
   const receipt = await tx.wait();
   return receipt.hash;
 }

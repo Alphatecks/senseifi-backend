@@ -26,10 +26,22 @@ Response:
 
 `ONCHAIN_RELAYER_URL` must be the **base URL only** (no `/charge` suffix). Example: `https://senseifi-relayer.onrender.com`.
 
+## Contract styles
+
+The HTTP service name says "relayer", but your **live Sepolia contract** (`0xf4F1cB...`) uses a **biller** role, not the in-repo `relayers` mapping:
+
+| | Live biller contract | In-repo relayer contract |
+|---|---|---|
+| Charge function | `charge(bytes32 subscriptionId, uint256 amount)` | `chargeSubscription(ChargeRequest)` |
+| Operator check | `billers(address)` | `relayers(address)` |
+| Read billing | `getBilling(bytes32)` | `billingBySubscription(bytes32)` |
+
+Set `PAYMENT_CONTRACT_STYLE=biller` for the live contract, or leave `auto` (default).
+
 ## Prerequisites
 
-1. Payment contract deployed with `RELAYER_ADDRESS` = address of `RELAYER_PRIVATE_KEY`
-2. Relayer wallet funded with ETH on Base Sepolia (or Base mainnet)
+1. `RELAYER_PRIVATE_KEY` must be an **allowed biller** (live contract) or **allowed relayer** (in-repo contract)
+2. Operator wallet funded with ETH on Base Sepolia (or Base mainnet)
 3. User completed wallet setup: USDC `approve` + `upsertBilling`
 4. Backend: `PAYMENTS_ONCHAIN_SHADOW_MODE=false`, relayer URL + API key configured
 
