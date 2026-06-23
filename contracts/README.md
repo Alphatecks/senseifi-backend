@@ -63,6 +63,10 @@ After deploy, copy deployed address into backend env:
 ONCHAIN_PAYMENT_CONTRACT=0xYourDeployedContractAddress
 ```
 
+## Relayer service
+
+Charges after wallet setup are submitted by the HTTP relayer in `../relayer/` (Node + ethers). Deploy it as a separate web service and set `ONCHAIN_RELAYER_URL` on the backend to its public base URL. See `relayer/README.md`.
+
 ## Backend env mapping
 
 Set these in backend `.env`:
