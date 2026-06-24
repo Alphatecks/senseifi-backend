@@ -53,11 +53,22 @@ ONCHAIN_PAYMENT_CONTRACT_STYLE=biller
 
 ## Indexer webhook payloads
 
+**Indexer implementers:** see [contracts/docs/INDEXER_BILLING_EVENTS.md](../contracts/docs/INDEXER_BILLING_EVENTS.md).
+
 POST `/api/payments/webhooks/base-indexer` or `/api/payments/webhooks/payment-contract` with header `x-webhook-token`.
 
 ### `billing_upserted` (from `BillingUpserted` event)
 
-**Critical:** the second uint in event data is `chargedUsdcRaw` (USDC base units, 6 decimals) — **not** a boolean `active` flag.
+**Critical:** `BillingUpserted` event **data** is two uint256 words — not an `active` bool:
+
+| Data word | Solidity field | Meaning on fresh setup |
+|-----------|----------------|------------------------|
+| 0 | `maxChargeUsdcRaw` | e.g. `30000000` (30 USDC cap) |
+| 1 | `chargedUsdcRaw` | `0` (nothing charged yet) |
+
+Topic0: `0xfc9e90ff10f03805a915deee8b20f37a2f9177f132e6705b397f328343a770f7`  
+Topic1: `subscriptionId` (bytes32)  
+Topic2: `payer` (address)
 
 ```json
 {
@@ -68,9 +79,10 @@ POST `/api/payments/webhooks/base-indexer` or `/api/payments/webhooks/payment-co
   "subscription_id": "fbdd6f48-b88d-447f-a42b-cc7872f02112",
   "user_id": "optional-if-subscription_id-present",
   "payer_address": "0xD7d29FC8Bc1831CA35ec6903c8AcDC751f333C1A",
-  "charged_usdc_raw": 30000000,
+  "max_charge_usdc_raw": 30000000,
+  "charged_usdc_raw": 0,
   "payload": {
-    "subscription_id_bytes32": "0x6dac..."
+    "subscription_id_bytes32": "0x6dacd2088656cb4596e150cc21621a54e71d2ba44e993869d83d6a054d086844"
   }
 }
 ```

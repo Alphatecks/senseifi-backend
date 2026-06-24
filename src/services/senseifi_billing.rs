@@ -32,8 +32,22 @@ pub fn usdc_raw_to_decimal(raw: u64) -> Decimal {
     Decimal::from_i128_with_scale(i128::from(raw), 6)
 }
 
-/// Parse `chargedUsdcRaw` from webhook body or nested `payload`.
-/// The second uint in `BillingUpserted` event data is **not** a boolean active flag.
+/// Parse `maxChargeUsdcRaw` (BillingUpserted data word 0) from webhook JSON.
+pub fn parse_max_charge_usdc_raw(body: &Value) -> Option<u64> {
+    parse_u64_field(body, "max_charge_usdc_raw")
+        .or_else(|| parse_u64_field(body, "maxChargeUsdcRaw"))
+        .or_else(|| {
+            body.get("payload")
+                .and_then(|p| parse_u64_field(p, "max_charge_usdc_raw"))
+        })
+        .or_else(|| {
+            body.get("payload")
+                .and_then(|p| parse_u64_field(p, "maxChargeUsdcRaw"))
+        })
+}
+
+/// Parse `chargedUsdcRaw` (BillingUpserted data word 1) from webhook JSON.
+/// This is **not** a boolean `active` flag and not the max charge cap.
 pub fn parse_charged_usdc_raw(body: &Value) -> Option<u64> {
     parse_u64_field(body, "charged_usdc_raw")
         .or_else(|| parse_u64_field(body, "chargedUsdcRaw"))
@@ -45,11 +59,16 @@ pub fn parse_charged_usdc_raw(body: &Value) -> Option<u64> {
             body.get("payload")
                 .and_then(|p| parse_u64_field(p, "chargedUsdcRaw"))
         })
+}
+
+/// Legacy indexers sent the first data word as `allowance_status: "30000000"` or only `charged_usdc_raw`.
+pub fn parse_legacy_max_charge_usdc_raw(body: &Value) -> Option<u64> {
+    body.get("allowance_status")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n >= 1_000_000)
         .or_else(|| {
-            // Legacy mis-decode guard: do not treat small integers as booleans.
-            body.get("allowance_status")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.trim().parse::<u64>().ok())
+            parse_charged_usdc_raw(body).filter(|n| *n >= 1_000_000)
         })
 }
 
@@ -113,17 +132,19 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn parse_charged_usdc_raw_from_payload() {
+    fn parse_max_and_charged_from_billing_upserted_payload() {
         let body = json!({
-            "payload": { "charged_usdc_raw": 30000000 }
+            "max_charge_usdc_raw": 30000000,
+            "charged_usdc_raw": 0
         });
-        assert_eq!(parse_charged_usdc_raw(&body), Some(30_000_000));
+        assert_eq!(parse_max_charge_usdc_raw(&body), Some(30_000_000));
+        assert_eq!(parse_charged_usdc_raw(&body), Some(0));
     }
 
     #[test]
-    fn parse_charged_usdc_raw_not_boolean_active() {
-        let body = json!({ "charged_usdc_raw": 30000000 });
-        assert_eq!(parse_charged_usdc_raw(&body), Some(30_000_000));
+    fn parse_legacy_numeric_allowance_status_as_max() {
+        let body = json!({ "allowance_status": "30000000" });
+        assert_eq!(parse_legacy_max_charge_usdc_raw(&body), Some(30_000_000));
     }
 
     #[test]

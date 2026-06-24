@@ -8,7 +8,8 @@ use crate::repositories::subscription_repository::SubscriptionRepository;
 use crate::services::onchain_subscribe_service::OnchainSubscribeService;
 use crate::services::plan_catalog::OnchainPriceTable;
 use crate::services::senseifi_billing::{
-    parse_charged_usdc_raw, parse_payer_address, parse_subscription_id, usdc_raw_to_decimal,
+    parse_charged_usdc_raw, parse_max_charge_usdc_raw, parse_payer_address, parse_subscription_id,
+    usdc_raw_to_decimal,
 };
 use crate::services::subscription_charge_service::{
     RelayerSubmissionResult, SubscriptionChargeService,
@@ -315,14 +316,25 @@ impl OnchainPaymentWebhookService {
                     .to_string()
             })?;
 
-        let charged_raw = req
-            .charged_usdc_raw
-            .or_else(|| req.payload.as_ref().and_then(parse_charged_usdc_raw))
+        let max_raw = req
+            .max_charge_usdc_raw
+            .or_else(|| req.payload.as_ref().and_then(parse_max_charge_usdc_raw))
+            .or_else(|| {
+                req.allowance_status
+                    .as_deref()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .filter(|n| *n >= 1_000_000)
+            })
+            .or_else(|| req.charged_usdc_raw.filter(|n| *n >= 1_000_000))
             .ok_or_else(|| {
-                "charged_usdc_raw is required for billing_upserted (USDC base units from event data, not a boolean)"
+                "max_charge_usdc_raw is required for billing_upserted (BillingUpserted data word 0, USDC base units)"
                     .to_string()
             })?;
-        let max_charge_usdc = usdc_raw_to_decimal(charged_raw);
+        let _charged_raw = req
+            .charged_usdc_raw
+            .or_else(|| req.payload.as_ref().and_then(parse_charged_usdc_raw))
+            .unwrap_or(0);
+        let max_charge_usdc = usdc_raw_to_decimal(max_raw);
 
         let token_contract = std::env::var("ONCHAIN_USDC_CONTRACT")
             .ok()
