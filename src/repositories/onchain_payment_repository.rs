@@ -19,6 +19,15 @@ pub struct UpsertPaymentProfileInput<'a> {
     pub max_charge_usdc: Option<Decimal>,
 }
 
+pub struct ApplyBillingUpsertedInput<'a> {
+    pub user_id: &'a str,
+    pub payer_address: &'a str,
+    pub chain_id: i32,
+    pub token_contract: &'a str,
+    pub payment_contract: &'a str,
+    pub max_charge_usdc: Decimal,
+}
+
 pub struct CreateSubscriptionCycleInput<'a> {
     pub user_id: &'a str,
     pub subscription_id: Uuid,
@@ -97,6 +106,45 @@ impl OnchainPaymentRepository {
     pub async fn upsert_profile(
         pool: &DbPool,
         input: UpsertPaymentProfileInput<'_>,
+    ) -> Result<OnchainPaymentProfile, Error> {
+        sqlx::query_as::<_, OnchainPaymentProfile>(
+            r#"
+            INSERT INTO onchain_payment_profiles (
+                user_id,
+                payer_address,
+                chain_id,
+                token_contract,
+                payment_contract,
+                allowance_status,
+                max_charge_usdc,
+                created_at,
+                updated_at
+            ) VALUES ($1, $2, $3, $4, $5, 'active', $6, NOW(), NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                payer_address = EXCLUDED.payer_address,
+                chain_id = EXCLUDED.chain_id,
+                token_contract = EXCLUDED.token_contract,
+                payment_contract = EXCLUDED.payment_contract,
+                allowance_status = 'active',
+                max_charge_usdc = EXCLUDED.max_charge_usdc,
+                updated_at = NOW()
+            RETURNING *
+            "#,
+        )
+        .bind(input.user_id)
+        .bind(input.payer_address)
+        .bind(input.chain_id)
+        .bind(input.token_contract)
+        .bind(input.payment_contract)
+        .bind(input.max_charge_usdc)
+        .fetch_one(pool)
+        .await
+    }
+
+    /// Sync payment profile from on-chain `BillingUpserted` (SenseiFiBilling).
+    pub async fn apply_billing_upserted(
+        pool: &DbPool,
+        input: ApplyBillingUpsertedInput<'_>,
     ) -> Result<OnchainPaymentProfile, Error> {
         sqlx::query_as::<_, OnchainPaymentProfile>(
             r#"

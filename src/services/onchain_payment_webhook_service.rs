@@ -1,15 +1,19 @@
 use crate::db::DbPool;
 use crate::models::onchain_payment::{OnchainWebhookRequest, SubscriptionChargeAttempt};
 use crate::repositories::onchain_payment_repository::{
-    CreateSubscriptionCycleInput, InsertEventLogInput, OnchainPaymentRepository,
-    UpsertPaymentProfileInput,
+    ApplyBillingUpsertedInput, CreateSubscriptionCycleInput, InsertEventLogInput,
+    OnchainPaymentRepository, UpsertPaymentProfileInput,
 };
 use crate::repositories::subscription_repository::SubscriptionRepository;
 use crate::services::onchain_subscribe_service::OnchainSubscribeService;
 use crate::services::plan_catalog::OnchainPriceTable;
+use crate::services::senseifi_billing::{
+    parse_charged_usdc_raw, parse_payer_address, parse_subscription_id, usdc_raw_to_decimal,
+};
 use crate::services::subscription_charge_service::{
     RelayerSubmissionResult, SubscriptionChargeService,
 };
+use crate::models::wallet::onchain_billing_chain_id;
 use chrono::Utc;
 use num_traits::ToPrimitive;
 use reqwest::Client;
@@ -98,7 +102,7 @@ impl OnchainPaymentWebhookService {
         provider: &str,
         req: &OnchainWebhookRequest,
     ) -> Result<(), String> {
-        let chain_id = req.chain_id.unwrap_or(8453);
+        let chain_id = req.chain_id.unwrap_or_else(onchain_billing_chain_id);
         SubscriptionChargeService::validate_base_only_chain(chain_id)?;
         let payload = req.payload.clone().unwrap_or_else(|| json!({}));
         if let Some(existing) =
@@ -133,7 +137,9 @@ impl OnchainPaymentWebhookService {
                 }
                 "charge_confirmed" => Self::handle_charge_confirmed(pool, req).await,
                 "charge_failed" => Self::handle_charge_failed(pool, req).await,
-                "allowance_updated" => Self::handle_allowance_updated(pool, req).await,
+                "billing_upserted" => Self::handle_billing_upserted(pool, req, chain_id).await,
+                "billing_cancelled" => Self::handle_billing_cancelled(pool, req).await,
+                "allowance_updated" => Self::handle_allowance_updated(pool, req, chain_id).await,
                 _ => Ok(()),
             }
         }
@@ -188,7 +194,7 @@ impl OnchainPaymentWebhookService {
         let attempt_id = if let Some(id) = req.charge_attempt_id {
             id
         } else if let Some(tx_hash) = req.tx_hash.as_deref() {
-            let chain_id = req.chain_id.unwrap_or(8453);
+            let chain_id = req.chain_id.unwrap_or_else(onchain_billing_chain_id);
             OnchainPaymentRepository::get_charge_attempt_by_tx_hash(pool, chain_id, tx_hash)
                 .await
                 .map_err(|e| format!("Failed to resolve attempt from tx hash: {e}"))?
@@ -216,7 +222,7 @@ impl OnchainPaymentWebhookService {
         let attempt_id = if let Some(id) = req.charge_attempt_id {
             id
         } else if let Some(tx_hash) = req.tx_hash.as_deref() {
-            let chain_id = req.chain_id.unwrap_or(8453);
+            let chain_id = req.chain_id.unwrap_or_else(onchain_billing_chain_id);
             OnchainPaymentRepository::get_charge_attempt_by_tx_hash(pool, chain_id, tx_hash)
                 .await
                 .map_err(|e| format!("Failed to resolve attempt from tx hash: {e}"))?
@@ -241,38 +247,168 @@ impl OnchainPaymentWebhookService {
     async fn handle_allowance_updated(
         pool: &DbPool,
         req: &OnchainWebhookRequest,
+        chain_id: i32,
     ) -> Result<(), String> {
+        // Legacy indexer path: BillingUpserted was mis-decoded as allowance_updated with a
+        // numeric "status" (actually chargedUsdcRaw). Re-route to billing upsert handling.
+        if req.charged_usdc_raw.is_some()
+            || req.payer_address.is_some()
+            || Self::allowance_status_looks_like_usdc_raw(req)
+        {
+            return Self::handle_billing_upserted(pool, req, chain_id).await;
+        }
+
         let user_id = req
             .user_id
             .as_deref()
             .ok_or_else(|| "user_id is required for allowance_updated".to_string())?;
         let status = req.allowance_status.as_deref().unwrap_or("active");
+        if !Self::is_valid_allowance_status(status) {
+            return Err(format!(
+                "invalid allowance_status '{status}' — expected active|revoked|cancelled"
+            ));
+        }
         OnchainPaymentRepository::update_allowance_status(pool, user_id, status)
             .await
             .map_err(|e| format!("Failed to update allowance status: {e}"))?;
 
         if status == "active" {
-            if let Some(sub) = SubscriptionRepository::get_by_user_id(pool, user_id)
-                .await
-                .map_err(|e| format!("Failed to load subscription for billing cycle: {e}"))?
-            {
-                let prices = OnchainPriceTable::from_env_or_default();
-                if let Some(amount_usdc) = prices.price_usd(&sub.plan, &sub.billing_cycle) {
-                    if let Some(amount_dec) = Decimal::from_f64_retain(amount_usdc) {
-                        OnchainSubscribeService::ensure_initial_billing_cycle(
-                            pool,
-                            user_id,
-                            sub.id,
-                            &sub.plan,
-                            &sub.billing_cycle,
-                            amount_dec,
-                        )
-                        .await?;
-                    }
+            Self::ensure_billing_cycle_for_user(pool, user_id).await?;
+        }
+
+        Ok(())
+    }
+
+    fn allowance_status_looks_like_usdc_raw(req: &OnchainWebhookRequest) -> bool {
+        req.allowance_status
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .is_some_and(|n| n >= 1_000_000)
+    }
+
+    fn is_valid_allowance_status(status: &str) -> bool {
+        matches!(
+            status.trim().to_ascii_lowercase().as_str(),
+            "active" | "revoked" | "cancelled"
+        )
+    }
+
+    async fn handle_billing_upserted(
+        pool: &DbPool,
+        req: &OnchainWebhookRequest,
+        chain_id: i32,
+    ) -> Result<(), String> {
+        let user_id = Self::resolve_user_id_for_billing_event(pool, req).await?;
+        let payer_address = req
+            .payer_address
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                req.payload
+                    .as_ref()
+                    .and_then(parse_payer_address)
+            })
+            .ok_or_else(|| {
+                "payer_address is required for billing_upserted (indexed topic from BillingUpserted)"
+                    .to_string()
+            })?;
+
+        let charged_raw = req
+            .charged_usdc_raw
+            .or_else(|| req.payload.as_ref().and_then(parse_charged_usdc_raw))
+            .ok_or_else(|| {
+                "charged_usdc_raw is required for billing_upserted (USDC base units from event data, not a boolean)"
+                    .to_string()
+            })?;
+        let max_charge_usdc = usdc_raw_to_decimal(charged_raw);
+
+        let token_contract = std::env::var("ONCHAIN_USDC_CONTRACT")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "ONCHAIN_USDC_CONTRACT must be configured".to_string())?;
+        let payment_contract = std::env::var("ONCHAIN_PAYMENT_CONTRACT")
+            .ok()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| "ONCHAIN_PAYMENT_CONTRACT must be configured".to_string())?;
+
+        OnchainPaymentRepository::apply_billing_upserted(
+            pool,
+            ApplyBillingUpsertedInput {
+                user_id: &user_id,
+                payer_address: &payer_address,
+                chain_id,
+                token_contract: &token_contract,
+                payment_contract: &payment_contract,
+                max_charge_usdc,
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to apply billing upsert to profile: {e}"))?;
+
+        Self::ensure_billing_cycle_for_user(pool, &user_id).await?;
+        Ok(())
+    }
+
+    async fn handle_billing_cancelled(
+        pool: &DbPool,
+        req: &OnchainWebhookRequest,
+    ) -> Result<(), String> {
+        let user_id = Self::resolve_user_id_for_billing_event(pool, req).await?;
+        OnchainPaymentRepository::update_allowance_status(pool, &user_id, "cancelled")
+            .await
+            .map_err(|e| format!("Failed to mark billing cancelled: {e}"))?;
+        Ok(())
+    }
+
+    async fn resolve_user_id_for_billing_event(
+        pool: &DbPool,
+        req: &OnchainWebhookRequest,
+    ) -> Result<String, String> {
+        if let Some(user_id) = req
+            .user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(user_id.to_string());
+        }
+        let subscription_id = req
+            .subscription_id
+            .or_else(|| req.payload.as_ref().and_then(parse_subscription_id))
+            .ok_or_else(|| {
+                "user_id or subscription_id is required for billing webhook events".to_string()
+            })?;
+        let sub = SubscriptionRepository::get_by_id(pool, subscription_id)
+            .await
+            .map_err(|e| format!("Failed to load subscription for billing event: {e}"))?
+            .ok_or_else(|| "Subscription row not found for subscription_id".to_string())?;
+        Ok(sub.user_id)
+    }
+
+    async fn ensure_billing_cycle_for_user(pool: &DbPool, user_id: &str) -> Result<(), String> {
+        if let Some(sub) = SubscriptionRepository::get_by_user_id(pool, user_id)
+            .await
+            .map_err(|e| format!("Failed to load subscription for billing cycle: {e}"))?
+        {
+            let prices = OnchainPriceTable::from_env_or_default();
+            if let Some(amount_usdc) = prices.price_usd(&sub.plan, &sub.billing_cycle) {
+                if let Some(amount_dec) = Decimal::from_f64_retain(amount_usdc) {
+                    OnchainSubscribeService::ensure_initial_billing_cycle(
+                        pool,
+                        user_id,
+                        sub.id,
+                        &sub.plan,
+                        &sub.billing_cycle,
+                        amount_dec,
+                    )
+                    .await?;
                 }
             }
         }
-
         Ok(())
     }
 

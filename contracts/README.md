@@ -1,16 +1,23 @@
-# Senseifi Subscription Payment Contract
+# Senseifi Onchain Subscription Billing
 
-This contract implements non-custodial recurring USDC billing for subscriptions.
+This folder contains **SenseifiSubscriptionPayments** — a relayer-model reference contract. **Production Base Sepolia** uses the separately deployed **SenseiFiBilling** contract (biller model). See `../docs/ONCHAIN_BILLING_INTEGRATION.md` for live addresses, webhook specs, and relayer config.
 
-## What this contract does
+## Deployed vs in-repo
+
+| SenseiFiBilling (live) | SenseifiSubscriptionPayments (this repo) |
+|------------------------|--------------------------------------------|
+| `billers(address)` | `relayers(address)` |
+| `charge(bytes32, uint256)` | `chargeSubscription(ChargeRequest)` |
+| `getBilling(bytes32)` | `billingBySubscription(bytes32)` |
+
+The HTTP relayer in `../relayer/` supports both via `PAYMENT_CONTRACT_STYLE=biller|relayer|auto`.
+
+## What the in-repo contract does
 
 - Users register billing settings with `upsertBilling(subscriptionId, maxChargeAmount)`.
 - Users approve USDC spending for this contract (standard ERC20 approve).
 - A trusted relayer calls `chargeSubscription(...)` per billing cycle.
-- Contract emits:
-  - `AllowanceUpdated`
-  - `ChargeSubmitted`
-  - `ChargeConfirmed` or `ChargeFailed`
+- Contract emits charge lifecycle events (`ChargeSubmitted`, `ChargeConfirmed`, `ChargeFailed`, etc.).
 
 `ChargeFailed` codes match backend expectations:
 - `insufficient_allowance`
@@ -20,7 +27,7 @@ This contract implements non-custodial recurring USDC billing for subscriptions.
 
 ## Folder structure
 
-- `src/SenseifiSubscriptionPayments.sol` - main contract
+- `src/SenseifiSubscriptionPayments.sol` - reference relayer-model contract
 - `script/DeploySenseifiSubscriptionPayments.s.sol` - Foundry deploy script
 - `foundry.toml` - Foundry config
 

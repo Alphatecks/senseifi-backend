@@ -14,6 +14,7 @@ pub mod protection_engine;
 pub mod reputation_service;
 pub mod scan_service;
 pub mod scoring_engine;
+pub mod senseifi_billing;
 pub mod senseiguard_service;
 pub mod simulation_service;
 pub mod solana_program_scan;

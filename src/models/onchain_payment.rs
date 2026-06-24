@@ -168,6 +168,12 @@ pub struct OnchainWebhookRequest {
     pub failure_reason: Option<String>,
     #[serde(default)]
     pub allowance_status: Option<String>,
+    /// SenseiFiBilling `BillingUpserted` payer (indexed topic).
+    #[serde(default)]
+    pub payer_address: Option<String>,
+    /// SenseiFiBilling `BillingUpserted` data word — USDC base units (6 decimals), **not** an active flag.
+    #[serde(default)]
+    pub charged_usdc_raw: Option<u64>,
     #[serde(default)]
     pub payload: Option<Value>,
 }

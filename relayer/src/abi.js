@@ -1,7 +1,7 @@
 /** Live Base Sepolia deployment (biller role, simpler charge). */
 export const BILLER_ABI = [
   'function charge(bytes32 subscriptionId, uint256 amount) external',
-  'function getBilling(bytes32 subscriptionId) external view returns (address payer, uint256 maxChargeAmount, bool active, uint64 updatedAt)',
+  'function getBilling(bytes32 subscriptionId) external view returns (address payer, uint256 maxChargeUsdcRaw, uint256 chargedUsdcRaw, bool active, uint64 updatedAt)',
   'function billers(address biller) external view returns (bool)',
   'function upsertBilling(bytes32 subscriptionId, uint256 maxChargeAmount) external',
 ];

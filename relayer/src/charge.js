@@ -72,10 +72,19 @@ async function readBilling(contract, subscriptionIdHash, style) {
   return contract.billingBySubscription(subscriptionIdHash);
 }
 
-function unpackBilling(billing) {
+function unpackBilling(billing, style) {
+  if (style === 'biller') {
+    return {
+      payer: billing.payer ?? billing[0],
+      maxCharge: billing.maxChargeUsdcRaw ?? billing[1],
+      charged: billing.chargedUsdcRaw ?? billing[2],
+      active: billing.active ?? billing[3],
+    };
+  }
   return {
     payer: billing.payer ?? billing[0],
     maxCharge: billing.maxChargeAmount ?? billing[1],
+    charged: 0n,
     active: billing.active ?? billing[2],
   };
 }
@@ -92,6 +101,7 @@ export async function buildChargeRequest(contract, input, style) {
 
   const billing = unpackBilling(
     await readBilling(contract, subscriptionIdHash, style),
+    style,
   );
 
   if (!billing.active) {
@@ -102,9 +112,9 @@ export async function buildChargeRequest(contract, input, style) {
   if (!billing.payer || billing.payer === ethers.ZeroAddress) {
     throw new Error('No payer registered on-chain for this subscription');
   }
-  if (billing.maxCharge < amount) {
+  if (billing.maxCharge - billing.charged < amount) {
     throw new Error(
-      `On-chain max charge ${billing.maxCharge} is less than requested amount ${amount}`,
+      `On-chain remaining charge capacity ${billing.maxCharge - billing.charged} is less than requested amount ${amount}`,
     );
   }
 
