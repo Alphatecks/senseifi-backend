@@ -87,6 +87,18 @@ impl BoomFiConfig {
         }
     }
 
+    fn paylink_env_var(plan: &str, billing_cycle: &str) -> &'static str {
+        match (plan, billing_cycle) {
+            ("basic", "monthly") => "BOOMFI_PAYLINK_BASIC_MONTHLY",
+            ("basic", "annual") => "BOOMFI_PAYLINK_BASIC_ANNUAL",
+            ("pro", "monthly") => "BOOMFI_PAYLINK_PRO_MONTHLY",
+            ("pro", "annual") => "BOOMFI_PAYLINK_PRO_ANNUAL",
+            ("premium", "monthly") => "BOOMFI_PAYLINK_PREMIUM_MONTHLY",
+            ("premium", "annual") => "BOOMFI_PAYLINK_PREMIUM_ANNUAL",
+            _ => "BOOMFI_PAYLINK_*",
+        }
+    }
+
     fn plan_id_for_plan(&self, plan: &str, billing_cycle: &str) -> Option<String> {
         match (plan, billing_cycle) {
             ("basic", "monthly") => non_empty(&self.basic_monthly_plan_id),
@@ -136,14 +148,12 @@ fn append_query_param(base: &str, key: &str, value: &str) -> String {
 }
 
 fn build_checkout_url(cfg: &BoomFiConfig, plan: &str, billing_cycle: &str, user_id: &str) -> Result<String, String> {
-    let paylink = cfg
-        .paylink_for_plan(plan, billing_cycle)
-        .ok_or_else(|| {
-            format!(
-                "Missing BoomFi paylink for plan={plan} billing_cycle={billing_cycle}. \
-                 Set BOOMFI_PAYLINK_* in env (copy from BoomFi dashboard)."
-            )
-        })?;
+    let paylink = cfg.paylink_for_plan(plan, billing_cycle).ok_or_else(|| {
+        let env_var = BoomFiConfig::paylink_env_var(plan, billing_cycle);
+        format!(
+            "{env_var} is empty or unset on this server (plan={plan}, billing_cycle={billing_cycle})."
+        )
+    })?;
     let with_customer = append_query_param(&paylink, "customer_ident", user_id);
     Ok(append_query_param(&with_customer, "reference", user_id))
 }
