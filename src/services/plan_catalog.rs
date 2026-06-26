@@ -1,10 +1,8 @@
-//! Shared plan tier and billing cycle normalization (Stripe + onchain) and onchain USD pricing.
+//! Shared plan tier and billing cycle normalization for BoomFi subscriptions.
 
-use serde::Serialize;
-use tiny_keccak::{Hasher, Keccak};
-use uuid::Uuid;
+use crate::models::subscription::PlanDescriptor;
 
-/// Normalize UI/API plan strings to DB values: `pro`, `pro_plus`, `premium`.
+/// Normalize UI/API plan strings to DB values: `basic`, `pro`, `premium`.
 pub fn normalize_plan(plan: &str) -> Option<String> {
     let mut p = plan.trim().to_lowercase();
     if let Some(s) = p.strip_suffix(" plan") {
@@ -12,9 +10,11 @@ pub fn normalize_plan(plan: &str) -> Option<String> {
     }
     let p = p.replace('-', "_").replace(' ', "_");
     match p.as_str() {
+        "basic" => Some("basic".to_string()),
         "pro" => Some("pro".to_string()),
-        "pro+" | "pro_plus" => Some("pro_plus".to_string()),
         "premium" => Some("premium".to_string()),
+        // Legacy aliases
+        "pro+" | "pro_plus" => Some("pro".to_string()),
         _ => None,
     }
 }
@@ -30,67 +30,56 @@ pub fn normalize_billing_cycle(cycle: Option<&str>) -> Option<String> {
 
 fn label_for_plan_key(key: &str) -> &'static str {
     match key {
-        "pro" => "Pro Plan",
-        "pro_plus" => "Pro+ Plan",
-        "premium" => "Premium Plan",
+        "basic" => "Basic Plan",
+        "pro" => "PRO Plan",
+        "premium" => "PREMIUM Plan",
         _ => "Plan",
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct OnchainPlanDescriptor {
-    pub key: String,
-    pub label: String,
-    pub billing_cycle: String,
-    pub price_usd: f64,
-    pub currency: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub savings_label: Option<String>,
-}
-
-/// USD prices for onchain subscription SKUs (env `ONCHAIN_PRICE_*` with code defaults).
-pub struct OnchainPriceTable {
+/// USD list prices for subscription SKUs (`BOOMFI_PRICE_*` env with code defaults).
+pub struct SubscriptionPriceTable {
+    pub basic_monthly: f64,
+    pub basic_annual: f64,
     pub pro_monthly: f64,
     pub pro_annual: f64,
-    pub pro_plus_monthly: f64,
-    pub pro_plus_annual: f64,
     pub premium_monthly: f64,
     pub premium_annual: f64,
 }
 
-impl OnchainPriceTable {
+impl SubscriptionPriceTable {
     pub fn from_env_or_default() -> Self {
         Self {
-            pro_monthly: parse_env_f64("ONCHAIN_PRICE_PRO_MONTHLY", 30.0),
-            pro_annual: parse_env_f64("ONCHAIN_PRICE_PRO_ANNUAL", 300.0),
-            pro_plus_monthly: parse_env_f64("ONCHAIN_PRICE_PRO_PLUS_MONTHLY", 50.0),
-            pro_plus_annual: parse_env_f64("ONCHAIN_PRICE_PRO_PLUS_ANNUAL", 500.0),
-            premium_monthly: parse_env_f64("ONCHAIN_PRICE_PREMIUM_MONTHLY", 200.0),
-            premium_annual: parse_env_f64("ONCHAIN_PRICE_PREMIUM_ANNUAL", 2000.0),
+            basic_monthly: parse_env_f64("BOOMFI_PRICE_BASIC_MONTHLY", 15.0),
+            basic_annual: parse_env_f64("BOOMFI_PRICE_BASIC_ANNUAL", 150.0),
+            pro_monthly: parse_env_f64("BOOMFI_PRICE_PRO_MONTHLY", 30.0),
+            pro_annual: parse_env_f64("BOOMFI_PRICE_PRO_ANNUAL", 300.0),
+            premium_monthly: parse_env_f64("BOOMFI_PRICE_PREMIUM_MONTHLY", 200.0),
+            premium_annual: parse_env_f64("BOOMFI_PRICE_PREMIUM_ANNUAL", 2000.0),
         }
     }
 
     pub fn price_usd(&self, plan: &str, billing_cycle: &str) -> Option<f64> {
         match (plan, billing_cycle) {
+            ("basic", "monthly") => Some(self.basic_monthly),
+            ("basic", "annual") => Some(self.basic_annual),
             ("pro", "monthly") => Some(self.pro_monthly),
             ("pro", "annual") => Some(self.pro_annual),
-            ("pro_plus", "monthly") => Some(self.pro_plus_monthly),
-            ("pro_plus", "annual") => Some(self.pro_plus_annual),
             ("premium", "monthly") => Some(self.premium_monthly),
             ("premium", "annual") => Some(self.premium_annual),
             _ => None,
         }
     }
 
-    pub fn list_descriptors(&self) -> Vec<OnchainPlanDescriptor> {
+    pub fn list_descriptors(&self) -> Vec<PlanDescriptor> {
         let tiers = [
+            ("basic", self.basic_monthly, self.basic_annual),
             ("pro", self.pro_monthly, self.pro_annual),
-            ("pro_plus", self.pro_plus_monthly, self.pro_plus_annual),
             ("premium", self.premium_monthly, self.premium_annual),
         ];
         let mut out = Vec::with_capacity(6);
         for (key, monthly, annual) in tiers {
-            out.push(OnchainPlanDescriptor {
+            out.push(PlanDescriptor {
                 key: key.to_string(),
                 label: label_for_plan_key(key).to_string(),
                 billing_cycle: "monthly".to_string(),
@@ -99,7 +88,7 @@ impl OnchainPriceTable {
                 savings_label: None,
             });
             let save = (monthly * 12.0 - annual).max(0.0);
-            out.push(OnchainPlanDescriptor {
+            out.push(PlanDescriptor {
                 key: key.to_string(),
                 label: label_for_plan_key(key).to_string(),
                 billing_cycle: "annual".to_string(),
@@ -124,33 +113,24 @@ fn parse_env_f64(name: &str, default: f64) -> f64 {
         .unwrap_or(default)
 }
 
-/// `keccak256` over UTF-8 bytes of the hyphenated UUID string (matches typical ethers `solidityPackedKeccak256` on the same string).
-/// Use this value as `bytes32` when calling `upsertBilling` on the payment contract.
-pub fn subscription_id_bytes32_hex(subscription_uuid: &Uuid) -> String {
-    let s = subscription_uuid.to_string();
-    let mut out = [0u8; 32];
-    let mut hasher = Keccak::v256();
-    hasher.update(s.as_bytes());
-    hasher.finalize(&mut out);
-    format!("0x{}", hex::encode(out))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn normalize_accepts_ui_aliases() {
+        assert_eq!(normalize_plan("BASIC").as_deref(), Some("basic"));
+        assert_eq!(normalize_plan("Basic Plan").as_deref(), Some("basic"));
         assert_eq!(normalize_plan("PRO").as_deref(), Some("pro"));
-        assert_eq!(normalize_plan("PRO_PLUS").as_deref(), Some("pro_plus"));
-        assert_eq!(normalize_plan("Pro Plan").as_deref(), Some("pro"));
-        assert_eq!(normalize_plan("pro-plus").as_deref(), Some("pro_plus"));
+        assert_eq!(normalize_plan("PRO Plan").as_deref(), Some("pro"));
+        assert_eq!(normalize_plan("PREMIUM").as_deref(), Some("premium"));
+        assert_eq!(normalize_plan("pro_plus").as_deref(), Some("pro"));
     }
 
     #[test]
     fn price_table_defaults() {
-        let t = OnchainPriceTable::from_env_or_default();
+        let t = SubscriptionPriceTable::from_env_or_default();
         assert!((t.pro_monthly - 30.0).abs() < f64::EPSILON);
-        assert!((t.price_usd("pro", "annual").unwrap() - 300.0).abs() < f64::EPSILON);
+        assert!((t.price_usd("basic", "monthly").unwrap() - 15.0).abs() < f64::EPSILON);
     }
 }

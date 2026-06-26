@@ -10,9 +10,9 @@ pub struct UpsertSubscriptionInput<'a> {
     pub plan: &'a str,
     pub billing_cycle: &'a str,
     pub status: &'a str,
-    pub stripe_customer_id: Option<&'a str>,
-    pub stripe_subscription_id: Option<&'a str>,
-    pub stripe_price_id: Option<&'a str>,
+    pub boomfi_customer_id: Option<&'a str>,
+    pub boomfi_subscription_id: Option<&'a str>,
+    pub boomfi_plan_id: Option<&'a str>,
     pub checkout_session_id: Option<&'a str>,
     pub current_period_end_unix: Option<i64>,
     pub cancel_at_period_end: bool,
@@ -39,24 +39,24 @@ impl SubscriptionRepository {
             .await
     }
 
-    pub async fn get_by_customer_id(
+    pub async fn get_by_boomfi_customer_id(
         pool: &DbPool,
         customer_id: &str,
     ) -> Result<Option<UserSubscription>, Error> {
         sqlx::query_as::<_, UserSubscription>(
-            "SELECT * FROM user_subscriptions WHERE stripe_customer_id = $1",
+            "SELECT * FROM user_subscriptions WHERE boomfi_customer_id = $1",
         )
         .bind(customer_id)
         .fetch_optional(pool)
         .await
     }
 
-    pub async fn get_by_subscription_id(
+    pub async fn get_by_boomfi_subscription_id(
         pool: &DbPool,
         subscription_id: &str,
     ) -> Result<Option<UserSubscription>, Error> {
         sqlx::query_as::<_, UserSubscription>(
-            "SELECT * FROM user_subscriptions WHERE stripe_subscription_id = $1",
+            "SELECT * FROM user_subscriptions WHERE boomfi_subscription_id = $1",
         )
         .bind(subscription_id)
         .fetch_optional(pool)
@@ -74,9 +74,9 @@ impl SubscriptionRepository {
                 plan,
                 billing_cycle,
                 status,
-                stripe_customer_id,
-                stripe_subscription_id,
-                stripe_price_id,
+                boomfi_customer_id,
+                boomfi_subscription_id,
+                boomfi_plan_id,
                 checkout_session_id,
                 current_period_end,
                 cancel_at_period_end,
@@ -90,9 +90,9 @@ impl SubscriptionRepository {
                 plan = EXCLUDED.plan,
                 billing_cycle = EXCLUDED.billing_cycle,
                 status = EXCLUDED.status,
-                stripe_customer_id = COALESCE(EXCLUDED.stripe_customer_id, user_subscriptions.stripe_customer_id),
-                stripe_subscription_id = COALESCE(EXCLUDED.stripe_subscription_id, user_subscriptions.stripe_subscription_id),
-                stripe_price_id = COALESCE(EXCLUDED.stripe_price_id, user_subscriptions.stripe_price_id),
+                boomfi_customer_id = COALESCE(EXCLUDED.boomfi_customer_id, user_subscriptions.boomfi_customer_id),
+                boomfi_subscription_id = COALESCE(EXCLUDED.boomfi_subscription_id, user_subscriptions.boomfi_subscription_id),
+                boomfi_plan_id = COALESCE(EXCLUDED.boomfi_plan_id, user_subscriptions.boomfi_plan_id),
                 checkout_session_id = COALESCE(EXCLUDED.checkout_session_id, user_subscriptions.checkout_session_id),
                 current_period_end = COALESCE(EXCLUDED.current_period_end, user_subscriptions.current_period_end),
                 cancel_at_period_end = EXCLUDED.cancel_at_period_end,
@@ -104,9 +104,9 @@ impl SubscriptionRepository {
         .bind(input.plan)
         .bind(input.billing_cycle)
         .bind(input.status)
-        .bind(input.stripe_customer_id)
-        .bind(input.stripe_subscription_id)
-        .bind(input.stripe_price_id)
+        .bind(input.boomfi_customer_id)
+        .bind(input.boomfi_subscription_id)
+        .bind(input.boomfi_plan_id)
         .bind(input.checkout_session_id)
         .bind(input.current_period_end_unix)
         .bind(input.cancel_at_period_end)

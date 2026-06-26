@@ -10,9 +10,9 @@ pub struct UserSubscription {
     pub plan: String,
     pub billing_cycle: String,
     pub status: String,
-    pub stripe_customer_id: Option<String>,
-    pub stripe_subscription_id: Option<String>,
-    pub stripe_price_id: Option<String>,
+    pub boomfi_customer_id: Option<String>,
+    pub boomfi_subscription_id: Option<String>,
+    pub boomfi_plan_id: Option<String>,
     pub checkout_session_id: Option<String>,
     pub current_period_end: Option<DateTime<Utc>>,
     pub cancel_at_period_end: bool,
@@ -25,7 +25,10 @@ pub struct PlanDescriptor {
     pub key: String,
     pub label: String,
     pub billing_cycle: String,
-    pub stripe_price_id: String,
+    pub price_usd: f64,
+    pub currency: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub savings_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

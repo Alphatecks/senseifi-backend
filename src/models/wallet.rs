@@ -389,34 +389,6 @@ pub const ALLOWED_WALLET_TYPES: &[&str] = ALLOWED_EVM_WALLET_TYPES;
 /// Solana mainnet chain_id convention (EIP-155-style label used in dashboard).
 pub const SOLANA_MAINNET_CHAIN_ID: i64 = 101;
 
-/// Base mainnet (onchain USDC billing).
-pub const BASE_MAINNET_CHAIN_ID: i32 = 8453;
-
-/// Base Sepolia testnet (onchain USDC billing in dev).
-pub const BASE_SEPOLIA_CHAIN_ID: i32 = 84532;
-
-/// Configured onchain billing chain (`ONCHAIN_BASE_CHAIN_ID`, default Base mainnet).
-pub fn onchain_billing_chain_id() -> i32 {
-    std::env::var("ONCHAIN_BASE_CHAIN_ID")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .unwrap_or(BASE_MAINNET_CHAIN_ID)
-}
-
-/// Human-readable network for onchain billing UI.
-pub fn onchain_billing_network_label(chain_id: i32) -> &'static str {
-    match chain_id {
-        BASE_SEPOLIA_CHAIN_ID => "Base Sepolia",
-        BASE_MAINNET_CHAIN_ID => "Base",
-        _ => "Base",
-    }
-}
-
-/// Whether this connected wallet can sign USDC subscription charges on Base.
-pub fn wallet_eligible_for_onchain_billing(_chain_id: i64, address: &str) -> bool {
-    is_valid_eth_address(address)
-}
-
 /// Sentinel `contract_address` for native SOL rows in `wallet_assets`.
 pub const SOLANA_NATIVE_CONTRACT: &str = "native";
 
@@ -667,8 +639,6 @@ pub struct ConnectedWalletItem {
     pub network: Option<String>,
     pub network_label: String,
     pub connected_at: DateTime<Utc>,
-    /// True when this wallet can pay USDC subscriptions on Base (EVM `0x` only).
-    pub eligible_for_onchain_billing: bool,
 }
 
 /// Dashboard identity for a connected wallet: random user_id (API), display name, "User N" number.

@@ -2,7 +2,7 @@ use crate::db::DbPool;
 use crate::models::wallet::{
     canonical_eth_address, is_valid_wallet_address, normalize_solana_network,
     resolve_connect_chain_family, wallet_chain_family, wallet_display_name,
-    wallet_eligible_for_onchain_billing, wallet_network_label, ConnectWalletRequest,
+    wallet_network_label, ConnectWalletRequest,
     ChainFamily, ConnectedWalletItem, WalletResponse, WalletStatusResponse,
     SOLANA_MAINNET_CHAIN_ID,
 };
@@ -183,6 +183,5 @@ fn wallet_to_connected_item(w: crate::models::wallet::Wallet) -> ConnectedWallet
         network: w.network.clone(),
         network_label,
         connected_at: w.connected_at,
-        eligible_for_onchain_billing: wallet_eligible_for_onchain_billing(w.chain_id, &w.address),
     }
 }

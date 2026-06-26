@@ -32,42 +32,32 @@
 - `GET /api/hello` — Returns a message from the repository layer.
 - Wallet: `POST /api/wallets/connect`, `GET/DELETE /api/wallets/:address`, `GET /api/wallets/:address/status`, `GET /api/wallets/:address/age?chain_id=56` (first on-chain activity via Etherscan V2; needs `ETHERSCAN_API_KEY`).
 
-## Stripe Subscriptions
+## BoomFi Subscriptions
 
-This backend includes Stripe subscription flows for three plans:
-- `pro`
-- `pro_plus` (alias accepted in request: `pro+`)
-- `premium`
+Paid plans use **BoomFi** crypto checkout (monthly/annual lump charges). See [docs/BOOMFI_BILLING.md](docs/BOOMFI_BILLING.md).
 
-Each plan supports:
-- `monthly`
-- `annual`
+Plans: `basic`, `pro`, `premium` — each with `monthly` or `annual`.
 
-Required env vars:
-- `STRIPE_SECRET_KEY`
-- `STRIPE_WEBHOOK_SECRET`
-- `STRIPE_PRICE_PRO_MONTHLY`
-- `STRIPE_PRICE_PRO_ANNUAL`
-- `STRIPE_PRICE_PRO_PLUS_MONTHLY`
-- `STRIPE_PRICE_PRO_PLUS_ANNUAL`
-- `STRIPE_PRICE_PREMIUM_MONTHLY`
-- `STRIPE_PRICE_PREMIUM_ANNUAL`
-- `STRIPE_SUCCESS_URL`
-- `STRIPE_CANCEL_URL`
-- `STRIPE_BILLING_PORTAL_RETURN_URL`
+Required env vars (see `.env.example`):
+
+- `BOOMFI_ORG_ID`
+- `BOOMFI_WEBHOOK_PUBLIC_KEY`
+- `BOOMFI_PAYLINK_*` (one URL per plan SKU)
+- `BOOMFI_SUCCESS_URL`, `BOOMFI_CANCEL_URL`, `BOOMFI_SUBSCRIPTION_PORTAL_URL`
 
 Endpoints:
-- `GET /api/subscriptions/plans` — Returns configured plan keys and Stripe price IDs.
-- `GET /api/subscriptions/status?user_id=<id>` — Returns current subscription state for a dashboard user.
-- `POST /api/subscriptions/checkout` — Creates Stripe Checkout URL.
-- `POST /api/subscriptions/portal` — Creates Stripe Billing Portal URL.
-- `POST /api/subscriptions/webhook` — Stripe webhook endpoint (expects `stripe-signature` header).
+
+- `GET /api/subscriptions/plans` — USD prices for each SKU
+- `GET /api/subscriptions/status?user_id=<id>` — Current subscription state
+- `POST /api/subscriptions/checkout` — Returns BoomFi checkout URL
+- `POST /api/subscriptions/portal` — Returns BoomFi subscription management URL
+- `POST /api/subscriptions/webhook` — BoomFi webhook (`X-BoomFi-Timestamp`, `X-BoomFi-Signature`)
 
 Checkout body example:
 ```json
 {
   "user_id": "fetrtwgebejhssns",
-  "plan": "pro_plus",
+  "plan": "pro",
   "billing_cycle": "annual"
 }
 ```
